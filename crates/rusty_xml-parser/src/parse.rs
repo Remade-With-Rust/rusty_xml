@@ -313,10 +313,27 @@ impl<'a> Parser<'a> {
         if rest[0] == b'\r' {
             return Ok(Some('\n'));
         }
-        let s = std::str::from_utf8(rest).map_err(|_| {
-            XmlError::new(XML_ERR_INVALID_CHAR, "Invalid UTF-8", self.line, self.col)
-        })?;
-        Ok(s.chars().next())
+        if rest[0] < 0x80 {
+            return Ok(Some(rest[0] as char));
+        }
+        // A UTF-8 scalar is at most 4 bytes, so the leading one is always complete
+        // within the first 4. Validating only those keeps this O(1); validating the
+        // whole tail made a parse O(n^2) in the document length.
+        let head = &rest[..rest.len().min(4)];
+        match std::str::from_utf8(head) {
+            Ok(s) => Ok(s.chars().next()),
+            // The leading scalar decoded; the error belongs to a later one, which
+            // this call is not responsible for reporting.
+            Err(e) if e.valid_up_to() > 0 => Ok(std::str::from_utf8(&head[..e.valid_up_to()])
+                .ok()
+                .and_then(|s| s.chars().next())),
+            Err(_) => Err(XmlError::new(
+                XML_ERR_INVALID_CHAR,
+                "Invalid UTF-8",
+                self.line,
+                self.col,
+            )),
+        }
     }
 
     fn bump_char(&mut self) -> Result<Option<char>, XmlError> {

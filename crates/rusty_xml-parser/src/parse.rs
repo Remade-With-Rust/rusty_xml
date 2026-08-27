@@ -39,17 +39,37 @@ pub const XML_PARSE_SKIP_IDS: i32 = 1 << 27;
 const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
 const XMLNS_NS: &str = "http://www.w3.org/2000/xmlns/";
 
-const MAX_DEPTH: u32 = 256;
-
-/// The ceiling `XML_PARSE_HUGE` raises the nesting limit to -- it does not
-/// remove it. The element parser is recursive descent and costs roughly 1.4 KB
-/// of stack per level (measured: overflow between 700 and 800 on a 1 MB stack),
-/// and a stack overflow ABORTS THE PROCESS rather than returning an error.
-/// HUGE is meant to lift a policy limit, not to hand the caller a crash.
+/// Element nesting limit.
 ///
-/// An embedder running on a stack much smaller than 1 MB should not set HUGE;
-/// making this unbounded needs an iterative parser, not a bigger number.
-const MAX_DEPTH_HUGE: u32 = 512;
+/// This is 64 and not something larger because the element parser is recursive
+/// descent, and its stack cost per level differs by roughly **17x** between
+/// build profiles: about 1.4 KB in release but about 22 KB in a debug build.
+/// A cap of 256 was therefore never stack-safe in debug -- a 95-level document
+/// aborted the process, and a stack overflow cannot be caught. CI found this,
+/// because CI runs `cargo test` in debug and the author had only ever measured
+/// in release.
+///
+/// 64 is safe in both profiles with margin, and is far beyond real markup: the
+/// documents in `corpora/` nest 0 to 3 levels.
+///
+/// The honest fix is an iterative parser. Until that exists, no single constant
+/// is safe on every stack in every profile, so this one is chosen for the worst
+/// case rather than the best.
+const MAX_DEPTH: u32 = 64;
+
+/// `XML_PARSE_HUGE` deliberately does **not** lift the nesting limit.
+///
+/// A depth cap only protects you when the cap is BELOW the stack limit. The
+/// element parser is recursive descent, and a debug build overflows around 95
+/// levels, so any cap above that is not a limit at all -- the process aborts
+/// before the check fires, and a stack overflow cannot be caught. Raising the
+/// cap to 256 or 512 therefore did not give callers deeper documents, it gave
+/// them a crash instead of an error.
+///
+/// HUGE still lifts the other limits it guards (name length, text length).
+/// Genuinely deeper nesting requires an iterative parser; that is the fix, and
+/// a larger constant is not a substitute for it.
+
 const MAX_NAME: usize = 50_000;
 const MAX_TEXT: usize = 10_000_000;
 
@@ -933,12 +953,7 @@ impl<'a> Parser<'a> {
 
     fn parse_element(&mut self, parent: NodeId) -> Result<(), XmlError> {
         self.depth += 1;
-        let cap = if (self.options & XML_PARSE_HUGE) != 0 {
-            MAX_DEPTH_HUGE
-        } else {
-            MAX_DEPTH
-        };
-        if self.depth > cap {
+        if self.depth > MAX_DEPTH {
             return Err(self.err(XML_ERR_INTERNAL_ERROR, "Excessive element nesting"));
         }
         self.expect_byte(b'<', XML_ERR_LT_REQUIRED, "'<' required")?;

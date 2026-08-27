@@ -20,7 +20,7 @@ use std::process;
 
 fn usage() -> ! {
     eprintln!(
-        "Usage: rxmlint [--noout] [--sax] [--stream] [--format] [--xpath EXPR] [--c14n] [--exc-c14n] [--html] [--push] [--dtdvalid] [--relaxng FILE] [--schema FILE] [--schematron FILE] [--repeat] [file|-]\n  --repeat : first sets 100 inner parses, each extra --repeat multiplies by 10 (xmllint; rxmlint-repeat-flag-v1)"
+        "Usage: rxmlint [--noout] [--recover] [--sax] [--stream] [--format] [--xpath EXPR] [--c14n] [--exc-c14n] [--html] [--push] [--dtdvalid] [--relaxng FILE] [--schema FILE] [--schematron FILE] [--repeat] [file|-]\n  --repeat : first sets 100 inner parses, each extra --repeat multiplies by 10 (xmllint; rxmlint-repeat-flag-v1)"
     );
     process::exit(1);
 }
@@ -36,6 +36,7 @@ fn main() {
     let mut bench_counts = false;
     let mut html = false;
     let mut push = false;
+    let mut recover = false;
     let mut c14n = false;
     let mut exc_c14n = false;
     let mut dtdvalid = false;
@@ -86,6 +87,7 @@ fn main() {
                     args.remove(0);
                 }
             }
+            "--recover" => recover = true,
             "--repeat" => {
                 if repeat > 1 {
                     repeat = repeat.saturating_mul(10);
@@ -108,7 +110,12 @@ fn main() {
         files.push("-".into());
     }
 
-    let options = default_parse_options();
+    let options = default_parse_options()
+        | if recover {
+            rusty_xml::XML_PARSE_RECOVER
+        } else {
+            0
+        };
     let mut save_opts = 0;
     if format {
         save_opts |= XML_SAVE_FORMAT;

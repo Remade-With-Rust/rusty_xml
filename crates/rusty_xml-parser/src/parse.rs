@@ -395,6 +395,7 @@ fn fresh_parser<'a>(
         stack: Vec::new(),
         char_buf: String::new(),
         no_tree: (options & XML_PARSE_NO_TREE) != 0,
+        recover: (options & XML_PARSE_RECOVER) != 0,
         scratch_raw: Vec::new(),
         scratch_sax: Vec::new(),
         started: false,
@@ -514,6 +515,7 @@ struct Parser<'a> {
     scratch_sax: Vec<SaxAttr>,
     started: bool,
     no_tree: bool,
+    recover: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -1010,6 +1012,13 @@ impl<'a> Parser<'a> {
                         return Ok(repl.clone());
                     }
                 }
+                if self.recover {
+                    // Recovering: keep the reference as written rather than
+                    // losing the whole document over one unknown entity.
+                    self.sax
+                        .error(&format!("Entity '{name}' not defined"));
+                    return Ok(format!("&{name};"));
+                }
                 Err(self.err(
                     XML_ERR_UNDECLARED_ENTITY,
                     format!("Entity '{name}' not defined"),
@@ -1230,9 +1239,18 @@ impl<'a> Parser<'a> {
 
         let elem_uri = self.lookup_ns(prefix);
         if prefix.is_some() && elem_uri.is_none() {
-            return Err(self.err(
-                XML_NS_ERR_UNDEFINED_NAMESPACE,
-                format!("Undefined namespace prefix {}", prefix.unwrap()),
+            // Scraped markup is full of prefixes nobody declared. libxml2
+            // reports this and carries on; refusing the document loses all of
+            // its text over a namespace nicety.
+            if !self.recover {
+                return Err(self.err(
+                    XML_NS_ERR_UNDEFINED_NAMESPACE,
+                    format!("Undefined namespace prefix {}", prefix.unwrap()),
+                ));
+            }
+            self.sax.error(&format!(
+                "Undefined namespace prefix {}",
+                prefix.unwrap_or_default()
             ));
         }
 
@@ -1269,10 +1287,10 @@ impl<'a> Parser<'a> {
             }
             let uri = if ap_owned.is_some() {
                 let u = self.lookup_ns(ap_owned.as_deref());
-                if u.is_none() {
+                if u.is_none() && !self.recover {
                     return Err(self.err(
                         XML_NS_ERR_UNDEFINED_NAMESPACE,
-                        format!("Undefined namespace prefix {}", ap_owned.unwrap()),
+                        format!("Undefined namespace prefix {}", ap_owned.clone().unwrap()),
                     ));
                 }
                 u
@@ -1452,6 +1470,7 @@ impl<'a> Parser<'a> {
             stack: st.stack,
             char_buf: st.char_buf,
             no_tree: (options & XML_PARSE_NO_TREE) != 0,
+            recover: (options & XML_PARSE_RECOVER) != 0,
             scratch_raw: Vec::new(),
             scratch_sax: Vec::new(),
             started: true,
@@ -1790,6 +1809,7 @@ fn parse_utf8(
         stack: Vec::new(),
         char_buf: String::new(),
         no_tree: (options & XML_PARSE_NO_TREE) != 0,
+        recover: (options & XML_PARSE_RECOVER) != 0,
         scratch_raw: Vec::new(),
         scratch_sax: Vec::new(),
         started: false,
@@ -1809,6 +1829,12 @@ fn parse_utf8(
         Err(e) => {
             if p.started {
                 p.sax.end_document();
+            }
+            if (options & XML_PARSE_RECOVER) != 0 {
+                // Hand back everything parsed before the failure. One bad byte
+                // in a large document used to cost the caller all of it.
+                p.sax.error(&e.message);
+                return Ok(p.doc);
             }
             Err(e)
         }

@@ -1026,3 +1026,49 @@ fn xml_entity_rules_are_unchanged_by_the_html_table() {
         "an HTML name is not an XML entity"
     );
 }
+
+/// XML_PARSE_RECOVER was a declared constant that nothing read, so one bad byte
+/// anywhere cost the caller the entire document. That is the wrong trade for a
+/// converter: real-world markup is broken, and the text is still worth having.
+/// Verified against `xmllint --recover`, which produces the same trees.
+#[test]
+fn recover_yields_a_partial_document_instead_of_nothing() {
+    let strict = default_parse_options();
+    let recover = strict | rusty_xml::XML_PARSE_RECOVER;
+    let text_of = |d: &XmlDoc| {
+        let mut t = String::new();
+        for i in 0..d.len() {
+            let id = rusty_xml::NodeId(i as u32);
+            if d.kind(id) == rusty_xml::NodeKind::Text {
+                t.push_str(&d.node(id).content);
+            }
+        }
+        t
+    };
+
+    // Truncated mid-document: the text before the break must survive.
+    let trunc = b"<d><e>text that should survive";
+    assert!(xml_read_memory(trunc, None, None, strict).is_err());
+    let d = xml_read_memory(trunc, None, None, recover).expect("recover yields a tree");
+    assert!(text_of(&d).contains("text that should survive"));
+
+    // An undeclared namespace prefix -- endemic in scraped markup.
+    let ns = b"<r><a:e>body</a:e></r>";
+    assert!(xml_read_memory(ns, None, None, strict).is_err());
+    let d = xml_read_memory(ns, None, None, recover).expect("recover yields a tree");
+    assert!(text_of(&d).contains("body"));
+
+    // An entity we cannot resolve keeps its reference rather than killing the parse.
+    let ent = b"<?xml version=\"1.0\"?>\n<!DOCTYPE d [<!ENTITY c SYSTEM \"x.xml\">]>\n<d>before &c; after</d>";
+    assert!(xml_read_memory(ent, None, None, strict).is_err());
+    let d = xml_read_memory(ent, None, None, recover).expect("recover yields a tree");
+    let t = text_of(&d);
+    assert!(t.contains("before") && t.contains("after"), "surrounding text kept: {t:?}");
+
+    // Recovery must not change a well-formed parse.
+    let good = b"<r a=\"1\"><b>t</b><!--c--></r>";
+    assert_eq!(
+        xml_save_doc(&xml_read_memory(good, None, None, strict).unwrap(), 0),
+        xml_save_doc(&xml_read_memory(good, None, None, recover).unwrap(), 0),
+    );
+}

@@ -252,6 +252,12 @@ impl<'a> HtmlParser<'a> {
             self.ensure_html()
         } else if matches!(name.as_str(), "title" | "meta" | "link" | "style" | "base") {
             self.ensure_head()
+        } else if !self.stack.is_empty() {
+            // The open element, not the body. This branch used to return
+            // ensure_body() unconditionally, so NOTHING nested: fifty nested
+            // <div> came out as fifty empty siblings, and structure-aware
+            // consumers saw a flat document.
+            self.parent()
         } else {
             self.ensure_body()
         };

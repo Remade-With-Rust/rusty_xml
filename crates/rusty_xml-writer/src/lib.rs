@@ -62,7 +62,53 @@ fn write_indent(out: &mut String, level: i32) {
     }
 }
 
+/// One unit of serialization work, replacing recursion into children.
+enum Step {
+    /// Emit this node, scheduling its children and its closing tag.
+    Open(NodeId, i32, bool),
+    /// Emit the closing tag of an element whose children are done.
+    Close(NodeId, i32, bool),
+    Indent(i32),
+    Newline,
+}
+
+/// Serialize a subtree.
+///
+/// Driven by an explicit stack rather than recursion. The recursive form cost a
+/// frame per level of document nesting, so a 2000-deep tree -- well inside the
+/// parser's own limit of 5000 -- overflowed the stack while being SAVED.
+/// Accepting a document the writer cannot serialize just moves the cliff.
 fn write_node(doc: &XmlDoc, id: NodeId, out: &mut String, opts: i32, level: i32, format: bool) {
+    let mut stack: Vec<Step> = vec![Step::Open(id, level, format)];
+    while let Some(step) = stack.pop() {
+        match step {
+            Step::Indent(l) => write_indent(out, l),
+            Step::Newline => out.push('\n'),
+            Step::Close(id, level, child_format) => {
+                if child_format {
+                    write_indent(out, level);
+                }
+                out.push_str("</");
+                out.push_str(&qname(doc.prefix(id), doc.name(id)));
+                out.push('>');
+            }
+            Step::Open(id, level, format) => {
+                write_one(doc, id, out, opts, level, format, &mut stack)
+            }
+        }
+    }
+}
+
+/// Emit a single node, pushing whatever work its children require.
+fn write_one(
+    doc: &XmlDoc,
+    id: NodeId,
+    out: &mut String,
+    opts: i32,
+    level: i32,
+    format: bool,
+    stack: &mut Vec<Step>,
+) {
     match doc.kind(id) {
         NodeKind::Element => {
             out.push('<');
@@ -117,23 +163,20 @@ fn write_node(doc: &XmlDoc, id: NodeId, out: &mut String, opts: i32, level: i32,
             if child_format {
                 out.push('\n');
             }
-            let mut c = doc.first_child(id);
+            // Pushed in reverse so they pop in document order. Walking the
+            // children backwards avoids collecting them into a Vec per element.
+            stack.push(Step::Close(id, level, child_format));
+            let mut c = doc.last_child(id);
             while let Some(ch) = c {
                 if child_format {
-                    write_indent(out, level + 1);
+                    stack.push(Step::Newline);
                 }
-                write_node(doc, ch, out, opts, level + 1, child_format);
+                stack.push(Step::Open(ch, level + 1, child_format));
                 if child_format {
-                    out.push('\n');
+                    stack.push(Step::Indent(level + 1));
                 }
-                c = doc.next_sibling(ch);
+                c = doc.prev_sibling(ch);
             }
-            if child_format {
-                write_indent(out, level);
-            }
-            out.push_str("</");
-            out.push_str(&qname(doc.prefix(id), doc.name(id)));
-            out.push('>');
         }
         NodeKind::Text => {
             out.push_str(&escape_text(

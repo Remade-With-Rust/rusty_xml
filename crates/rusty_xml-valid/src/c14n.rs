@@ -18,7 +18,7 @@ pub fn xml_c14n_doc_dump_memory(
     with_comments: bool,
 ) -> Result<Vec<u8>, String> {
     let mut out = String::new();
-    emit_node(doc, NodeId::DOCUMENT, exclusive, with_comments, &[], &[], &mut out);
+    emit_node(doc, NodeId::DOCUMENT, exclusive, with_comments, &[], &[], &mut out, 0)?;
     Ok(out.into_bytes())
 }
 
@@ -32,6 +32,19 @@ pub fn xml_exc_c14n_1_0(doc: &XmlDoc) -> Result<Vec<u8>, String> {
     xml_c14n_doc_dump_memory(doc, true, false)
 }
 
+/// Nesting limit for canonicalization.
+///
+/// `emit_node` recurses into children, carrying the inherited namespace
+/// rendering with it, so depth costs stack: about 500 bytes a level, and a
+/// 2000-deep document ABORTED THE PROCESS while being canonicalized even though
+/// the parser accepts 5000. A signature path must not be a crash path.
+///
+/// 400 is far beyond signed XML, which is shallow in practice. The real fix is
+/// to drive this from an explicit stack the way the parser and the writer now
+/// are; a constant is a bound, not a substitute, and this one is recorded as
+/// such.
+const MAX_C14N_DEPTH: u32 = 400;
+
 fn emit_node(
     doc: &XmlDoc,
     id: NodeId,
@@ -40,7 +53,13 @@ fn emit_node(
     vis_prefixes: &[&str],
     rendered: &[(String, String)],
     out: &mut String,
-) {
+    depth: u32,
+) -> Result<(), String> {
+    if depth > MAX_C14N_DEPTH {
+        return Err(format!(
+            "document nested deeper than {MAX_C14N_DEPTH} for canonicalization"
+        ));
+    }
     match doc.kind(id) {
         NodeKind::Document | NodeKind::HtmlDocument => {
             let mut kids = Vec::new();
@@ -56,7 +75,7 @@ fn emit_node(
                 match doc.kind(*kid) {
                     NodeKind::Element => {
                         before_element = false;
-                        emit_node(doc, *kid, exclusive, with_comments, vis_prefixes, rendered, out);
+                        emit_node(doc, *kid, exclusive, with_comments, vis_prefixes, rendered, out, depth + 1)?;
                         after_element = true;
                     }
                     NodeKind::Pi => {
@@ -83,13 +102,16 @@ fn emit_node(
                 }
             }
         }
-        NodeKind::Element => emit_element(doc, id, exclusive, with_comments, vis_prefixes, rendered, out),
+        NodeKind::Element => {
+            emit_element(doc, id, exclusive, with_comments, vis_prefixes, rendered, out, depth)?
+        }
         NodeKind::Text => out.push_str(&escape_text(doc.content(id))),
         NodeKind::CData => out.push_str(&escape_text(doc.content(id))),
         NodeKind::Pi => emit_pi(doc, id, out),
         NodeKind::Comment if with_comments => emit_comment(doc, id, out),
         _ => {}
     }
+    Ok(())
 }
 
 fn emit_pi(doc: &XmlDoc, id: NodeId, out: &mut String) {
@@ -117,7 +139,8 @@ fn emit_element(
     vis_prefixes: &[&str],
     rendered: &[(String, String)],
     out: &mut String,
-) {
+    depth: u32,
+) -> Result<(), String> {
     let qn = qname(doc.prefix(id), doc.name(id));
     out.push('<');
     out.push_str(&qn);
@@ -165,12 +188,13 @@ fn emit_element(
     out.push('>');
     let mut c = doc.first_child(id);
     while let Some(x) = c {
-        emit_node(doc, x, exclusive, with_comments, vis_prefixes, &child_rendered, out);
+        emit_node(doc, x, exclusive, with_comments, vis_prefixes, &child_rendered, out, depth + 1)?;
         c = doc.next_sibling(x);
     }
     out.push_str("</");
     out.push_str(&qn);
     out.push('>');
+    Ok(())
 }
 
 fn qname(prefix: Option<&str>, local: &str) -> String {

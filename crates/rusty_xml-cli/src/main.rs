@@ -115,7 +115,14 @@ fn main() {
             rusty_xml::XML_PARSE_RECOVER
         } else {
             0
-        };
+        }
+        // --format implies noblanks, as it does in xmllint:
+        //     noblanks++; format = 1; xmlKeepBlanksDefault(0);
+        // The writer turns formatting OFF for any element with a text child,
+        // so without this the blank text between tags survives, formatting is
+        // suppressed, and the source indentation is echoed back verbatim --
+        // 1699 lines of it differed from C on the main corpus.
+        | if format { rusty_xml::XML_PARSE_NOBLANKS } else { 0 };
     let mut save_opts = 0;
     if format {
         save_opts |= XML_SAVE_FORMAT;

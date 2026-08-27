@@ -1201,3 +1201,109 @@ fn streaming_handles_encodings_and_split_characters() {
         }
     }
 }
+
+/// A deep tree must not take the process down on ANY path.
+///
+/// Three of these were live aborts. The HTML parser silently never nested, so
+/// no deep HTML tree existed to crash on; fixing that reintroduced deep trees
+/// and exposed a recursive `write_node`, which overflowed saving a 2000-deep
+/// document -- inside our own MAX_DEPTH of 5000. Canonicalization recursed too.
+/// The writer is now iterative; c14n is bounded and reports instead of dying.
+#[test]
+fn deep_tree_never_aborts_on_any_path() {
+    let deep = |n: usize| -> Vec<u8> {
+        format!("<r>{}t{}</r>", "<a x='1'>".repeat(n), "</a>".repeat(n)).into_bytes()
+    };
+    // Right under the parser's own limit: whatever it accepts, it must handle.
+    let d = deep(4_990);
+    let doc = xml_read_memory(&d, None, None, default_parse_options()).expect("parses");
+    assert!(!xml_save_doc(&doc, 0).is_empty());
+    assert!(!xml_save_doc(&doc, 1).is_empty(), "--format must not overflow either");
+    // c14n is bounded rather than iterative: it must ERROR, not abort.
+    assert!(rusty_xml::xml_c14n_doc_dump_memory(&doc, false, true).is_err());
+    assert!(rusty_xml::xml_c14n_doc_dump_memory(&doc, true, true).is_err());
+    drop(doc); // recursive Drop would land here
+
+    // HTML has no depth limit of its own; saving it must still be safe.
+    let h = format!("<html><body>{}x{}</body></html>", "<div>".repeat(50_000), "</div>".repeat(50_000));
+    let hdoc = rusty_xml::html_read_memory(h.as_bytes(), None, None, 0).expect("parses");
+    assert!(!xml_save_doc(&hdoc, 0).is_empty());
+}
+
+/// Canonicalization is the XML-DSig path, so the bound must be a clean refusal
+/// with a real message -- and must not move the boundary for ordinary
+/// documents, which are shallow.
+#[test]
+fn c14n_depth_bound_is_a_clean_refusal() {
+    let deep = |n: usize| -> Vec<u8> {
+        format!("<r>{}t{}</r>", "<a>".repeat(n), "</a>".repeat(n)).into_bytes()
+    };
+    // 399 element levels: fine. 400: refused. Both modes, same boundary.
+    for exclusive in [false, true] {
+        let ok = xml_read_memory(&deep(398), None, None, default_parse_options()).unwrap();
+        assert!(rusty_xml::xml_c14n_doc_dump_memory(&ok, exclusive, true).is_ok());
+        let bad = xml_read_memory(&deep(399), None, None, default_parse_options()).unwrap();
+        let e = rusty_xml::xml_c14n_doc_dump_memory(&bad, exclusive, true).unwrap_err();
+        assert!(e.contains("nested deeper"), "unhelpful message: {e}");
+    }
+}
+
+/// The HTML parser used to hand every generic element the body as its parent,
+/// so nothing nested: fifty nested <div> came out as fifty empty siblings and
+/// the tree was 4 deep where C measured 53. Every text node landed in the wrong
+/// place, which is exactly what rag-converter reads.
+#[test]
+fn html_elements_actually_nest() {
+    let depth_of = |doc: &rusty_xml::XmlDoc| -> usize {
+        fn walk(d: &rusty_xml::XmlDoc, id: rusty_xml::NodeId) -> usize {
+            let mut best = 0;
+            let mut c = d.first_child(id);
+            while let Some(x) = c {
+                best = best.max(walk(d, x));
+                c = d.next_sibling(x);
+            }
+            best + 1
+        }
+        walk(doc, rusty_xml::NodeId::DOCUMENT)
+    };
+    let h = format!("<html><body>{}deep{}</body></html>", "<div>".repeat(50), "</div>".repeat(50));
+    let doc = rusty_xml::html_read_memory(h.as_bytes(), None, None, 0).expect("parses");
+    assert!(depth_of(&doc) >= 53, "elements did not nest: depth {}", depth_of(&doc));
+
+    // And the text must be reachable underneath, not stranded at the top.
+    let out = String::from_utf8_lossy(&xml_save_doc(&doc, 0)).to_string();
+    assert!(out.contains("<div><div>"), "no nesting in the output: {}", &out[..out.len().min(200)]);
+    assert!(out.matches("<div>").count() == 50 && out.matches("</div>").count() == 50);
+}
+
+
+/// `--format` must re-indent, not echo the source indentation back.
+///
+/// The writer disables formatting for any element with a text child -- as
+/// libxml2's does -- so pretty-printing only works if the blank text between
+/// tags is dropped at PARSE time. xmllint does that by making --format imply
+/// noblanks; we did not, so an already-indented document came back with its
+/// original spacing and no reformatting at all. On the 300 KB corpus 1699
+/// lines differed from C.
+#[test]
+fn format_reindents_rather_than_echoing_source_whitespace() {
+    let src = b"<r>\n <a>\n  <b>x</b>\n </a>\n</r>";
+    // Source is indented by 1 and 2 spaces; the writer's unit is 2 spaces, so
+    // a real reformat must widen it.
+    let doc = xml_read_memory(
+        src,
+        None,
+        None,
+        default_parse_options() | rusty_xml::XML_PARSE_NOBLANKS,
+    )
+    .expect("parses");
+    let out = String::from_utf8(xml_save_doc(&doc, rusty_xml::XML_SAVE_FORMAT)).unwrap();
+    assert!(out.contains("\n  <a>"), "level 1 not reindented:\n{out}");
+    assert!(out.contains("\n    <b>x</b>"), "level 2 not reindented:\n{out}");
+
+    // Without noblanks the blank text nodes survive and formatting is
+    // suppressed -- that is libxml2's behaviour too, and why the flag matters.
+    let kept = xml_read_memory(src, None, None, default_parse_options()).expect("parses");
+    let out2 = String::from_utf8(xml_save_doc(&kept, rusty_xml::XML_SAVE_FORMAT)).unwrap();
+    assert!(out2.contains("\n <a>"), "blank text should have been preserved:\n{out2}");
+}

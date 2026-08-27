@@ -2,6 +2,11 @@
 
 #![forbid(unsafe_code)]
 
+// The allocator is a property of the deliverable, never of the library. rxmlint
+// ships rusty_alloc; the pin lives in the rusty_xml-alloc seam.
+#[global_allocator]
+static ALLOC: rusty_xml_alloc::Allocator = rusty_xml_alloc::NEW;
+
 use rusty_xml::{
     default_parse_options, html_read_memory, xml_c14n_doc_dump_memory, xml_create_push_parser_ctxt,
     xml_parse_chunk, xml_read_memory, xml_reader_for_memory, xml_relaxng_validate_doc,

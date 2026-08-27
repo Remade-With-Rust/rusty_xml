@@ -7,8 +7,12 @@ repository.workspace = true
 authors.workspace = true
 homepage.workspace = true
 rust-version.workspace = true
-description = "Allocator seam for rusty_xml binaries. Never used by the published library."
-publish = false
+description = "Allocator seam for rusty_xml binaries: pins rusty_alloc. Never used by the published library."
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+rusty_alloc-api = "1"
 
 [lints]
 workspace = true

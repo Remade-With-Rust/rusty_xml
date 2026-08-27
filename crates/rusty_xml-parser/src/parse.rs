@@ -213,6 +213,18 @@ pub struct XmlPushParserCtxt {
     last_error: Option<XmlError>,
 }
 
+impl XmlPushParserCtxt {
+    /// The last error, if the most recent chunk failed to parse.
+    pub fn last_error(&self) -> Option<&XmlError> {
+        self.last_error.as_ref()
+    }
+
+    /// Bytes buffered but not yet parsed.
+    pub fn buffered(&self) -> usize {
+        self.buf.len()
+    }
+}
+
 /// `xmlCreatePushParserCtxt`.
 #[doc(alias = "xmlCreatePushParserCtxt")]
 pub fn xml_create_push_parser_ctxt(
@@ -249,7 +261,16 @@ pub fn xml_parse_chunk(
         ctxt.options,
     ) {
         Ok(doc) => {
-            ctxt.doc = Some(doc.clone());
+            // The tree is RETURNED, not also stored. It used to be cloned into
+            // `ctxt.doc` as well, which cost a push parse 1.85x the memory of
+            // xml_read_memory -- for a copy nothing could read, because the
+            // context has never had a document accessor. The input buffer is
+            // released here too: holding it once the tree exists doubles peak
+            // memory for nothing.
+            ctxt.buf = Vec::new();
+            ctxt.buf.shrink_to_fit();
+            ctxt.last_error = None;
+            ctxt.doc = None;
             Ok(Some(doc))
         }
         Err(e) => {

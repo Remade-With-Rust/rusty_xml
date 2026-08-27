@@ -4,52 +4,32 @@ Status: M0–M6 landed (UTF-8 parse, tree/save/writer/reader, encodings/push/IO/
 
 Source of truth for the C surface: [GNOME/libxml2](https://github.com/GNOME/libxml2) (read-only mirror of [gitlab.gnome.org/GNOME/libxml2](https://gitlab.gnome.org/GNOME/libxml2)). MIT licensed. We reimplement the algorithms. We do not fork, vendor, or link the C.
 
-Part of [Remade With Rust](https://github.com/Remade-With-Rust) by Mata Network. Same contract as `rusty_zstd` / `rusty_h264` / `rusty_alloc`: **same wire protocol and public functions, new code you can actually depend on. No C. No copyleft. No `*-sys`.**
+Part of [Remade With Rust](https://github.com/Remade-With-Rust) by Mata Network. Same contract as the house guidance / `rusty_h264` / the house guidance: **same wire protocol and public functions, new code you can actually depend on. No C. No copyleft. No `*-sys`.**
 
 ---
 
-## Skills loaded for this campaign
+## Method
 
-Confirmed loaded before this plan was written. Every measurement and keep/revert in this repo routes through them.
+Every measurement and keep/revert in this repo follows one discipline, stated here so a
+reader can audit any number without trusting us:
 
-**Codec suite (router first, measurement always):**
+- **A pinned C oracle**, run as an external process, never linked. Version and binary hash
+  in `oracle/PIN`.
+- **Dual-direction gates.** SAX traces compared line-for-line with the oracle, plus a tree
+  diff, plus `parse(write(parse(x)))`.
+- **Byte-identical first.** A speed change that alters output is not a speed change.
+- **Admissible numbers only.** Pinned to one core, High priority, CPU time, arms
+  ABBA-interleaved, a null arm per row, paired win-rate with a z-score, and a method line
+  printed with every figure. A number without its method line is not evidence.
+- **Work-count parity.** Both arms must do the same work, compared as a count, not a time.
+- **Counters before clocks.** A deterministic count of the work removed is immune to a busy
+  machine; the clock confirms the sign.
+- **Revert what does not pay**, and record which kind of revert it was — measured worse, or
+  inside the noise.
 
-| Skill | Role here |
-|---|---|
-| `codec-measurement` | Admissible numbers: pin, CPU time, ABBA, null arm, work-count parity, arm-duration matching, three-probe refutations, method line on every figure |
-| `codec-optimize` | Speed campaign router once the parser is correct. Byte-identical first |
-| `codec-bringup-decoder` | Conformance bring-up: instrumented C oracle, brick-by-brick, never skip a divergence |
-| `codec-bringup-encoder` | Writer / serializer as the inverse of the parser (`parse(write(x))` standing gate) |
-| `codec-analyzer` | Stage profiler + counters before any speed brick |
-| `codec-eliminate-redundancy` | First speed lever (dict intern, charset tables, one-pass name lookup) |
-| `codec-memory-copies` | Tree build / save / reader buffer hops — XML's usual "kernel looks fine, plumbing is the time" |
-| `codec-cache-tiles` | Node layout / sibling locality if the frame-size (here: document-size) sweep proves cache-bound |
-| `codec-vectorize-kernel` | Char-class / UTF-8 / memchr-class scans after auto-vec fails on the `.s` |
-| `codec-asm-kernel` | Last resort only; name why intrinsics lost |
-| `codec-six-whys-unknowns` | When a gap survives three attempts |
-| `rusty-curiosity` / `rusty_curiosity` | A surprising number is a pointer, not a snag |
-| `codec-search-skip-gate` | Not in scope (encoder RD searches) |
-| `codec-content-adaptive-dispatch` | Not in scope unless a later HTML/recovery path sign-flips |
-| `codec-experimental` | Not in scope (we do not change the XML bitstream) |
-| `codec-tune-quality` | Not in scope |
-| `codec-rate-allocation-vs-efficiency` | Not in scope |
-| `codec-symbolic-discovery` | Not in scope |
-| `rusty-fast-transcendentals` | Not in scope (no hot `powf`) |
-
-**House / rusty suite:**
-
-| Skill | Role here |
-|---|---|
-| `rusty-coding-requirements` | Pure Rust, no `iconv`/`zlib-sys`/`libxml2-sys`. Library never declares `#[global_allocator]` |
-| `building-the-new-internet` | Stack, seams, deliverable-vs-library split |
-| `rusty-blazing-fast` | Allocations, interned names, `memchr` before hand-rolled byte loops |
-| `rusty-unsafe-optimizations` | `unsafe` only after the `.s` proves a check survives, behind a safe API |
-| `rusty-memory-model` | Tree ownership: parent/child/sibling without aliasing-XOR-mutation fights |
-| `rusty-async-internals` | Only if a later streaming I/O seam is async (not M1) |
-| `rusty-dev` / `rusty_dev` | Workspace, compile-gate every target including `wasm32-unknown-unknown` |
-| `use-protection-please` | Hardening audit before 1.0 (XXE, entity amplification, fuzz, Miri) |
-
-XML is a **parser**, not a media codec. The codec skills still apply because the method is the same: a pinned C oracle, dual-direction gates, work-count parity, and no speed claim without a method line.
+XML is a **parser**, not a media codec, but the method is the same one we use for codecs: a
+pinned oracle, dual-direction gates, work-count parity, and no speed claim without a method
+line.
 
 ---
 
@@ -124,13 +104,13 @@ For every fixture:
 2. Run our parser with the **same** `xmlParserOption` bits.
 3. Diff the traces line-for-line. First mismatch is the brick. Do not advance.
 
-This is `codec-bringup-decoder`: brick by brick, never trust a matching *final* tree over a wrong *intermediate* event.
+This is the measurement discipline: brick by brick, never trust a matching *final* tree over a wrong *intermediate* event.
 
 **Work-count parity (measurement §4):** both arms must report the same `bytes_consumed`, `element_starts`, `text_nodes`, `attributes`. Divergent counts void the comparison.
 
 ### 3.2 Byte-exact save (the encoder gate)
 
-`parse(write(x))` is **not** enough — a self-consistent writer can still be illegal. Dual gate, same as `codec-bringup-encoder`:
+`parse(write(x))` is **not** enough — a self-consistent writer can still be illegal. Dual gate, same as the measurement discipline:
 
 1. We write with options `O` → C's `xmllint` / `xmlReadMemory` accepts it and the SAX trace matches.
 2. C writes the same tree with the same `xmlSaveOption` bits → our bytes match C's bytes **or** we have a recorded, justified delta (attribute order is the usual one; C14N is the identity that must be byte-exact).
@@ -148,7 +128,7 @@ C14N 1.0 (`c14n.h`) is the standing byte-identity corpus. Non-C14N dump may diff
 | Generated holdout | encodings, DTD internals, billion-laughs, huge names | we reject what C rejects; we also reject amplification C still allows if our default bound is tighter — **record the delta** |
 | Real content | SVG, RSS/Atom, Android manifests, OOXML `[Content_Types].xml`, Maven POM, a Wikipedia dump slice | event-exact + timed (see §7) |
 
-A fixture that never enters the path you changed cannot gate it (`codec-measurement` fixture-coverage law). Count SAX event types per fixture before claiming a brick is proven.
+A fixture that never enters the path you changed cannot gate it (the measurement discipline fixture-coverage law). Count SAX event types per fixture before claiming a brick is proven.
 
 ### 3.4 Security gates that C does not have (on by default)
 
@@ -235,7 +215,7 @@ SAX1 `xmlParseDoc` / `xmlParseFile` / `xmlParseMemory` are **deprecated**. Faça
 
 Node types (`XML_ELEMENT_NODE`, `XML_TEXT_NODE`, …) keep the C discriminant numbers.
 
-Ownership in Rust: `XmlDoc` owns the arena. `XmlNodeRef` / `XmlNodeMut` are handles (index or generational), **not** raw pointers with parent-and-child `&mut`. This is the `rusty-memory-model` move that lets the C ABI still hand out `xmlNode *` as indices into the arena while the safe façade cannot form aliasing mutable references. The C pointer value is stable for the lifetime of the doc, matching libxml2.
+Ownership in Rust: `XmlDoc` owns the arena. `XmlNodeRef` / `XmlNodeMut` are handles (index or generational), **not** raw pointers with parent-and-child `&mut`. This is the the house guidance move that lets the C ABI still hand out `xmlNode *` as indices into the arena while the safe façade cannot form aliasing mutable references. The C pointer value is stable for the lifetime of the doc, matching libxml2.
 
 ### 4.3 SAX2 (`SAX2.h`)
 
@@ -296,7 +276,7 @@ Each of these is a 1:1 header, not a "we'll use HashMap and call it done":
 |---|---|---|
 | `encoding.h` | `xmlFindCharEncodingHandler`, `xmlParseCharEncoding`, `xmlCharEncInFunc` / `OutFunc` | **No iconv.** Tables + `encoding_rs` for Encoding Standard sets; remaining ISO-8859 / EBCDIC as explicit tables. `wasm32` clean |
 | `entities.h` | `xmlAddDocEntity`, `xmlGetPredefinedEntity`, `xmlEncodeEntitiesReentrant` | Predefined `&lt; &gt; &amp; &apos; &quot;` first |
-| `dict.h` | `xmlDictCreate`, `xmlDictLookup`, `xmlDictOwns` | Intern names; this is the rusty-blazing-fast lever |
+| `dict.h` | `xmlDictCreate`, `xmlDictLookup`, `xmlDictOwns` | Intern names; the big allocation lever |
 | `hash.h` | `xmlHashCreate`, `xmlHashAdd` / `Lookup` / `Scan` | IDs, entities, SAX tables |
 | `xmlstring.h` | `xmlStrdup`, `xmlStrlen`, `xmlStrEqual`, `xmlStrcasestr`, `xmlUTF8Strlen` | C ABI needs these; Rust uses `&[u8]` / `&str` |
 | `chvalid.h` | `xmlIsBaseChar`, `xmlIsCombining`, `xmlIsDigit`, `xmlIsExtender`, `xmlIsChar` | Generated from the same Unicode productions C uses; **byte-identical class tables** |
@@ -341,7 +321,7 @@ Never install as `xmllint`. Primary binary `rxmlint`, same flag language as C so
 
 ## 5. Workspace (day-one layout)
 
-Matches `building-the-new-internet` §2 and `rusty_zstd`'s crate split.
+Matches the house stack guidance §2 and the house guidance's crate split.
 
 ```
 rusty_xml/
@@ -350,7 +330,7 @@ rusty_xml/
 ├── rustfmt.toml
 ├── docs/plan/rusty_xml.md     # this file
 ├── bench/                     # pinned A/B vs xmllint; never links libxml2
-│   └── pinvs.ps1              # codec-measurement harness shape (from rs_h264)
+│   └── pinvs.ps1              # pinned timing harness
 ├── corpora/                   # xmlconf + real docs + generated holdout (git-lfs or fetch script)
 ├── oracle/                    # fetch-oracle.ps1; pin notes; NEVER compiled into the lib
 ├── crates/
@@ -372,7 +352,7 @@ rusty_xml/
 
 **Allocator law:** `#[global_allocator]` lives in `rusty_xml-cli` / bench binaries via `rusty_xml-alloc`. The published library does not depend on `rusty_alloc-api`.
 
-**MSRV:** 1.85, same as `rusty_zstd`. `no_std + alloc` for the parser+tree (no file I/O). `std` feature adds file/fd/IO and the CLI.
+**MSRV:** 1.85, same as the house guidance. `no_std + alloc` for the parser+tree (no file I/O). `std` feature adds file/fd/IO and the CLI.
 
 **License:** MIT OR Apache-2.0 (libxml2 is MIT; dual is the house default and is compatible). `NOTICE.md` records that the C oracle is neither distributed nor linked.
 
@@ -385,7 +365,7 @@ One brick per commit. A mission is done when its gate is green in CI, not when t
 ### M0 — Oracle, census, bench skeleton (no parser yet)
 
 - Fetch and pin libxml2 (`scripts/fetch-oracle.ps1`). Record version, git SHA, configure flags (`minimum` off; HTML/reader/writer/xpath/c14n on; http off; zlib off for the first pin so gzip is a later apples-to-apples).
-- Build C `xmllint` **Release** (`-O2 -fno-semantic-interposition` as their README warns defaults are unoptimised — `codec-measurement` §8, the reference's defaults are configuration).
+- Build C `xmllint` **Release** (`-O2 -fno-semantic-interposition` as their README warns defaults are unoptimised — the measurement discipline §8, the reference's defaults are configuration).
 - Generate `docs/plan/API-CENSUS.md`: every `XMLPUBFUN` grouped current / deprecated / module, with our planned Rust name.
 - Stand up `rusty_xml-bench`:
   - Arms: `rxmlint` (us) and pinned `xmllint` (C).
@@ -400,7 +380,7 @@ Exit: census committed, C bench green, method line in the log, oracle version in
 
 ### M1 — Well-formed UTF-8 document parse (event-exact)
 
-Bring-up order, `codec-bringup-decoder` style:
+Bring-up order, the measurement discipline style:
 
 1. Character classes (`chvalid`) byte-identical vs C tables on 0..=0x10FFFF sample + xmlconf.
 2. XML decl + encoding decl (UTF-8 only in M1).
@@ -447,13 +427,13 @@ Each is its own sub-mission with its own corpus. HTML is not "XML with recovery"
 
 ### M7 — Performance campaign (only after M2 is event-exact)
 
-`codec-optimize` order, no shortcuts:
+the measurement discipline order, no shortcuts:
 
-1. `codec-analyzer` stage profiler (`profile` feature, ZST when off): `GuessEncoding`, `ScanName`, `ScanCharData`, `LookupNs`, `Intern`, `AllocNode`, `SaxDispatch`, `TreeLink`, `SaveEscape`.
+1. the measurement discipline stage profiler (`profile` feature, ZST when off): `GuessEncoding`, `ScanName`, `ScanCharData`, `LookupNs`, `Intern`, `AllocNode`, `SaxDispatch`, `TreeLink`, `SaveEscape`.
 2. Decompose the residue until every line is named.
-3. `codec-eliminate-redundancy` (intern, charset LUT, don't re-scan).
-4. `codec-memory-copies` (reader buffer, save grow, tree clone).
-5. Document-size sweep (`codec-cache-tiles`) before any layout rewrite.
+3. the measurement discipline (intern, charset LUT, don't re-scan).
+4. the measurement discipline (reader buffer, save grow, tree clone).
+5. Document-size sweep (the measurement discipline) before any layout rewrite.
 6. SIMD only for proven hot scans (`memchr`-class `<`, `]]>`, UTF-8 validate) after `--emit asm` shows zero packed ops.
 
 **Published speed claims** vs C use the M0 harness, real corpora, paired win-rate + z, and the method line. Null-arm floor re-run per session. Do not average files.
@@ -463,20 +443,20 @@ Exit bars (set after the M0 C board exists; do not invent a ratio now): parse `-
 ### M8 — C ABI cdylib + hardening
 
 - `rusty_xml-c-abi` exports current `XMLPUBFUN` names.
-- `use-protection-please` audit, cargo-deny, fuzz, Miri on the arena, `wasm32-unknown-unknown` build.
+- the hardening audit audit, cargo-deny, fuzz, Miri on the arena, `wasm32-unknown-unknown` build.
 
 ---
 
 ## 7. Benchmark specification (standing)
 
-Copied from `codec-measurement` and `rusty_zstd-bench`. If the harness and this section disagree, the harness is wrong — fix the harness.
+Copied from the measurement discipline and `rusty_zstd-bench`. If the harness and this section disagree, the harness is wrong — fix the harness.
 
 ### 7.1 Arms
 
 | Arm | Binary | Notes |
 |---|---|---|
 | C | pinned `oracle/bin/xmllint` | Release, flags recorded in `oracle/PIN` |
-| us | `target/release/rxmlint` | `cargo build -p rusty_xml-cli --release`; verify mtime / a build marker (`codec-measurement` §10) |
+| us | `target/release/rxmlint` | `cargo build -p rusty_xml-cli --release`; verify mtime / a build marker (the measurement discipline §10) |
 | null | C vs C | Resolution floor, every session |
 
 Never time a debug build. Never time with the profiler feature on and then quote it as the product.
@@ -492,7 +472,7 @@ Never time a debug build. Never time with the profiler feature on and then quote
 | `c14n` | canonicalize | `--c14n FILE` | same | output bytes |
 | `roundtrip` | parse+save | C dump vs us dump | same options | output bytes must match C14N; non-C14N recorded |
 
-Same files, same options, same number of inner repeats so arm **durations** match (`codec-measurement` §5). If C finishes in 0.4 s and we in 4 s, lengthen the inner loop until both walls are ≥ ~15 s.
+Same files, same options, same number of inner repeats so arm **durations** match (the measurement discipline §5). If C finishes in 0.4 s and we in 4 s, lengthen the inner loop until both walls are ≥ ~15 s.
 
 ### 7.3 How a number is taken
 
@@ -504,7 +484,7 @@ PowerShell shape (Windows house box); Linux/macOS equivalent in the same script 
 - Report median **and** minimum, paired win rate, `z = (wins − N/2) / (0.5·√N)`, null-arm floor.
 - Print the method line: pinned? interleaved? CPU or wall? N? null floor? work counts both arms? binary mtime?
 
-A number without that line is not evidence. A speed brick that is not faster on this harness is reverted (`codec-optimize`). A brick below the null floor is kept only with a **counter** of work removed (`codec-measurement` §15).
+A number without that line is not evidence. A speed brick that is not faster on this harness is reverted (the measurement discipline). A brick below the null floor is kept only with a **counter** of work removed (the measurement discipline §15).
 
 ### 7.4 What we refuse to compare
 
@@ -518,7 +498,7 @@ A number without that line is not evidence. A speed brick that is not faster on 
 
 ## 8. Instrument the oracle (bring-up only)
 
-When SAX traces are not enough to locate a divergence (`codec-bringup-decoder` probe law):
+When SAX traces are not enough to locate a divergence (the measurement discipline probe law):
 
 - Keep a **patch** against the pinned libxml2 that `fprintf`s entering state (line, col, consumed, parser state enum, current element name) at `xmlParseDocument` checkpoints.
 - Build that binary as `oracle/bin/xmllint-probe`. Never ship it. Never link it.

@@ -1,4 +1,4 @@
-# codec-measurement harness: pinned xmllint (C) vs rxmlint (us).
+# Timing harness: pinned xmllint (C) vs rxmlint (us).
 # Never links libxml2. Default is C-only (M0 board). Use -Both for side-by-side.
 #
 # Method line is printed every run. Numbers without it are not evidence.

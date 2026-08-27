@@ -262,7 +262,7 @@ crates/
   rusty_xml-c-abi     optional cdylib, stub until M8. Not published.
   rusty_xml-bench     shells out to pinned xmllint. Never links libxml2.
   rusty_xml-alloc     rusty_alloc seam for binaries only. Library never uses it.
-bench/                codec-measurement harness (pinvs.ps1)
+bench/                pinned oracle-vs-us timing harness (pinvs.ps1)
 oracle/PIN            libxml2 v2.15.3 pin (binary is gitignored)
 ```
 

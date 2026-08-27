@@ -616,3 +616,49 @@ fn m6_relaxng_oracle_tutor3_1() {
     rusty_xml::xml_relaxng_validate_doc(&rng, &doc).expect("tutor3_1_1");
 }
 
+/// The HTML parser skipped an unusable attribute-name character by ONE BYTE.
+/// A multi-byte character there left the cursor mid-scalar and the next slice
+/// panicked -- found by fuzzing, 83 distinct panic sites, all this one cause.
+/// A panic in a library is an availability bug for whatever embeds it.
+#[test]
+fn html_multibyte_where_an_attribute_name_should_be_does_not_panic() {
+    let opts = default_parse_options();
+    for case in [
+        &b"<r\xdd\xb7/>"[..],                       // U+0777 where a name must start
+        &b"<r \xdd\xb7 a=\"1\"/>"[..],              // ... between attributes
+        &b"<r\xe6\x97\xa5/>"[..],                   // 3-byte
+        &b"<r\xf0\x9f\x98\x80/>"[..],               // 4-byte
+        &b"<a:r xmlns:a=\"u\"\xdb\xae<a:c/></a:r>"[..],
+        &b"<rs&##65;&#x42\xdd\xb7&l"[..],
+    ] {
+        // Must not panic. Accepting or rejecting is both fine; crashing is not.
+        let _ = rusty_xml::html_read_memory(case, None, None, opts);
+    }
+}
+
+/// The XML side must stay panic-free on the same shapes.
+#[test]
+fn xml_entry_points_do_not_panic_on_malformed_input() {
+    let opts = default_parse_options();
+    for case in [
+        &b"<r\xdd\xb7/>"[..],
+        &b"<r>\xff\xfe</r>"[..],
+        &b"<r a=\"\xc3\"/>"[..],
+        &b"<r>\x00</r>"[..],
+        &b"<?xml"[..],
+        &b"<!DOCTYPE d [<!ENTITY e \"\xdd"[..],
+    ] {
+        let _ = xml_read_memory(case, None, None, opts);
+        let mut rec = SaxRecorder::new();
+        let _ = xml_sax_parse_memory(case, opts, &mut rec);
+        if let Ok(mut r) = rusty_xml::xml_reader_for_memory(case, None, None, opts) {
+            let mut n = 0;
+            while r.read() == 1 {
+                n += 1;
+                if n > 10_000 {
+                    break;
+                }
+            }
+        }
+    }
+}

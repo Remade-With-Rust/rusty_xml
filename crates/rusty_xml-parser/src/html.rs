@@ -213,7 +213,11 @@ impl<'a> HtmlParser<'a> {
             }
             let an = self.read_name().to_ascii_lowercase();
             if an.is_empty() {
-                self.bump(1);
+                // Skip one CHARACTER, not one byte. A multi-byte character that
+                // cannot start an attribute name left self.pos mid-scalar, and
+                // the next rest() slice panicked. `<r` + U+0777 + `/>` sufficed.
+                let step = self.rest().chars().next().map_or(1, char::len_utf8);
+                self.bump(step);
                 continue;
             }
             self.skip_ws();

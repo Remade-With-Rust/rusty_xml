@@ -326,16 +326,18 @@ impl<'a> Parser<'a> {
 
     /// Next Unicode scalar with XML 1.0 §2.11 EOL: `\r\n` / `\r` → `\n`.
     fn peek_char(&self) -> Result<Option<char>, XmlError> {
-        if self.eof() {
+        // One bounds-checked load covers the end test and the byte fetch; the
+        // previous form did eof(), then re-sliced, then indexed.
+        let Some(&b0) = self.input.get(self.pos) else {
             return Ok(None);
-        }
-        let rest = &self.input[self.pos..];
-        if rest[0] == b'\r' {
+        };
+        if b0 == b'\r' {
             return Ok(Some('\n'));
         }
-        if rest[0] < 0x80 {
-            return Ok(Some(rest[0] as char));
+        if b0 < 0x80 {
+            return Ok(Some(b0 as char));
         }
+        let rest = &self.input[self.pos..];
         // A UTF-8 scalar is at most 4 bytes, so the leading one is always complete
         // within the first 4. Validating only those keeps this O(1); validating the
         // whole tail made a parse O(n^2) in the document length.
@@ -357,17 +359,36 @@ impl<'a> Parser<'a> {
     }
 
     fn bump_char(&mut self) -> Result<Option<char>, XmlError> {
+        // ASCII and CR are handled without a decode and without the second
+        // peek_byte the CR test used to cost on every character.
+        match self.input.get(self.pos) {
+            None => return Ok(None),
+            Some(&b) if b == b'\r' => {
+                self.pos += 1;
+                self.col += 1;
+                if self.input.get(self.pos) == Some(&b'\n') {
+                    self.pos += 1;
+                    self.line += 1;
+                    self.col = 1;
+                }
+                return Ok(Some('\n'));
+            }
+            Some(&b) if b < 0x80 => {
+                self.pos += 1;
+                if b == b'\n' {
+                    self.line += 1;
+                    self.col = 1;
+                } else {
+                    self.col += 1;
+                }
+                return Ok(Some(b as char));
+            }
+            _ => {}
+        }
         let c = match self.peek_char()? {
             None => return Ok(None),
             Some(c) => c,
         };
-        if self.peek_byte() == Some(b'\r') {
-            self.bump_byte();
-            if self.peek_byte() == Some(b'\n') {
-                self.bump_byte();
-            }
-            return Ok(Some('\n'));
-        }
         // Advance the whole scalar at once. The byte-at-a-time loop re-ran a
         // bounds-checked load and a newline test for every continuation byte,
         // none of which can be a newline.
@@ -405,9 +426,22 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_name_span(&mut self) -> Result<(usize, usize), XmlError> {
-        let c = self.peek_char()?.ok_or_else(|| self.err(XML_ERR_NAME_REQUIRED, "Name expected"))?;
-        if !xml_is_name_start_char(c as u32, self.old10) {
-            return Err(self.err(XML_ERR_NAME_REQUIRED, "Name expected"));
+        // The first character went through peek_char AND bump_char -- two
+        // decodes -- for what is almost always one ASCII byte.
+        match self.input.get(self.pos) {
+            Some(&b) if b < 0x80 && b != b'\r' => {
+                if !xml_is_name_start_char(b as u32, self.old10) {
+                    return Err(self.err(XML_ERR_NAME_REQUIRED, "Name expected"));
+                }
+            }
+            _ => {
+                let c = self
+                    .peek_char()?
+                    .ok_or_else(|| self.err(XML_ERR_NAME_REQUIRED, "Name expected"))?;
+                if !xml_is_name_start_char(c as u32, self.old10) {
+                    return Err(self.err(XML_ERR_NAME_REQUIRED, "Name expected"));
+                }
+            }
         }
         // Scan the name in place and copy it out once. Name characters are
         // overwhelmingly ASCII, and an ASCII byte needs no decode at all -- the
@@ -572,7 +606,7 @@ impl<'a> Parser<'a> {
             }
             return Err(self.err(XML_ERR_RESERVED_XML_NAME, "Reserved PI target xml"));
         }
-        let data = if matches!(self.peek_char()?, Some(c) if crate::chvalid::xml_is_blank(c as u32)) {
+        let data = if matches!(self.peek_byte(), Some(b) if b < 0x80 && crate::chvalid::xml_is_blank(b as u32)) {
             self.skip_s()?;
             let mut d = String::new();
             loop {
@@ -1216,8 +1250,8 @@ impl<'a> Parser<'a> {
             let save_line = self.line;
             self.pos += 5;
             self.col += 5;
-            match self.peek_char()? {
-                Some(c) if crate::chvalid::xml_is_blank(c as u32) => {
+            match self.peek_byte() {
+                Some(b) if b < 0x80 && crate::chvalid::xml_is_blank(b as u32) => {
                     self.parse_xml_decl_rest()?;
                 }
                 _ => {
@@ -1281,11 +1315,7 @@ fn parse_utf8(
         depth: 0,
         ns_stack: Vec::new(),
         sax,
-        doc: {
-            let mut d = XmlDoc::xml_new_doc(Some("1.0"));
-            d.reserve_nodes(buffer.len() / 10);
-            d
-        },
+        doc: XmlDoc::with_node_capacity(Some("1.0"), buffer.len() / 10),
         stack: Vec::new(),
         char_buf: String::new(),
         scratch_raw: Vec::new(),

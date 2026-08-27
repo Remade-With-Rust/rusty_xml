@@ -314,22 +314,34 @@ fn table_for(enc: XmlCharEncoding) -> Option<&'static [u16; 128]> {
 }
 
 fn sniff_encoding_decl(bytes: &[u8]) -> Option<XmlCharEncoding> {
+    // The declaration is ASCII. Scanning the bytes directly avoids building a
+    // 1 KB String and a second lowercased copy of it on every single parse.
     let n = bytes.len().min(1024);
-    // Decl is ASCII; do not require the rest of the buffer to be UTF-8.
-    let s: String = bytes[..n]
-        .iter()
-        .map(|&b| if b < 128 { b as char } else { '\u{fffd}' })
-        .collect();
-    let lower = s.to_ascii_lowercase();
-    let idx = lower.find("encoding")?;
-    let rest = &s[idx + 8..];
-    let rest = rest.trim_start_matches([' ', '\t', '\r', '\n', '=']);
-    let q = rest.chars().next()?;
-    if q != '"' && q != '\'' {
+    let head = &bytes[..n];
+    if head.len() < 8 {
         return None;
     }
-    let end = rest[1..].find(q)?;
-    xml_parse_char_encoding(&rest[1..1 + end]).into_option()
+    let idx = head
+        .windows(8)
+        .position(|w| w.eq_ignore_ascii_case(b"encoding"))?;
+    let mut i = idx + 8;
+    while i < n && matches!(head[i], b' ' | b'\t' | b'\r' | b'\n' | b'=') {
+        i += 1;
+    }
+    if i >= n || (head[i] != b'"' && head[i] != b'\'') {
+        return None;
+    }
+    let q = head[i];
+    i += 1;
+    let start = i;
+    while i < n && head[i] != q {
+        i += 1;
+    }
+    if i >= n {
+        return None;
+    }
+    let name = std::str::from_utf8(&head[start..i]).ok()?;
+    xml_parse_char_encoding(name).into_option()
 }
 
 impl XmlCharEncoding {
@@ -347,7 +359,7 @@ pub fn xml_convert_to_utf8(
     hint: Option<&str>,
 ) -> Result<(Vec<u8>, Option<String>), XmlError> {
     let (c, n) = xml_convert_to_utf8_cow(input, hint)?;
-    Ok((c.into_owned(), n))
+    Ok((c.into_owned(), n.map(str::to_string)))
 }
 
 /// As [`xml_convert_to_utf8`], but borrows the input when it is already UTF-8.
@@ -356,7 +368,7 @@ pub fn xml_convert_to_utf8(
 pub(crate) fn xml_convert_to_utf8_cow<'a>(
     input: &'a [u8],
     hint: Option<&str>,
-) -> Result<(std::borrow::Cow<'a, [u8]>, Option<String>), XmlError> {
+) -> Result<(std::borrow::Cow<'a, [u8]>, Option<&'static str>), XmlError> {
     if input.len() >= 2 && input[0] == 0x1f && input[1] == 0x8b {
         return Err(XmlError::new(
             XML_ERR_UNSUPPORTED_ENCODING,
@@ -379,10 +391,7 @@ pub(crate) fn xml_convert_to_utf8_cow<'a>(
     {
         // Slice past a BOM rather than draining it, which memmoved the document.
         let body = if input.starts_with(&[0xEF, 0xBB, 0xBF]) { &input[3..] } else { input };
-        return Ok((
-            std::borrow::Cow::Borrowed(body),
-            xml_get_char_encoding_name(enc).map(str::to_string),
-        ));
+        return Ok((std::borrow::Cow::Borrowed(body), xml_get_char_encoding_name(enc)));
     }
     let converted = match enc {
         XmlCharEncoding::Iso8859_1 => latin1_to_utf8(input),
@@ -420,7 +429,7 @@ pub(crate) fn xml_convert_to_utf8_cow<'a>(
     };
     Ok((
         std::borrow::Cow::Owned(converted),
-        xml_get_char_encoding_name(enc).map(str::to_string),
+        xml_get_char_encoding_name(enc),
     ))
 }
 

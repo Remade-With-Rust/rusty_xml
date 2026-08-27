@@ -151,8 +151,20 @@ impl XmlDoc {
     /// `xmlNewDoc`.
     #[doc(alias = "xmlNewDoc")]
     pub fn xml_new_doc(version: Option<&str>) -> Self {
-        let mut nodes = Vec::new();
-        nodes.push(Node::new(NodeKind::Document, "#document".into()));
+        Self::with_node_capacity(version, 1)
+    }
+
+    /// Build a document whose node arena is sized up front. Starting a parse
+    /// used to allocate the arena, push into it, then reallocate on reserve --
+    /// three trips for what one sized allocation does. The document node's
+    /// name is implied by its kind, so it stores no String either.
+    pub fn with_node_capacity(version: Option<&str>, cap: usize) -> Self {
+        const MAX_ARENA_BYTES: usize = 32 << 20;
+        let ceiling = MAX_ARENA_BYTES / std::mem::size_of::<Node>();
+        // A floor of 4 keeps a small document from reallocating its way up
+        // from a single slot, which is what Vec::new()+push used to give it.
+        let mut nodes = Vec::with_capacity(cap.clamp(4, ceiling));
+        nodes.push(Node::new(NodeKind::Document, String::new()));
         Self {
             nodes,
             version: version.unwrap_or("1.0").to_string(),
@@ -172,7 +184,11 @@ impl XmlDoc {
         // still doubled-and-copied its way up -- about 22 MB of memcpy on a
         // 627 KB file. Shrinking Node itself would need an API break for a
         // sub-1% effect; reserving correctly removes the same traffic for free.
-        self.nodes.reserve(n.min(1 << 20));
+        // Cap by memory, not node count: 1<<20 nodes is ~190 MB of arena, which
+        // a large document would commit up front before parsing a byte.
+        const MAX_ARENA_BYTES: usize = 32 << 20;
+        let cap = MAX_ARENA_BYTES / std::mem::size_of::<Node>();
+        self.nodes.reserve(n.min(cap));
     }
 
     pub fn node(&self, id: NodeId) -> &Node {

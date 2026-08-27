@@ -1271,14 +1271,91 @@ impl<'a> Parser<'a> {
     /// at all.
     fn parse_content(&mut self, parent: NodeId) -> Result<(), XmlError> {
         let mut open: Vec<OpenElem> = Vec::new();
+        self.parse_content_inner(parent, &mut open, false)?;
+        Ok(())
+    }
+
+    /// True when the remaining bytes are a proper prefix of a construct and we
+    /// cannot tell what it is without more input.
+    ///
+    /// Only consulted while streaming. Character data is never "incomplete":
+    /// the run scanner stops at `<`, `&` and `]`, and pending text is kept in
+    /// `char_buf` rather than flushed, so more of it can simply be appended.
+    fn incomplete_construct(&self) -> bool {
+        let r = &self.input[self.pos..];
+        fn has(h: &[u8], n: &[u8]) -> bool {
+            h.len() >= n.len() && h.windows(n.len()).any(|w| w == n)
+        }
+        // A tag ends at the first '>' that is not inside an attribute value.
+        fn tag_complete(r: &[u8]) -> bool {
+            let mut quote: Option<u8> = None;
+            for &b in &r[1..] {
+                match quote {
+                    Some(q) if b == q => quote = None,
+                    Some(_) => {}
+                    None => match b {
+                        b'"' | 0x27 => quote = Some(b),
+                        b'>' => return true,
+                        _ => {}
+                    },
+                }
+            }
+            false
+        }
+        match r.first() {
+            Some(b'<') => {
+                if r.len() < 2 {
+                    return true;
+                }
+                if r.starts_with(b"<!--") {
+                    return !has(&r[4..], b"-->");
+                }
+                if r.starts_with(b"<![CDATA[") {
+                    return !has(&r[9..], b"]]>");
+                }
+                if r.starts_with(b"<?") {
+                    return !has(&r[2..], b"?>");
+                }
+                // `<!` could still become a comment, CDATA or a doctype.
+                if r[1] == b'!' && r.len() < 9 {
+                    return true;
+                }
+                !tag_complete(r)
+            }
+            Some(b'&') => !r.contains(&b';'),
+            // `]` might yet become `]]>`.
+            Some(b']') => r.len() < 3,
+            _ => false,
+        }
+    }
+
+    /// The content loop, with the open-element stack supplied by the caller so
+    /// it can survive between chunks.
+    ///
+    /// With `stop_at_eof`, running out of input is not an error: parsing stops
+    /// at the last SAFE BOUNDARY -- the top of the loop, where we sit between
+    /// content items rather than half way through a tag -- and returns that
+    /// position. Pending character data stays in `char_buf` rather than being
+    /// flushed, so a text run split across two chunks still produces one event
+    /// and the push parser matches a whole-document parse exactly.
+    fn parse_content_inner(
+        &mut self,
+        parent: NodeId,
+        open: &mut Vec<OpenElem>,
+        stop_at_eof: bool,
+    ) -> Result<usize, XmlError> {
         // The element the caller asked us to fill. When the innermost element
         // closes and nothing else is open, content belongs to THIS again --
         // falling back to the mutable `parent` would name the element that had
         // just been closed.
         let outer = parent;
-        let mut parent = parent;
+        let mut parent = open.last().map(|f| f.elem).unwrap_or(parent);
         loop {
+            let safe = self.pos;
             if self.eof() {
+                if stop_at_eof {
+                    return Ok(safe);
+                }
                 self.flush_chars(Some(parent))?;
                 if let Some(o) = open.last() {
                     let (_, local) = Self::split_qname(&o.qname).unwrap_or((None, &o.qname));
@@ -1287,7 +1364,12 @@ impl<'a> Parser<'a> {
                         format!("Premature end of data in tag {local}"),
                     ));
                 }
-                return Ok(());
+                return Ok(safe);
+            }
+            // Without the whole of a construct in hand we cannot tell what it
+            // is, so stop here and wait for more input.
+            if stop_at_eof && self.incomplete_construct() {
+                return Ok(safe);
             }
             if self.starts_with(b"</") {
                 self.flush_chars(Some(parent))?;
@@ -1299,7 +1381,7 @@ impl<'a> Parser<'a> {
                         parent = open.last().map(|f| f.elem).unwrap_or(outer);
                         continue;
                     }
-                    None => return Ok(()),
+                    None => return Ok(safe),
                 }
             }
             if self.starts_with(b"<!--") {

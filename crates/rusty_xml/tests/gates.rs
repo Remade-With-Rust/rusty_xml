@@ -723,3 +723,60 @@ fn many_attributes_on_one_element_is_not_quadratic() {
         "a repeated attribute must be rejected on the set path too"
     );
 }
+
+/// A deeply nested XPath expression overflowed the stack, which ABORTS THE
+/// PROCESS -- `catch_unwind` cannot recover from it, so a single bad expression
+/// took down everything sharing the address space. Five shapes did it, and two
+/// mechanisms: recursion while parsing, and the recursive `Drop` of the deep
+/// `Box` chain the union and negation loops build.
+#[test]
+fn deeply_nested_xpath_is_rejected_not_fatal() {
+    let doc = xml_read_memory(b"<r><a/></r>", None, None, default_parse_options()).unwrap();
+    let ctx = rusty_xml::XmlXPathContext::xml_xpath_new_context(&doc);
+    let n = 5000;
+    let shapes = [
+        ("predicates", "//*[".repeat(n)),
+        ("unions", "//*|".repeat(n) + "//*"),
+        ("parens", "(".repeat(n) + "1" + &")".repeat(n)),
+        ("negation", "-".repeat(n) + "1"),
+        ("not()", "not(".repeat(n) + "1" + &")".repeat(n)),
+    ];
+    for (name, expr) in shapes {
+        // Must return, either Ok or Err. Reaching this line at all is the test.
+        let _ = rusty_xml::xml_xpath_eval(&expr, &ctx);
+        let _ = rusty_xml::xml_xpath_compile(&expr);
+        assert!(!name.is_empty());
+    }
+}
+
+/// The depth bound must not reject expressions people actually write.
+#[test]
+fn ordinary_xpath_still_compiles() {
+    let doc = xml_read_memory(
+        br#"<r><item id="1"><t>x</t></item><item id="2"/></r>"#,
+        None,
+        None,
+        default_parse_options(),
+    )
+    .unwrap();
+    let ctx = rusty_xml::XmlXPathContext::xml_xpath_new_context(&doc);
+    for e in [
+        "count(//item)",
+        "//item[@id='1']",
+        "//*[local-name()='item'][position()<3]",
+        "string(//t)",
+        "//a/b/c/d/e/f/g/h",
+        "//x[.//y[.//z[@k]]]",
+        "//*[@a or @b and not(@c)]",
+        "normalize-space(//t[1])",
+    ] {
+        assert!(
+            rusty_xml::xml_xpath_eval(e, &ctx).is_ok(),
+            "ordinary expression must still evaluate: {e}"
+        );
+    }
+    match rusty_xml::xml_xpath_eval("count(//item)", &ctx) {
+        Ok(rusty_xml::XPathObject::Number(n)) => assert_eq!(n, 2.0),
+        other => panic!("expected 2 items, got {other:?}"),
+    }
+}

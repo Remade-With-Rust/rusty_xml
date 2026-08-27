@@ -120,6 +120,7 @@ pub fn xml_xpath_eval(expr: &str, ctx: &XmlXPathContext<'_>) -> Result<XPathObje
     let mut p = Parser {
         src: expr.trim(),
         pos: 0,
+        depth: 0,
     };
     let ast = p.parse_expr()?;
     p.skip_ws();
@@ -395,6 +396,7 @@ pub fn xml_xpath_compile(expr: &str) -> Result<String, String> {
     let mut p = Parser {
         src: expr.trim(),
         pos: 0,
+        depth: 0,
     };
     let _ = p.parse_expr()?;
     Ok(expr.to_string())
@@ -470,12 +472,38 @@ enum NodeTest {
     Pi(Option<String>),
 }
 
+/// Nesting limit for a compiled expression.
+///
+/// The recursive-descent parser had no bound, so `((((...1...))))` or a chain
+/// of `//*|//*|...` around a thousand deep overflowed the stack. That is worse
+/// than a panic: a stack overflow ABORTS THE PROCESS and `catch_unwind` cannot
+/// recover from it. The nesting also builds a `Box` chain whose recursive
+/// `Drop` overflows on its own, so bounding the parse bounds both.
+///
+/// The limit is 64, not something larger, because one level of XPath nesting
+/// costs about THIRTEEN stack frames as it descends the precedence chain
+/// (expr -> or -> and -> eq -> rel -> add -> mul -> unary -> union -> path ->
+/// relative -> step -> preds -> expr). A limit of 256 was measured to overflow
+/// at 250 before the guard could fire. Real expressions nest a handful deep.
+const MAX_XPATH_DEPTH: u32 = 64;
+
 struct Parser<'a> {
     src: &'a str,
     pos: usize,
+    depth: u32,
 }
 
 impl<'a> Parser<'a> {
+    fn enter(&mut self) -> Result<(), String> {
+        self.depth += 1;
+        if self.depth > MAX_XPATH_DEPTH {
+            return Err("expression nested too deeply".into());
+        }
+        Ok(())
+    }
+    fn leave(&mut self) {
+        self.depth = self.depth.saturating_sub(1);
+    }
     fn skip_ws(&mut self) {
         while let Some(c) = self.src[self.pos..].chars().next() {
             if c.is_whitespace() {
@@ -495,7 +523,10 @@ impl<'a> Parser<'a> {
         self.pos += n;
     }
     fn parse_expr(&mut self) -> Result<Expr, String> {
-        self.parse_or()
+        self.enter()?;
+        let r = self.parse_or();
+        self.leave();
+        r
     }
     fn parse_or(&mut self) -> Result<Expr, String> {
         let mut e = self.parse_and()?;
@@ -615,17 +646,27 @@ impl<'a> Parser<'a> {
         self.skip_ws();
         if self.starts("-") {
             self.bump(1);
-            Ok(Expr::Neg(Box::new(self.parse_unary()?)))
+            self.enter()?;
+            let inner = self.parse_unary();
+            self.leave();
+            Ok(Expr::Neg(Box::new(inner?)))
         } else {
             self.parse_union()
         }
     }
     fn parse_union(&mut self) -> Result<Expr, String> {
         let mut e = self.parse_path()?;
+        // The loop is iterative but each step adds a Box level, so the tree it
+        // builds is as deep as the chain is long -- and dropping it recurses.
+        let mut arms = 0u32;
         loop {
             self.skip_ws();
             if self.starts("|") {
                 self.bump(1);
+                arms += 1;
+                if arms > MAX_XPATH_DEPTH {
+                    return Err("expression nested too deeply".into());
+                }
                 let r = self.parse_path()?;
                 e = Expr::Union(Box::new(e), Box::new(r));
             } else {

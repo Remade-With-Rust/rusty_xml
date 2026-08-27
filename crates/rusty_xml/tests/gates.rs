@@ -1072,3 +1072,51 @@ fn recover_yields_a_partial_document_instead_of_nothing() {
         xml_save_doc(&xml_read_memory(good, None, None, recover).unwrap(), 0),
     );
 }
+
+/// An entity's replacement text was returned VERBATIM, so a nested reference
+/// reached the tree as literal text and the serializer escaped it:
+/// `<!ENTITY b "&a;&a;">` referenced as `&b;` produced `&amp;a;&amp;a;` instead
+/// of the expansion. Silent corruption of a legal document.
+///
+/// Expanding recursively IS the billion-laughs vector, so the bound arrives in
+/// the same commit as the recursion, never after it.
+#[test]
+fn nested_entities_expand_and_bombs_are_refused() {
+    let opts = default_parse_options();
+    let text_of = |d: &XmlDoc| {
+        let mut t = String::new();
+        for i in 0..d.len() {
+            let id = rusty_xml::NodeId(i as u32);
+            if d.kind(id) == rusty_xml::NodeKind::Text {
+                t.push_str(&d.node(id).content);
+            }
+        }
+        t
+    };
+
+    let nested = b"<?xml version=\"1.0\"?>\n<!DOCTYPE d [\n<!ENTITY a \"AAA\">\n<!ENTITY b \"&a;&a;\">\n<!ENTITY c \"&b;-&b;\">\n]>\n<d>[&c;]</d>";
+    let d = xml_read_memory(nested, None, None, opts).expect("nested entities are legal");
+    assert_eq!(text_of(&d), "[AAAAAA-AAAAAA]", "nested references must expand");
+
+    // Predefined entities and character references inside a replacement.
+    let mixed = b"<?xml version=\"1.0\"?>\n<!DOCTYPE d [<!ENTITY e \"&lt;&#65;&#x42;&gt;\">]>\n<d>&e;</d>";
+    let d = xml_read_memory(mixed, None, None, opts).unwrap();
+    assert_eq!(text_of(&d), "<AB>");
+
+    // Billion laughs, at three depths. Each must be refused, not expanded.
+    for depth in [6usize, 9, 12] {
+        let mut s = String::from("<?xml version=\"1.0\"?>\n<!DOCTYPE l [\n<!ENTITY l0 \"aaaaaaaaaa\">\n");
+        for i in 1..=depth {
+            s.push_str(&format!("<!ENTITY l{i} \""));
+            for _ in 0..10 {
+                s.push_str(&format!("&l{};", i - 1));
+            }
+            s.push_str("\">\n");
+        }
+        s.push_str(&format!("]>\n<l>&l{depth};</l>"));
+        assert!(
+            xml_read_memory(s.as_bytes(), None, None, opts).is_err(),
+            "a {depth}-deep entity bomb must be refused"
+        );
+    }
+}

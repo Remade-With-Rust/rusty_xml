@@ -396,6 +396,9 @@ fn fresh_parser<'a>(
         char_buf: String::new(),
         no_tree: (options & XML_PARSE_NO_TREE) != 0,
         recover: (options & XML_PARSE_RECOVER) != 0,
+        // libxml2 bounds entity amplification at a small multiple of the input
+        // for the same reason; without a bound, nesting is a bomb.
+        entity_budget: input.len().saturating_mul(10).max(1 << 16),
         scratch_raw: Vec::new(),
         scratch_sax: Vec::new(),
         started: false,
@@ -516,6 +519,9 @@ struct Parser<'a> {
     started: bool,
     no_tree: bool,
     recover: bool,
+    /// Bytes of entity expansion still permitted. Expanding nested entities
+    /// creates the billion-laughs vector, so it is bounded from the start.
+    entity_budget: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -1007,10 +1013,17 @@ impl<'a> Parser<'a> {
             "apos" => Ok("'".into()),
             "quot" => Ok("\"".into()),
             _ => {
-                if let Some(dtd) = &self.doc.dtd {
-                    if let Some(repl) = dtd.entities.get(&name) {
-                        return Ok(repl.clone());
-                    }
+                let raw = self
+                    .doc
+                    .dtd
+                    .as_ref()
+                    .and_then(|d| d.entities.get(&name))
+                    .cloned();
+                if let Some(raw) = raw {
+                    // The replacement was returned VERBATIM, so a nested
+                    // reference landed in the tree as literal text and came
+                    // back out escaped: `&b;&b;` became `&amp;b;&amp;b;`.
+                    return self.expand_entity(&name, &raw, 0);
                 }
                 if self.recover {
                     // Recovering: keep the reference as written rather than
@@ -1025,6 +1038,96 @@ impl<'a> Parser<'a> {
                 ))
             }
         }
+    }
+
+    /// Expand an entity's replacement text, resolving references inside it.
+    ///
+    /// Bounded twice, because recursion here IS the billion-laughs vector: by
+    /// nesting depth, and by a byte budget proportional to the document.
+    fn expand_entity(&mut self, name: &str, raw: &str, depth: u32) -> Result<String, XmlError> {
+        const MAX_ENTITY_DEPTH: u32 = 40;
+        if depth > MAX_ENTITY_DEPTH {
+            return Err(self.err(
+                XML_ERR_UNDECLARED_ENTITY,
+                format!("Entity '{name}' nested too deeply"),
+            ));
+        }
+        let b = raw.as_bytes();
+        let mut out = String::with_capacity(raw.len());
+        let mut i = 0usize;
+        while i < b.len() {
+            if b[i] != b'&' {
+                let start = i;
+                while i < b.len() && b[i] != b'&' {
+                    i += 1;
+                }
+                out.push_str(&raw[start..i]);
+                continue;
+            }
+            let Some(semi) = raw[i..].find(';').map(|k| i + k) else {
+                out.push('&');
+                i += 1;
+                continue;
+            };
+            let inner = raw[i + 1..semi].to_string();
+            if let Some(rest) = inner.strip_prefix('#') {
+                let (radix, digits) = match rest.strip_prefix(['x', 'X']) {
+                    Some(h) => (16u32, h),
+                    None => (10u32, rest),
+                };
+                match u32::from_str_radix(digits, radix).ok().and_then(char::from_u32) {
+                    Some(c) => out.push(c),
+                    None => {
+                        return Err(self.err(
+                            XML_ERR_INVALID_CHAR,
+                            format!("Invalid character reference in entity '{name}'"),
+                        ))
+                    }
+                }
+                i = semi + 1;
+                continue;
+            }
+            let replacement: Option<String> = match inner.as_str() {
+                "lt" => Some("<".into()),
+                "gt" => Some(">".into()),
+                "amp" => Some("&".into()),
+                "apos" => Some("'".into()),
+                "quot" => Some('"'.to_string()),
+                other => {
+                    let nested = self
+                        .doc
+                        .dtd
+                        .as_ref()
+                        .and_then(|d| d.entities.get(other))
+                        .cloned();
+                    match nested {
+                        Some(r) => Some(self.expand_entity(other, &r, depth + 1)?),
+                        None => None,
+                    }
+                }
+            };
+            match replacement {
+                Some(r) => {
+                    if r.len() > self.entity_budget {
+                        return Err(self.err(
+                            XML_ERR_INTERNAL_ERROR,
+                            "Maximum entity amplification exceeded",
+                        ));
+                    }
+                    self.entity_budget -= r.len();
+                    out.push_str(&r);
+                }
+                None if self.recover => out.push_str(&raw[i..=semi]),
+                None => {
+                    return Err(self.err(
+                        XML_ERR_UNDECLARED_ENTITY,
+                        format!("Entity '{inner}' not defined"),
+                    ))
+                }
+            }
+            i = semi + 1;
+        }
+        Ok(out)
     }
 
     fn parse_att_value(&mut self) -> Result<(String, usize), XmlError> {
@@ -1471,6 +1574,9 @@ impl<'a> Parser<'a> {
             char_buf: st.char_buf,
             no_tree: (options & XML_PARSE_NO_TREE) != 0,
             recover: (options & XML_PARSE_RECOVER) != 0,
+        // libxml2 bounds entity amplification at a small multiple of the input
+        // for the same reason; without a bound, nesting is a bomb.
+        entity_budget: input.len().saturating_mul(10).max(1 << 16),
             scratch_raw: Vec::new(),
             scratch_sax: Vec::new(),
             started: true,
@@ -1810,6 +1916,9 @@ fn parse_utf8(
         char_buf: String::new(),
         no_tree: (options & XML_PARSE_NO_TREE) != 0,
         recover: (options & XML_PARSE_RECOVER) != 0,
+        // libxml2 bounds entity amplification at a small multiple of the input
+        // for the same reason; without a bound, nesting is a bomb.
+        entity_budget: buffer.len().saturating_mul(10).max(1 << 16),
         scratch_raw: Vec::new(),
         scratch_sax: Vec::new(),
         started: false,

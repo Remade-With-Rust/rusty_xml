@@ -325,6 +325,13 @@ pub fn xml_ctxt_reset(ctxt: &mut XmlParserCtxt) {
     ctxt.last_error = None;
 }
 
+/// An element whose start tag has been consumed and whose end tag has not.
+struct OpenElem {
+    /// The QName exactly as written, for the end-tag comparison.
+    qname: String,
+    elem: NodeId,
+}
+
 /// One attribute exactly as it was scanned, before namespaces are resolved.
 struct RawAttr {
     qname: String,
@@ -988,7 +995,13 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    fn parse_element(&mut self, parent: NodeId) -> Result<(), XmlError> {
+    /// Parse a start tag and everything that belongs to it: attributes,
+    /// namespace frame, the SAX start event and the element node.
+    ///
+    /// Returns the open element, or `None` if it was `<x/>` and is already
+    /// closed. Split out of `parse_element` so the content loop can be driven
+    /// by an explicit stack instead of by recursion.
+    fn open_element(&mut self, parent: NodeId) -> Result<Option<OpenElem>, XmlError> {
         self.depth += 1;
         if self.depth > MAX_DEPTH {
             return Err(self.err(XML_ERR_INTERNAL_ERROR, "Excessive element nesting"));
@@ -1189,11 +1202,24 @@ impl<'a> Parser<'a> {
             self.sax.end_element_ns(local, prefix, uri);
             self.ns_stack.pop();
             self.depth -= 1;
-            return Ok(());
+            return Ok(None);
         }
 
         self.stack.push(elem);
-        self.parse_content(elem)?;
+        Ok(Some(OpenElem { qname, elem }))
+    }
+
+    /// Consume the end tag of an open element and emit its SAX end event.
+    ///
+    /// `local` and `prefix` are re-derived from the stored QName rather than
+    /// carried across the call: `split_qname` borrows, so this allocates
+    /// nothing.
+    fn close_element(&mut self, open: &OpenElem) -> Result<(), XmlError> {
+        let (prefix, local) = Self::split_qname(&open.qname).map_err(|mut e| {
+            e.line = self.line;
+            e.col = self.col;
+            e
+        })?;
         if !self.starts_with(b"</") {
             return Err(self.err(
                 XML_ERR_TAG_NOT_FINISHED,
@@ -1205,19 +1231,29 @@ impl<'a> Parser<'a> {
         let (ea, eb) = self.parse_name_span()?;
         self.skip_s()?;
         self.expect_byte(b'>', XML_ERR_GT_REQUIRED, "'>' required")?;
-        if &self.input[ea..eb] != qname.as_bytes() {
+        if &self.input[ea..eb] != open.qname.as_bytes() {
             let end_name = String::from_utf8_lossy(&self.input[ea..eb]).into_owned();
+            let qname = &open.qname;
             return Err(self.err(
                 XML_ERR_TAG_NAME_MISMATCH,
                 format!("Opening and ending tag mismatch: {qname} and {end_name}"),
             ));
         }
-        let uri = self.doc.node(elem).ns_uri.as_deref();
+        let uri = self.doc.node(open.elem).ns_uri.as_deref();
         self.sax.end_element_ns(local, prefix, uri);
         self.ns_stack.pop();
         self.stack.pop();
         self.depth -= 1;
         Ok(())
+    }
+
+    /// The recursive shape, kept while the loop is built alongside it.
+    fn parse_element(&mut self, parent: NodeId) -> Result<(), XmlError> {
+        let Some(open) = self.open_element(parent)? else {
+            return Ok(());
+        };
+        self.parse_content(open.elem)?;
+        self.close_element(&open)
     }
 
     fn parse_content(&mut self, parent: NodeId) -> Result<(), XmlError> {

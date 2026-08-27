@@ -222,8 +222,11 @@ pub struct XmlPushParserCtxt {
     options: i32,
     url: Option<String>,
     encoding: Option<String>,
-    doc: Option<XmlDoc>,
     last_error: Option<XmlError>,
+    /// Parser state between chunks. `None` until the prolog and the root's
+    /// start tag have been seen, because until then there is nothing to resume.
+    state: Option<PushState>,
+    consumed: usize,
 }
 
 impl XmlPushParserCtxt {
@@ -233,8 +236,16 @@ impl XmlPushParserCtxt {
     }
 
     /// Bytes buffered but not yet parsed.
+    ///
+    /// Once streaming starts this is only the unparsed tail, not the document
+    /// seen so far -- that is the whole point of the push parser.
     pub fn buffered(&self) -> usize {
         self.buf.len()
+    }
+
+    /// Total bytes parsed and released so far.
+    pub fn consumed(&self) -> usize {
+        self.consumed
     }
 }
 
@@ -251,8 +262,9 @@ pub fn xml_create_push_parser_ctxt(
         options: options | XML_PARSE_NONET | XML_PARSE_NO_XXE,
         url: url.map(str::to_string),
         encoding: encoding.map(str::to_string),
-        doc: None,
         last_error: None,
+        state: None,
+        consumed: 0,
     }
 }
 
@@ -264,9 +276,133 @@ pub fn xml_parse_chunk(
     terminate: i32,
 ) -> Result<Option<XmlDoc>, XmlError> {
     ctxt.buf.extend_from_slice(chunk);
-    if terminate == 0 {
+    let terminate = terminate != 0;
+    let opts = ctxt.options;
+
+    // Phase 1 -- prolog. Nothing can stream until the root's start tag is in
+    // hand, so buffer until it parses. The prolog is small, and re-parsing it
+    // per chunk is cheap; the body, which is not small, is never re-parsed.
+    if ctxt.state.is_none() {
+        let mut sink = rusty_xml_sax::NullSax;
+        let started = {
+            let mut p = fresh_parser(&ctxt.buf, opts, &mut sink);
+            match p.parse_prolog().and_then(|()| p.open_element(NodeId::DOCUMENT)) {
+                Ok(Some(root)) => {
+                    let at = p.pos;
+                    Some((p.suspend(vec![root], false), at))
+                }
+                // `<root/>`, or not enough input yet, or a real error. All three
+                // are handled by parsing the buffer whole -- which for the empty
+                // root is correct and for an error reports it at the right time.
+                _ => None,
+            }
+        };
+        match started {
+            Some((st, at)) => {
+                ctxt.state = Some(st);
+                ctxt.buf.drain(..at);
+                ctxt.consumed += at;
+            }
+            None => {
+                if !terminate {
+                    return Ok(None);
+                }
+                return finish_whole(ctxt);
+            }
+        }
+    }
+
+    // Phase 2 -- content, streamed. Parse as far as the buffer allows, then
+    // release what was consumed: peak memory becomes the tree plus the
+    // unparsed tail rather than the tree plus the whole document.
+    let mut sink = rusty_xml_sax::NullSax;
+    let mut st = ctxt.state.take().expect("state is present past the prolog");
+    let mut open = std::mem::take(&mut st.open);
+    let was_closed = st.root_closed;
+    let mut p = Parser::resume(&ctxt.buf, opts, &mut sink, st);
+
+    // Once the root has closed, everything left is epilogue; re-entering the
+    // content loop would parse trailing whitespace as document content.
+    let safe = if was_closed {
+        0
+    } else {
+        match p.parse_content_inner(NodeId::DOCUMENT, &mut open, !terminate, true) {
+            Ok(at) => at,
+            Err(e) => {
+                ctxt.last_error = Some(e.clone());
+                return Err(e);
+            }
+        }
+    };
+    let root_closed = was_closed || open.is_empty();
+
+    if !terminate {
+        let at = safe.min(ctxt.buf.len());
+        ctxt.state = Some(p.suspend(open, root_closed));
+        ctxt.buf.drain(..at);
+        ctxt.buf.shrink_to_fit();
+        ctxt.consumed += at;
         return Ok(None);
     }
+
+    if let Some(o) = open.last() {
+        let (_, local) = Parser::split_qname(&o.qname).unwrap_or((None, &o.qname));
+        let e = p.err(
+            XML_ERR_TAG_NOT_FINISHED,
+            format!("Premature end of data in tag {local}"),
+        );
+        ctxt.last_error = Some(e.clone());
+        return Err(e);
+    }
+
+    if let Err(e) = p.parse_epilog() {
+        ctxt.last_error = Some(e.clone());
+        return Err(e);
+    }
+    let total = ctxt.consumed + ctxt.buf.len();
+    let mut doc = p.suspend(open, true).doc;
+    apply_dtd_defaults(&mut doc, total)?;
+    ctxt.buf = Vec::new();
+    ctxt.buf.shrink_to_fit();
+    ctxt.last_error = None;
+    Ok(Some(doc))
+}
+
+/// A parser over a whole buffer, configured exactly as `parse_utf8` does.
+fn fresh_parser<'a>(
+    input: &'a [u8],
+    options: i32,
+    sax: &'a mut dyn SaxHandler,
+) -> Parser<'a> {
+    Parser {
+        input,
+        pos: 0,
+        line: 1,
+        col: 1,
+        options,
+        old10: (options & XML_PARSE_OLD10) != 0,
+        depth: 0,
+        ns_stack: Vec::new(),
+        sax,
+        doc: XmlDoc::with_node_capacity(
+            Some("1.0"),
+            if (options & XML_PARSE_NO_TREE) != 0 {
+                input.len() / 32
+            } else {
+                input.len() / 10
+            },
+        ),
+        stack: Vec::new(),
+        char_buf: String::new(),
+        no_tree: (options & XML_PARSE_NO_TREE) != 0,
+        scratch_raw: Vec::new(),
+        scratch_sax: Vec::new(),
+        started: false,
+    }
+}
+
+/// Parse the accumulated buffer as one whole document.
+fn finish_whole(ctxt: &mut XmlPushParserCtxt) -> Result<Option<XmlDoc>, XmlError> {
     match xml_read_memory(
         &ctxt.buf,
         ctxt.url.as_deref(),
@@ -274,16 +410,9 @@ pub fn xml_parse_chunk(
         ctxt.options,
     ) {
         Ok(doc) => {
-            // The tree is RETURNED, not also stored. It used to be cloned into
-            // `ctxt.doc` as well, which cost a push parse 1.85x the memory of
-            // xml_read_memory -- for a copy nothing could read, because the
-            // context has never had a document accessor. The input buffer is
-            // released here too: holding it once the tree exists doubles peak
-            // memory for nothing.
             ctxt.buf = Vec::new();
             ctxt.buf.shrink_to_fit();
             ctxt.last_error = None;
-            ctxt.doc = None;
             Ok(Some(doc))
         }
         Err(e) => {
@@ -321,6 +450,26 @@ where
 pub fn xml_ctxt_reset(ctxt: &mut XmlParserCtxt) {
     ctxt.doc = None;
     ctxt.last_error = None;
+}
+
+/// Parser state that survives between push chunks.
+///
+/// Everything the parser needs to carry across a chunk boundary is owned data,
+/// which is why streaming is possible at all: the descent lives in `open`, not
+/// on the call stack.
+struct PushState {
+    doc: XmlDoc,
+    ns_stack: Vec<Vec<(Option<String>, String)>>,
+    stack: Vec<NodeId>,
+    open: Vec<OpenElem>,
+    char_buf: String,
+    line: u32,
+    col: u32,
+    depth: u32,
+    /// The root's end tag has been consumed. Without this, a later chunk would
+    /// re-enter the content loop with an empty stack and parse the document's
+    /// trailing whitespace as content, adding a stray text node.
+    root_closed: bool,
 }
 
 /// An element whose start tag has been consumed and whose end tag has not.
@@ -1271,8 +1420,56 @@ impl<'a> Parser<'a> {
     /// at all.
     fn parse_content(&mut self, parent: NodeId) -> Result<(), XmlError> {
         let mut open: Vec<OpenElem> = Vec::new();
-        self.parse_content_inner(parent, &mut open, false)?;
+        self.parse_content_inner(parent, &mut open, false, false)?;
         Ok(())
+    }
+
+    fn parse_document(&mut self) -> Result<(), XmlError> {
+        self.parse_prolog()?;
+        self.parse_element(NodeId::DOCUMENT)?;
+        self.parse_epilog()
+    }
+
+    /// Rebuild a parser over a fresh buffer from saved state.
+    fn resume(
+        input: &'a [u8],
+        options: i32,
+        sax: &'a mut dyn SaxHandler,
+        st: PushState,
+    ) -> Self {
+        let _ = st.root_closed;
+        Parser {
+            input,
+            pos: 0,
+            line: st.line,
+            col: st.col,
+            options,
+            old10: (options & XML_PARSE_OLD10) != 0,
+            depth: st.depth,
+            ns_stack: st.ns_stack,
+            sax,
+            doc: st.doc,
+            stack: st.stack,
+            char_buf: st.char_buf,
+            no_tree: (options & XML_PARSE_NO_TREE) != 0,
+            scratch_raw: Vec::new(),
+            scratch_sax: Vec::new(),
+            started: true,
+        }
+    }
+
+    fn suspend(self, open: Vec<OpenElem>, root_closed: bool) -> PushState {
+        PushState {
+            root_closed,
+            doc: self.doc,
+            ns_stack: self.ns_stack,
+            stack: self.stack,
+            open,
+            char_buf: self.char_buf,
+            line: self.line,
+            col: self.col,
+            depth: self.depth,
+        }
     }
 
     /// True when the remaining bytes are a proper prefix of a construct and we
@@ -1325,6 +1522,10 @@ impl<'a> Parser<'a> {
             Some(b'&') => !r.contains(&b';'),
             // `]` might yet become `]]>`.
             Some(b']') => r.len() < 3,
+            // XML 1.0 2.11 folds CRLF to a single LF. A trailing CR gives no
+            // way to know whether the LF follows, and guessing turned every
+            // CRLF that landed on a chunk boundary into two newlines.
+            Some(0x0D) => r.len() < 2,
             _ => false,
         }
     }
@@ -1343,6 +1544,7 @@ impl<'a> Parser<'a> {
         parent: NodeId,
         open: &mut Vec<OpenElem>,
         stop_at_eof: bool,
+        stop_when_empty: bool,
     ) -> Result<usize, XmlError> {
         // The element the caller asked us to fill. When the innermost element
         // closes and nothing else is open, content belongs to THIS again --
@@ -1378,6 +1580,12 @@ impl<'a> Parser<'a> {
                 match open.pop() {
                     Some(o) => {
                         self.close_element(&o)?;
+                        // Streaming starts with the root already open, so an
+                        // empty stack means the root just closed and the
+                        // epilogue is the driver's job.
+                        if stop_when_empty && open.is_empty() {
+                            return Ok(self.pos);
+                        }
                         parent = open.last().map(|f| f.elem).unwrap_or(outer);
                         continue;
                     }
@@ -1479,7 +1687,10 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    fn parse_document(&mut self) -> Result<(), XmlError> {
+    /// Everything before the root element's start tag: BOM, XML declaration,
+    /// misc, doctype. Split out so the push parser can reach the root without
+    /// committing to parse the whole document in one go.
+    fn parse_prolog(&mut self) -> Result<(), XmlError> {
         if self.starts_with(&[0xef, 0xbb, 0xbf]) {
             self.pos += 3;
         }
@@ -1520,7 +1731,11 @@ impl<'a> Parser<'a> {
         if self.peek_byte() != Some(b'<') {
             return Err(self.err(XML_ERR_DOCUMENT_EMPTY, "Document is empty"));
         }
-        self.parse_element(NodeId::DOCUMENT)?;
+        Ok(())
+    }
+
+    /// Everything after the root element: trailing misc, then end-of-document.
+    fn parse_epilog(&mut self) -> Result<(), XmlError> {
         self.parse_misc(NodeId::DOCUMENT)?;
         self.skip_s()?;
         if !self.eof() {

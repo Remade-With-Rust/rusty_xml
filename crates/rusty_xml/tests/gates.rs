@@ -883,3 +883,79 @@ fn no_tree_mode_delivers_identical_events() {
         );
     }
 }
+
+/// The push parser used to accumulate the whole document and parse it at
+/// terminate, so "push" cost more memory than xml_read_memory, not less. It
+/// streams now: content is parsed as each chunk arrives and consumed bytes are
+/// released. The result must still be byte-identical to a whole-document parse
+/// at EVERY chunk size, which is the only contract that matters here.
+#[test]
+fn push_parser_streams_and_matches_a_whole_parse() {
+    let root = workspace_root();
+    let opts = default_parse_options();
+    for name in [
+        "slashdot.xml",
+        "big-300k.xml",
+        "big-attr.xml",
+        "svg-lite.xml",
+        "atom-lite.xml",
+        "title.xml",
+    ] {
+        let path = root.join("corpora").join(name);
+        if !path.exists() {
+            continue;
+        }
+        let d = std::fs::read(&path).unwrap();
+        let whole = xml_save_doc(&xml_read_memory(&d, None, None, opts).unwrap(), 0);
+
+        // Byte-at-a-time is the harshest split: it lands a boundary inside
+        // every construct, including the CRLF that XML must fold to one LF.
+        for chunk in [1usize, 2, 3, 7, 997, 65536] {
+            let mut ctx = rusty_xml::xml_create_push_parser_ctxt(&[], None, None, opts);
+            let mut i = 0;
+            while i < d.len() {
+                let n = chunk.min(d.len() - i);
+                let _ = rusty_xml::xml_parse_chunk(&mut ctx, &d[i..i + n], 0);
+                i += n;
+            }
+            let doc = rusty_xml::xml_parse_chunk(&mut ctx, &[], 1)
+                .unwrap_or_else(|e| panic!("{name} chunk={chunk}: {e:?}"))
+                .unwrap_or_else(|| panic!("{name} chunk={chunk}: no document"));
+            assert_eq!(
+                xml_save_doc(&doc, 0),
+                whole,
+                "{name} chunk={chunk}: streamed result differs from a whole parse"
+            );
+        }
+    }
+}
+
+/// It must actually stream: the buffer holds the unparsed tail, not the
+/// document seen so far.
+#[test]
+fn push_parser_does_not_hoard_the_document() {
+    let path = workspace_root().join("corpora").join("big-300k.xml");
+    if !path.exists() {
+        return;
+    }
+    let d = std::fs::read(&path).unwrap();
+    let mut ctx =
+        rusty_xml::xml_create_push_parser_ctxt(&[], None, None, default_parse_options());
+    let mut peak = 0usize;
+    let mut i = 0;
+    while i < d.len() {
+        let n = 4096.min(d.len() - i);
+        let _ = rusty_xml::xml_parse_chunk(&mut ctx, &d[i..i + n], 0);
+        i += n;
+        peak = peak.max(ctx.buffered());
+    }
+    assert!(
+        rusty_xml::xml_parse_chunk(&mut ctx, &[], 1).unwrap().is_some(),
+        "terminating chunk must produce the document"
+    );
+    assert!(
+        peak < d.len() / 10,
+        "peak buffered {peak} of {} bytes -- the push parser is hoarding the document",
+        d.len()
+    );
+}

@@ -662,3 +662,64 @@ fn xml_entry_points_do_not_panic_on_malformed_input() {
         }
     }
 }
+
+/// Defaulted attributes are an amplification vector: 13 KB with 200 ATTLIST
+/// defaults expanded to 402,002 nodes (~74 MB) unbounded. libxml2 caps entity
+/// amplification for the same reason. The bound must reject that WITHOUT
+/// rejecting a real DTD-heavy document, so both directions are pinned here.
+#[test]
+fn attlist_default_amplification_is_bounded() {
+    let opts = default_parse_options();
+    // abusive: ~30 defaulted attributes per input byte
+    let decls: String = (0..200)
+        .map(|i| format!("<!ATTLIST e a{i} CDATA \"d\">\n"))
+        .collect();
+    let body: String = (0..2000).map(|_| "<e/>".to_string()).collect();
+    let bomb = format!("<!DOCTYPE r [<!ELEMENT e ANY>\n{decls}]><r>{body}</r>");
+    assert!(
+        xml_read_memory(bomb.as_bytes(), None, None, opts).is_err(),
+        "a 13 KB document must not be allowed to expand to 400k attributes"
+    );
+
+    // legitimate: ~0.2 defaulted attributes per input byte, which libxml2 accepts
+    let decls: String = (0..5)
+        .map(|i| format!("<!ATTLIST e a{i} CDATA \"d{i}\">\n"))
+        .collect();
+    let body: String = (0..4000).map(|i| format!("<e id=\"{i}\">t</e>")).collect();
+    let ok = format!("<!DOCTYPE r [<!ELEMENT e ANY>\n{decls}]><r>{body}</r>");
+    assert!(
+        xml_read_memory(ok.as_bytes(), None, None, opts).is_ok(),
+        "the bound must not reject a document the C oracle accepts"
+    );
+}
+
+/// Duplicate-attribute detection was a linear scan over the accepted
+/// attributes, so one element with many attributes was O(n^2): 16,000 took
+/// 185 ms. This pins the shape, not a wall-clock number.
+#[test]
+fn many_attributes_on_one_element_is_not_quadratic() {
+    let opts = default_parse_options();
+    let build = |k: usize| {
+        let mut s = String::from("<r");
+        for i in 0..k {
+            s.push_str(&format!(" a{i}=\"v\""));
+        }
+        s.push_str("/>");
+        s
+    };
+    for k in [1000usize, 8000] {
+        let doc = xml_read_memory(build(k).as_bytes(), None, None, opts)
+            .unwrap_or_else(|e| panic!("{k} attributes should parse: {e:?}"));
+        assert_eq!(doc.len(), k + 2, "every attribute becomes a node");
+    }
+    // duplicates must still be caught once the set path is active
+    let mut dup = String::from("<r");
+    for i in 0..40 {
+        dup.push_str(&format!(" a{i}=\"v\""));
+    }
+    dup.push_str(" a7=\"again\"/>");
+    assert!(
+        xml_read_memory(dup.as_bytes(), None, None, opts).is_err(),
+        "a repeated attribute must be rejected on the set path too"
+    );
+}

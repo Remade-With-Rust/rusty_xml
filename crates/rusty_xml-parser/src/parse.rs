@@ -1004,6 +1004,8 @@ impl<'a> Parser<'a> {
             ));
         }
 
+        let mut seen_keys: std::collections::HashSet<(Option<String>, String)> =
+            std::collections::HashSet::new();
         let mut sax_attrs: Vec<SaxAttr> = std::mem::take(&mut self.scratch_sax);
         sax_attrs.clear();
         for idx in 0..raw_attrs.len() {
@@ -1047,11 +1049,25 @@ impl<'a> Parser<'a> {
             };
             // The attributes already accepted ARE the "seen" set -- a separate
             // vector of copies was allocated per element to hold the same thing.
-            if sax_attrs
-                .iter()
-                .any(|s| s.uri.as_deref() == uri.as_deref() && s.local == al_owned)
-            {
-                return Err(self.err(XML_ERR_ATTRIBUTE_REDEFINED, "Attribute redefined"));
+            // Linear over the accepted attributes is fine for the handful a real
+            // element carries, but it is O(n^2) and an element with 16,000
+            // attributes took 185 ms. Switch to a set once it could matter.
+            if sax_attrs.len() < 32 {
+                if sax_attrs
+                    .iter()
+                    .any(|s| s.uri.as_deref() == uri.as_deref() && s.local == al_owned)
+                {
+                    return Err(self.err(XML_ERR_ATTRIBUTE_REDEFINED, "Attribute redefined"));
+                }
+            } else {
+                if seen_keys.is_empty() {
+                    for a in sax_attrs.iter() {
+                        seen_keys.insert((a.uri.clone(), a.local.clone()));
+                    }
+                }
+                if !seen_keys.insert((uri.clone(), al_owned.clone())) {
+                    return Err(self.err(XML_ERR_ATTRIBUTE_REDEFINED, "Attribute redefined"));
+                }
             }
             sax_attrs.push(SaxAttr {
                 local: al_owned,
@@ -1324,7 +1340,7 @@ fn parse_utf8(
     };
     match p.parse_document() {
         Ok(()) => {
-            apply_dtd_defaults(&mut p.doc);
+            apply_dtd_defaults(&mut p.doc, buffer.len())?;
             if p.doc.encoding.is_none() {
                 if let Some(n) = enc_name {
                     if !n.eq_ignore_ascii_case("UTF-8") && !n.eq_ignore_ascii_case("US-ASCII") {
@@ -1343,21 +1359,31 @@ fn parse_utf8(
     }
 }
 
-fn apply_dtd_defaults(doc: &mut XmlDoc) {
+fn apply_dtd_defaults(doc: &mut XmlDoc, input_len: usize) -> Result<(), XmlError> {
     // The common cases -- no DTD, or a DTD carrying no ATTLIST default -- cost
     // nothing now. Testing before the clone matters: cloning the DTD copies
     // every entity and declaration in it.
     match &doc.dtd {
-        None => return,
+        None => return Ok(()),
         Some(d) => {
             if !d.attributes.values().any(|a| a.default_value.is_some()) {
-                return;
+                return Ok(());
             }
         }
     }
+    // Defaulted attributes are an amplification vector: 13 KB with 200 ATTLIST
+    // defaults expanded to 402,002 nodes (~74 MB) before this bound existed.
+    // libxml2 caps entity amplification for the same reason. The budget is
+    // generous enough that a real DTD never reaches it.
+    // Sized from measurement, not taste: a real DTD-heavy document runs about
+    // 0.18 defaulted attributes per input byte, while the amplification cases
+    // run 12-30 per byte -- two orders of magnitude apart. One per input byte
+    // sits in the gap, with a floor so small documents are never penalised and
+    // a ceiling so a huge one cannot walk past it.
+    let mut budget = input_len.max(65_536).min(5_000_000);
     let dtd = match doc.dtd.clone() {
         Some(d) => d,
-        None => return,
+        None => return Ok(()),
     };
     // Group the defaults by element name once. The previous form rescanned
     // every declaration for every element in the document, and allocated the
@@ -1390,10 +1416,20 @@ fn apply_dtd_defaults(doc: &mut XmlDoc) {
         };
         for (aname, v) in list.iter() {
             if doc.xml_get_prop(id, aname).is_none() {
+                if budget == 0 {
+                    return Err(XmlError::new(
+                        XML_ERR_INTERNAL_ERROR,
+                        "Maximum attribute-default amplification exceeded",
+                        0,
+                        0,
+                    ));
+                }
+                budget -= 1;
                 doc.xml_set_prop(id, aname, v);
             }
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]

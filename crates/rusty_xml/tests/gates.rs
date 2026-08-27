@@ -959,3 +959,70 @@ fn push_parser_does_not_hoard_the_document() {
         d.len()
     );
 }
+
+/// The HTML parser decoded no entities at all, so `caf&eacute;` reached the
+/// tree verbatim and the serializer turned it into `caf&amp;eacute;`. For
+/// anything reading extracted text that is silent corruption of the most common
+/// characters on the web.
+#[test]
+fn html_named_and_numeric_entities_are_decoded() {
+    let opts = default_parse_options();
+    let doc = rusty_xml::html_read_memory(
+        b"<html><body><p>caf&eacute; &mdash; don&rsquo;t &nbsp; &copy; AT&T &#65;&#x42; &unknown; &amp</p></body></html>",
+        None,
+        None,
+        opts,
+    )
+    .unwrap();
+    let mut text = String::new();
+    for i in 0..doc.len() {
+        let id = rusty_xml::NodeId(i as u32);
+        if doc.kind(id) == rusty_xml::NodeKind::Text {
+            text.push_str(&doc.node(id).content);
+        }
+    }
+    assert!(text.contains("caf\u{e9}"), "eacute must decode: {text:?}");
+    assert!(text.contains('\u{2014}'), "mdash must decode: {text:?}");
+    assert!(text.contains('\u{2019}'), "rsquo must decode: {text:?}");
+    assert!(text.contains('\u{a0}'), "nbsp must decode: {text:?}");
+    assert!(text.contains('\u{a9}'), "copy must decode: {text:?}");
+    assert!(text.contains("AB"), "numeric refs must decode: {text:?}");
+    // A bare ampersand is not a reference and must survive as written.
+    assert!(text.contains("AT&T"), "bare & must survive: {text:?}");
+    // An unknown name is left alone, as a browser leaves it.
+    assert!(text.contains("&unknown;"), "unknown name must survive: {text:?}");
+    // HTML allows a named reference with no semicolon.
+    assert!(text.trim_end().ends_with('&'), "`&amp` without `;` decodes: {text:?}");
+
+    // Attribute values go through the same path.
+    let doc = rusty_xml::html_read_memory(
+        b"<html><body><a title=\"caf&eacute;\" href=x?a=1&amp;b=2>t</a></body></html>",
+        None,
+        None,
+        opts,
+    )
+    .unwrap();
+    let mut attrs = String::new();
+    for i in 0..doc.len() {
+        let id = rusty_xml::NodeId(i as u32);
+        if doc.kind(id) == rusty_xml::NodeKind::Attribute {
+            attrs.push_str(&doc.node(id).content);
+        }
+    }
+    assert!(attrs.contains("caf\u{e9}"), "attribute entities decode: {attrs:?}");
+    assert!(attrs.contains("a=1&b=2"), "attribute &amp; decodes: {attrs:?}");
+}
+
+/// XML is not HTML: only the five predefined entities exist, and an unknown one
+/// is an error rather than literal text. The HTML change must not leak here.
+#[test]
+fn xml_entity_rules_are_unchanged_by_the_html_table() {
+    let opts = default_parse_options();
+    let doc = xml_read_memory(b"<r>&lt;&gt;&amp;&apos;&quot;</r>", None, None, opts).unwrap();
+    assert_eq!(String::from_utf8_lossy(&xml_save_doc(&doc, 0)).trim_end().lines().last().unwrap(),
+               "<r>&lt;&gt;&amp;'\"</r>");
+    assert!(
+        xml_read_memory(b"<r>&eacute;</r>", None, None, opts).is_err(),
+        "an HTML name is not an XML entity"
+    );
+}

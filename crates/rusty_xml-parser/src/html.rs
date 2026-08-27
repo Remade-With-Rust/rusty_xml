@@ -177,7 +177,9 @@ impl<'a> HtmlParser<'a> {
         if i == 0 {
             return;
         }
-        let t = r[..i].to_string();
+        // Entities were never decoded here, so `caf&eacute;` reached the tree
+        // verbatim and came back out as `caf&amp;eacute;`.
+        let t = crate::html_entities::decode_html_text(&r[..i]).into_owned();
         self.bump(i);
         if t.chars().all(|c| c.is_whitespace()) && self.stack.is_empty() {
             return;
@@ -318,7 +320,7 @@ impl<'a> HtmlParser<'a> {
             let q = r.as_bytes()[0] as char;
             self.bump(1);
             if let Some(end) = self.rest().find(q) {
-                let v = self.rest()[..end].to_string();
+                let v = crate::html_entities::decode_html_text(&self.rest()[..end]).into_owned();
                 self.bump(end + 1);
                 return v;
             }
@@ -331,7 +333,7 @@ impl<'a> HtmlParser<'a> {
             }
             n = i + c.len_utf8();
         }
-        let v = self.rest()[..n].to_string();
+        let v = crate::html_entities::decode_html_text(&self.rest()[..n]).into_owned();
         self.bump(n);
         v
     }

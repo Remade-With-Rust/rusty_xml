@@ -227,6 +227,10 @@ pub struct XmlPushParserCtxt {
     /// start tag have been seen, because until then there is nothing to resume.
     state: Option<PushState>,
     consumed: usize,
+    /// Set when the document needs an encoding conversion or has a BOM. The
+    /// streaming path works on raw bytes and cannot convert as it goes, so
+    /// those documents are buffered whole, as they were before streaming.
+    no_stream: bool,
 }
 
 impl XmlPushParserCtxt {
@@ -265,6 +269,7 @@ pub fn xml_create_push_parser_ctxt(
         last_error: None,
         state: None,
         consumed: 0,
+        no_stream: false,
     }
 }
 
@@ -282,7 +287,17 @@ pub fn xml_parse_chunk(
     // Phase 1 -- prolog. Nothing can stream until the root's start tag is in
     // hand, so buffer until it parses. The prolog is small, and re-parsing it
     // per chunk is cheap; the body, which is not small, is never re-parsed.
-    if ctxt.state.is_none() {
+    if ctxt.state.is_none() && !ctxt.no_stream {
+        // Conversion is stateful and the streaming path hands raw bytes to the
+        // parser, so anything that is not already plain UTF-8 is buffered.
+        match crate::encoding::xml_convert_to_utf8_cow(&ctxt.buf, ctxt.encoding.as_deref()) {
+            Ok((std::borrow::Cow::Borrowed(b), _)) if b.len() == ctxt.buf.len() => {}
+            _ => {
+                ctxt.no_stream = true;
+            }
+        }
+    }
+    if ctxt.state.is_none() && !ctxt.no_stream {
         let mut sink = rusty_xml_sax::NullSax;
         let started = {
             let mut p = fresh_parser(&ctxt.buf, opts, &mut sink);
@@ -310,6 +325,13 @@ pub fn xml_parse_chunk(
                 return finish_whole(ctxt);
             }
         }
+    }
+
+    if ctxt.no_stream {
+        if !terminate {
+            return Ok(None);
+        }
+        return finish_whole(ctxt);
     }
 
     // Phase 2 -- content, streamed. Parse as far as the buffer allows, then
@@ -1651,7 +1673,24 @@ impl<'a> Parser<'a> {
             // way to know whether the LF follows, and guessing turned every
             // CRLF that landed on a chunk boundary into two newlines.
             Some(0x0D) => r.len() < 2,
-            _ => false,
+            // A multi-byte character split across chunks: the lead byte says
+            // how many continuation bytes belong to it, and without them the
+            // scalar cannot be decoded.
+            Some(&b0) => {
+                let need = if b0 < 0x80 {
+                    1
+                } else if b0 >> 5 == 0b110 {
+                    2
+                } else if b0 >> 4 == 0b1110 {
+                    3
+                } else if b0 >> 3 == 0b11110 {
+                    4
+                } else {
+                    1
+                };
+                r.len() < need
+            }
+            None => false,
         }
     }
 

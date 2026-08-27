@@ -1154,3 +1154,50 @@ fn single_byte_encodings_decode() {
         assert_eq!(&text, want, "{label} decoded wrongly");
     }
 }
+
+/// Two streaming defects found by differential fuzzing -- feeding mutated
+/// documents through both paths and comparing -- which no single-split test
+/// could reach.
+#[test]
+fn streaming_handles_encodings_and_split_characters() {
+    let opts = default_parse_options();
+    let run = |d: &[u8], chunk: usize| -> Option<Vec<u8>> {
+        let mut c = rusty_xml::xml_create_push_parser_ctxt(&[], None, None, opts);
+        let mut i = 0;
+        while i < d.len() {
+            let n = chunk.min(d.len() - i);
+            if rusty_xml::xml_parse_chunk(&mut c, &d[i..i + n], 0).is_err() {
+                return None;
+            }
+            i += n;
+        }
+        rusty_xml::xml_parse_chunk(&mut c, &[], 1)
+            .ok()
+            .flatten()
+            .map(|x| xml_save_doc(&x, 0))
+    };
+    let cases: Vec<Vec<u8>> = vec![
+        // Not UTF-8: the streaming path hands raw bytes to the parser and
+        // cannot convert as it goes, so these must fall back to buffering.
+        b"<?xml version=\"1.0\" encoding=\"windows-1251\"?><d>\xf2\xe5\xf1\xf2</d>".to_vec(),
+        b"<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?><d>\xe9</d>".to_vec(),
+        // A BOM shifts every offset.
+        b"\xef\xbb\xbf<r>bom</r>".to_vec(),
+        // Multi-byte characters split across a chunk boundary: 2-, 3- and
+        // 4-byte sequences, plus CRLF which folds to one LF.
+        "<r>caf\u{e9} \u{65e5}\u{672c} \u{1F600}</r>".as_bytes().to_vec(),
+        b"<r>a\r\nb\rc</r>".to_vec(),
+        "<r a=\"\u{1F600}\">\u{e9}</r>".as_bytes().to_vec(),
+    ];
+    for d in cases {
+        let whole = xml_read_memory(&d, None, None, opts).ok().map(|x| xml_save_doc(&x, 0));
+        for chunk in [1usize, 2, 3, 5, 64] {
+            assert_eq!(
+                run(&d, chunk),
+                whole,
+                "chunk={chunk} differs from a whole parse for {:?}",
+                String::from_utf8_lossy(&d)
+            );
+        }
+    }
+}

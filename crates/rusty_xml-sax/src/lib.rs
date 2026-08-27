@@ -102,6 +102,17 @@ pub trait SaxHandler {
     }
 }
 
+/// A handler that discards every callback, using the trait's default bodies.
+///
+/// Building a tree does not need the SAX event stream, but the tree entry
+/// points used [`SaxRecorder`], which deep-copies the local name, prefix, URI,
+/// namespace list and *every attribute* of every element into a log that is
+/// then dropped. On a 627 KB document that was over half of all allocations.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NullSax;
+
+impl SaxHandler for NullSax {}
+
 /// Records every callback for the event-exact gate.
 #[derive(Clone, Debug, Default)]
 pub struct SaxRecorder {

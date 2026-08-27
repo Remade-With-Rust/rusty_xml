@@ -113,8 +113,8 @@ pub fn xml_read_memory(
     encoding: Option<&str>,
     options: i32,
 ) -> Result<XmlDoc, XmlError> {
-    let mut rec = rusty_xml_sax::SaxRecorder::new();
-    parse_doc(buffer, url, encoding, options, &mut rec)
+    let mut sink = rusty_xml_sax::NullSax;
+    parse_doc(buffer, url, encoding, options, &mut sink)
 }
 
 /// `xmlReadDoc`.
@@ -259,6 +259,24 @@ pub fn xml_ctxt_reset(ctxt: &mut XmlParserCtxt) {
     ctxt.last_error = None;
 }
 
+/// One attribute exactly as it was scanned, before namespaces are resolved.
+struct RawAttr {
+    qname: String,
+    value: String,
+    value_off: usize,
+    /// Byte index of the QName's colon, resolved once at scan time.
+    colon: Option<usize>,
+}
+
+impl RawAttr {
+    fn parts(&self) -> (Option<&str>, &str) {
+        match self.colon {
+            None => (None, self.qname.as_str()),
+            Some(i) => (Some(&self.qname[..i]), &self.qname[i + 1..]),
+        }
+    }
+}
+
 struct Parser<'a> {
     input: &'a [u8],
     pos: usize,
@@ -272,6 +290,8 @@ struct Parser<'a> {
     doc: XmlDoc,
     stack: Vec<NodeId>,
     char_buf: String,
+    scratch_raw: Vec<RawAttr>,
+    scratch_sax: Vec<SaxAttr>,
     started: bool,
 }
 
@@ -384,7 +404,7 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    fn parse_name(&mut self) -> Result<String, XmlError> {
+    fn parse_name_span(&mut self) -> Result<(usize, usize), XmlError> {
         let c = self.peek_char()?.ok_or_else(|| self.err(XML_ERR_NAME_REQUIRED, "Name expected"))?;
         if !xml_is_name_start_char(c as u32, self.old10) {
             return Err(self.err(XML_ERR_NAME_REQUIRED, "Name expected"));
@@ -418,7 +438,14 @@ impl<'a> Parser<'a> {
         }
         // Every byte in the span was accepted as part of a decoded character,
         // so this is valid UTF-8; validate anyway rather than reach for unsafe.
-        match std::str::from_utf8(&self.input[start..self.pos]) {
+        Ok((start, self.pos))
+    }
+
+    /// The owning form. Prefer [`Parser::parse_name_span`] where the name is
+    /// only compared -- an end tag allocated a String purely to discard it.
+    fn parse_name(&mut self) -> Result<String, XmlError> {
+        let (a, b) = self.parse_name_span()?;
+        match std::str::from_utf8(&self.input[a..b]) {
             Ok(name) => Ok(name.to_string()),
             Err(_) => Err(self.err(XML_ERR_INVALID_CHAR, "Invalid UTF-8")),
         }
@@ -495,8 +522,10 @@ impl<'a> Parser<'a> {
         if !skip_blank {
             self.sax.characters(&self.char_buf);
             if let Some(p) = parent {
-                let t = self.doc.alloc(NodeKind::Text, "#text");
-                self.doc.node_mut(t).content = self.char_buf.clone();
+                let t = self.doc.alloc_unnamed(NodeKind::Text);
+                // Moved, not copied: the buffer is cleared immediately after,
+                // so the clone was a pure allocation plus memcpy per text node.
+                self.doc.node_mut(t).content = std::mem::take(&mut self.char_buf);
                 self.doc.xml_add_child(p, t);
             }
         }
@@ -527,7 +556,7 @@ impl<'a> Parser<'a> {
         }
         self.sax.comment(&body);
         if let Some(p) = parent {
-            let n = self.doc.alloc(NodeKind::Comment, "#comment");
+            let n = self.doc.alloc_unnamed(NodeKind::Comment);
             self.doc.node_mut(n).content = body;
             self.doc.xml_add_child(p, n);
         }
@@ -655,14 +684,14 @@ impl<'a> Parser<'a> {
         if (self.options & XML_PARSE_NOCDATA) != 0 {
             self.sax.characters(&body);
             if let Some(p) = parent {
-                let t = self.doc.alloc(NodeKind::Text, "#text");
+                let t = self.doc.alloc_unnamed(NodeKind::Text);
                 self.doc.node_mut(t).content = body;
                 self.doc.xml_add_child(p, t);
             }
         } else {
             self.sax.cdata_block(&body);
             if let Some(p) = parent {
-                let t = self.doc.alloc(NodeKind::CData, "#cdata-section");
+                let t = self.doc.alloc_unnamed(NodeKind::CData);
                 self.doc.node_mut(t).content = body;
                 self.doc.xml_add_child(p, t);
             }
@@ -759,6 +788,11 @@ impl<'a> Parser<'a> {
                 }
                 if i > rs {
                     if let Ok(run) = std::str::from_utf8(&self.input[rs..i]) {
+                        // Almost every value is a single run, so this is the
+                        // exact size and the String never grows.
+                        if val.is_empty() {
+                            val.reserve_exact(i - rs);
+                        }
                         val.push_str(run);
                         self.col += (i - rs) as u32;
                         self.pos = i;
@@ -866,23 +900,10 @@ impl<'a> Parser<'a> {
             e
         })?;
 
-        struct RawAttr {
-            qname: String,
-            value: String,
-            value_off: usize,
-            /// Byte index of the QName's colon, resolved once at scan time.
-            /// Both later passes used to re-run split_qname over the same name.
-            colon: Option<usize>,
-        }
-        impl RawAttr {
-            fn parts(&self) -> (Option<&str>, &str) {
-                match self.colon {
-                    None => (None, self.qname.as_str()),
-                    Some(i) => (Some(&self.qname[..i]), &self.qname[i + 1..]),
-                }
-            }
-        }
-        let mut raw_attrs: Vec<RawAttr> = Vec::new();
+        // Reused across elements: a fresh Vec per element allocated once and
+        // then grew 1-2-4-8 as the attributes were pushed.
+        let mut raw_attrs: Vec<RawAttr> = std::mem::take(&mut self.scratch_raw);
+        raw_attrs.clear();
         loop {
             self.skip_s()?;
             if self.starts_with(b"/>") || self.peek_byte() == Some(b'>') {
@@ -949,15 +970,31 @@ impl<'a> Parser<'a> {
             ));
         }
 
-        let mut sax_attrs: Vec<SaxAttr> = Vec::new();
+        let mut sax_attrs: Vec<SaxAttr> = std::mem::take(&mut self.scratch_sax);
+        sax_attrs.clear();
         for idx in 0..raw_attrs.len() {
             // Own the parts first; SaxAttr needs them owned anyway, so this
             // costs nothing extra and releases the borrow on raw_attrs.
             let (ap_owned, al_owned, is_ns, value_off) = {
-                let a = &raw_attrs[idx];
-                let (ap, al) = a.parts();
-                let is_ns = (ap.is_none() && al == "xmlns") || ap == Some("xmlns");
-                (ap.map(str::to_string), al.to_string(), is_ns, a.value_off)
+                let a = &mut raw_attrs[idx];
+                let voff = a.value_off;
+                match a.colon {
+                    // Unprefixed: the local name IS the whole QName, so move it
+                    // instead of allocating a second copy of the same bytes.
+                    None => {
+                        let is_ns = a.qname == "xmlns";
+                        (None, std::mem::take(&mut a.qname), is_ns, voff)
+                    }
+                    Some(i) => {
+                        let is_ns = &a.qname[..i] == "xmlns";
+                        (
+                            Some(a.qname[..i].to_string()),
+                            a.qname[i + 1..].to_string(),
+                            is_ns,
+                            voff,
+                        )
+                    }
+                }
             };
             if is_ns {
                 continue;
@@ -1006,7 +1043,7 @@ impl<'a> Parser<'a> {
 
         let elem = self.doc.alloc(NodeKind::Element, local);
         self.doc.node_mut(elem).prefix = prefix.map(str::to_string);
-        self.doc.node_mut(elem).ns_uri = elem_uri.clone();
+        self.doc.node_mut(elem).ns_uri = elem_uri;
         for i in 0..self.ns_stack.last().map_or(0, Vec::len) {
             let (p, u) = {
                 let f = self.ns_stack.last().unwrap();
@@ -1014,14 +1051,21 @@ impl<'a> Parser<'a> {
             };
             self.doc.push_ns_def(elem, p, u);
         }
-        for a in &sax_attrs {
-            let aid = self.doc.add_attr(elem, &a.local, a.prefix.as_deref(), &a.value);
-            self.doc.node_mut(aid).ns_uri = a.uri.clone();
+        for a in sax_attrs.drain(..) {
+            let uri = a.uri;
+            let aid = self.doc.add_attr_owned(elem, a.local, a.prefix, a.value);
+            self.doc.node_mut(aid).ns_uri = uri;
         }
         self.doc.xml_add_child(parent, elem);
 
+        raw_attrs.clear();
+        sax_attrs.clear();
+        self.scratch_raw = raw_attrs;
+        self.scratch_sax = sax_attrs;
+
         if empty {
-            self.sax.end_element_ns(local, prefix, elem_uri.as_deref());
+            let uri = self.doc.node(elem).ns_uri.as_deref();
+            self.sax.end_element_ns(local, prefix, uri);
             self.ns_stack.pop();
             self.depth -= 1;
             return Ok(());
@@ -1037,16 +1081,18 @@ impl<'a> Parser<'a> {
         }
         self.pos += 2;
         self.col += 2;
-        let end_name = self.parse_name()?;
+        let (ea, eb) = self.parse_name_span()?;
         self.skip_s()?;
         self.expect_byte(b'>', XML_ERR_GT_REQUIRED, "'>' required")?;
-        if end_name != qname {
+        if &self.input[ea..eb] != qname.as_bytes() {
+            let end_name = String::from_utf8_lossy(&self.input[ea..eb]).into_owned();
             return Err(self.err(
                 XML_ERR_TAG_NAME_MISMATCH,
                 format!("Opening and ending tag mismatch: {qname} and {end_name}"),
             ));
         }
-        self.sax.end_element_ns(&local, prefix.as_deref(), elem_uri.as_deref());
+        let uri = self.doc.node(elem).ns_uri.as_deref();
+        self.sax.end_element_ns(local, prefix, uri);
         self.ns_stack.pop();
         self.stack.pop();
         self.depth -= 1;
@@ -1237,11 +1283,13 @@ fn parse_utf8(
         sax,
         doc: {
             let mut d = XmlDoc::xml_new_doc(Some("1.0"));
-            d.reserve_nodes(buffer.len() / 16);
+            d.reserve_nodes(buffer.len() / 10);
             d
         },
         stack: Vec::new(),
         char_buf: String::new(),
+        scratch_raw: Vec::new(),
+        scratch_sax: Vec::new(),
         started: false,
     };
     match p.parse_document() {

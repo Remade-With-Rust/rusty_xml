@@ -85,6 +85,8 @@ impl NodeId {
     }
 }
 
+
+
 #[derive(Clone, Debug)]
 pub struct Node {
     pub kind: NodeKind,
@@ -165,7 +167,12 @@ impl XmlDoc {
     /// so a parser that knows the document length can skip most of the arena's
     /// doubling-and-copy. Capped so a huge document cannot reserve wildly.
     pub fn reserve_nodes(&mut self, n: usize) {
-        self.nodes.reserve(n.min(65_536));
+        // Measured node density is ~1 per 10-12 input bytes. The previous cap
+        // of 65_536 was below a 700 KB document's node count, so the arena
+        // still doubled-and-copied its way up -- about 22 MB of memcpy on a
+        // 627 KB file. Shrinking Node itself would need an API break for a
+        // sub-1% effect; reserving correctly removes the same traffic for free.
+        self.nodes.reserve(n.min(1 << 20));
     }
 
     pub fn node(&self, id: NodeId) -> &Node {
@@ -181,7 +188,20 @@ impl XmlDoc {
     }
 
     pub fn name(&self, id: NodeId) -> &str {
-        &self.node(id).name
+        let n = self.node(id);
+        if n.name.is_empty() {
+            // Nodes whose name is fixed by their kind store no String at all;
+            // allocating "#text" once per text node was a measurable share of
+            // every parse. The canonical name is derived here instead.
+            return match n.kind {
+                NodeKind::Text => "#text",
+                NodeKind::CData => "#cdata-section",
+                NodeKind::Comment => "#comment",
+                NodeKind::Document => "#document",
+                _ => "",
+            };
+        }
+        &n.name
     }
 
     pub fn prefix(&self, id: NodeId) -> Option<&str> {
@@ -222,6 +242,14 @@ impl XmlDoc {
 
     pub fn ns_defs(&self, id: NodeId) -> &[(Option<String>, String)] {
         &self.node(id).ns_defs
+    }
+
+    /// Allocate a node whose name is implied by its kind, storing no String.
+    /// [`XmlDoc::name`] reports the canonical name for these.
+    pub fn alloc_unnamed(&mut self, kind: NodeKind) -> NodeId {
+        let id = NodeId(self.nodes.len() as u32);
+        self.nodes.push(Node::new(kind, String::new()));
+        id
     }
 
     pub fn alloc(&mut self, kind: NodeKind, name: impl Into<String>) -> NodeId {
@@ -391,6 +419,31 @@ impl XmlDoc {
         self.xml_add_next_sibling(old, new);
         self.xml_unlink_node(old);
         new
+    }
+
+    /// As [`XmlDoc::add_attr`], but takes ownership. The borrowing form has to
+    /// allocate a fresh String for the name, the prefix and the value, all of
+    /// which the parser already owns.
+    pub fn add_attr_owned(
+        &mut self,
+        elem: NodeId,
+        name: String,
+        prefix: Option<String>,
+        value: String,
+    ) -> NodeId {
+        let id = self.alloc(NodeKind::Attribute, name);
+        self.node_mut(id).prefix = prefix;
+        self.node_mut(id).content = value;
+        self.node_mut(id).parent = Some(elem);
+        let last = self.node(elem).last_attr;
+        if let Some(l) = last {
+            self.node_mut(l).next_sibling = Some(id);
+            self.node_mut(id).prev_sibling = Some(l);
+        } else {
+            self.node_mut(elem).first_attr = Some(id);
+        }
+        self.node_mut(elem).last_attr = Some(id);
+        id
     }
 
     pub fn add_attr(&mut self, elem: NodeId, name: &str, prefix: Option<&str>, value: &str) -> NodeId {

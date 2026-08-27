@@ -346,6 +346,17 @@ pub fn xml_convert_to_utf8(
     input: &[u8],
     hint: Option<&str>,
 ) -> Result<(Vec<u8>, Option<String>), XmlError> {
+    let (c, n) = xml_convert_to_utf8_cow(input, hint)?;
+    Ok((c.into_owned(), n))
+}
+
+/// As [`xml_convert_to_utf8`], but borrows the input when it is already UTF-8.
+/// The overwhelmingly common case is a UTF-8 document, and copying it whole
+/// before parsing costs one allocation and one full memcpy per parse.
+pub(crate) fn xml_convert_to_utf8_cow<'a>(
+    input: &'a [u8],
+    hint: Option<&str>,
+) -> Result<(std::borrow::Cow<'a, [u8]>, Option<String>), XmlError> {
     if input.len() >= 2 && input[0] == 0x1f && input[1] == 0x8b {
         return Err(XmlError::new(
             XML_ERR_UNSUPPORTED_ENCODING,
@@ -366,11 +377,12 @@ pub fn xml_convert_to_utf8(
     }
     if enc == XmlCharEncoding::None || enc == XmlCharEncoding::Utf8 || enc == XmlCharEncoding::Ascii
     {
-        let mut b = input.to_vec();
-        if b.starts_with(&[0xEF, 0xBB, 0xBF]) {
-            b.drain(..3);
-        }
-        return Ok((b, xml_get_char_encoding_name(enc).map(str::to_string)));
+        // Slice past a BOM rather than draining it, which memmoved the document.
+        let body = if input.starts_with(&[0xEF, 0xBB, 0xBF]) { &input[3..] } else { input };
+        return Ok((
+            std::borrow::Cow::Borrowed(body),
+            xml_get_char_encoding_name(enc).map(str::to_string),
+        ));
     }
     let converted = match enc {
         XmlCharEncoding::Iso8859_1 => latin1_to_utf8(input),
@@ -407,7 +419,7 @@ pub fn xml_convert_to_utf8(
         }
     };
     Ok((
-        converted,
+        std::borrow::Cow::Owned(converted),
         xml_get_char_encoding_name(enc).map(str::to_string),
     ))
 }

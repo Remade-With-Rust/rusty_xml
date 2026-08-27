@@ -348,20 +348,30 @@ impl<'a> Parser<'a> {
             }
             return Ok(Some('\n'));
         }
+        // Advance the whole scalar at once. The byte-at-a-time loop re-ran a
+        // bounds-checked load and a newline test for every continuation byte,
+        // none of which can be a newline.
         let n = c.len_utf8();
-        for _ in 0..n {
-            self.bump_byte();
+        self.pos += n;
+        if c as u32 == 0x0A {
+            self.line += 1;
+            self.col = 1;
+        } else {
+            // The byte-at-a-time loop this replaces advanced col once per byte,
+            // so keep col in bytes or error positions shift on non-ASCII lines.
+            self.col += n as u32;
         }
         Ok(Some(c))
     }
 
     fn skip_s(&mut self) -> Result<(), XmlError> {
-        while let Some(c) = self.peek_char()? {
-            if crate::chvalid::xml_is_blank(c as u32) {
-                self.bump_char()?;
-            } else {
+        // Every XML whitespace character is ASCII, so this never needs a decode.
+        // The previous form decoded each one twice (peek, then bump).
+        while let Some(b) = self.peek_byte() {
+            if b >= 0x80 || !crate::chvalid::xml_is_blank(b as u32) {
                 break;
             }
+            self.bump_byte();
         }
         Ok(())
     }
@@ -735,6 +745,27 @@ impl<'a> Parser<'a> {
         let start = self.pos;
         let mut val = String::new();
         loop {
+            // Same run trick as character data: most attribute values are plain
+            // ASCII with no reference and no whitespace needing normalisation.
+            {
+                let rs = self.pos;
+                let mut i = rs;
+                while i < self.input.len() {
+                    let b = self.input[i];
+                    if b == q || b == b'<' || b == b'&' || b < 0x20 || b >= 0x80 {
+                        break;
+                    }
+                    i += 1;
+                }
+                if i > rs {
+                    if let Ok(run) = std::str::from_utf8(&self.input[rs..i]) {
+                        val.push_str(run);
+                        self.col += (i - rs) as u32;
+                        self.pos = i;
+                        continue;
+                    }
+                }
+            }
             if self.peek_byte() == Some(q) {
                 self.bump_byte();
                 break;
@@ -839,6 +870,17 @@ impl<'a> Parser<'a> {
             qname: String,
             value: String,
             value_off: usize,
+            /// Byte index of the QName's colon, resolved once at scan time.
+            /// Both later passes used to re-run split_qname over the same name.
+            colon: Option<usize>,
+        }
+        impl RawAttr {
+            fn parts(&self) -> (Option<&str>, &str) {
+                match self.colon {
+                    None => (None, self.qname.as_str()),
+                    Some(i) => (Some(&self.qname[..i]), &self.qname[i + 1..]),
+                }
+            }
         }
         let mut raw_attrs: Vec<RawAttr> = Vec::new();
         loop {
@@ -851,10 +893,19 @@ impl<'a> Parser<'a> {
             self.expect_byte(b'=', XML_ERR_EQUAL_REQUIRED, "'=' required")?;
             self.skip_s()?;
             let (value, value_off) = self.parse_att_value()?;
+            let colon = match Self::split_qname(&an).map_err(|mut e| {
+                e.line = self.line;
+                e.col = self.col;
+                e
+            })? {
+                (None, _) => None,
+                (Some(pfx), _) => Some(pfx.len()),
+            };
             raw_attrs.push(RawAttr {
                 qname: an,
                 value,
                 value_off,
+                colon,
             });
         }
         let empty = if self.starts_with(b"/>") {
@@ -868,11 +919,7 @@ impl<'a> Parser<'a> {
 
         let mut ns_frame: Vec<(Option<String>, String)> = Vec::new();
         for a in &raw_attrs {
-            let (ap, al) = Self::split_qname(&a.qname).map_err(|mut e| {
-                e.line = self.line;
-                e.col = self.col;
-                e
-            })?;
+            let (ap, al) = a.parts();
             if ap.is_none() && al == "xmlns" {
                 if !a.value.is_empty() && !Self::uri_has_scheme(&a.value) {
                     let msg = format!("xmlns: URI {} is not absolute\n", a.value);
@@ -890,7 +937,9 @@ impl<'a> Parser<'a> {
                 ns_frame.push((Some(al.to_string()), a.value.clone()));
             }
         }
-        self.ns_stack.push(ns_frame.clone());
+        // The frame is pushed, not copied; the stack owns it and both later
+        // readers borrow it back from there.
+        self.ns_stack.push(ns_frame);
 
         let elem_uri = self.lookup_ns(prefix);
         if prefix.is_some() && elem_uri.is_none() {
@@ -901,45 +950,56 @@ impl<'a> Parser<'a> {
         }
 
         let mut sax_attrs: Vec<SaxAttr> = Vec::new();
-        let mut seen: Vec<(Option<String>, &str)> = Vec::new();
-        for a in &raw_attrs {
-            let (ap, al) = Self::split_qname(&a.qname).unwrap();
-            if (ap.is_none() && al == "xmlns") || ap == Some("xmlns") {
+        for idx in 0..raw_attrs.len() {
+            // Own the parts first; SaxAttr needs them owned anyway, so this
+            // costs nothing extra and releases the borrow on raw_attrs.
+            let (ap_owned, al_owned, is_ns, value_off) = {
+                let a = &raw_attrs[idx];
+                let (ap, al) = a.parts();
+                let is_ns = (ap.is_none() && al == "xmlns") || ap == Some("xmlns");
+                (ap.map(str::to_string), al.to_string(), is_ns, a.value_off)
+            };
+            if is_ns {
                 continue;
             }
-            let uri = if ap.is_some() {
-                let u = self.lookup_ns(ap);
+            let uri = if ap_owned.is_some() {
+                let u = self.lookup_ns(ap_owned.as_deref());
                 if u.is_none() {
                     return Err(self.err(
                         XML_NS_ERR_UNDEFINED_NAMESPACE,
-                        format!("Undefined namespace prefix {}", ap.unwrap()),
+                        format!("Undefined namespace prefix {}", ap_owned.unwrap()),
                     ));
                 }
                 u
             } else {
                 None
             };
-            if seen
+            // The attributes already accepted ARE the "seen" set -- a separate
+            // vector of copies was allocated per element to hold the same thing.
+            if sax_attrs
                 .iter()
-                .any(|(u, l): &(Option<String>, &str)| u.as_deref() == uri.as_deref() && *l == al)
+                .any(|s| s.uri.as_deref() == uri.as_deref() && s.local == al_owned)
             {
                 return Err(self.err(XML_ERR_ATTRIBUTE_REDEFINED, "Attribute redefined"));
             }
-            seen.push((uri.clone(), al));
             sax_attrs.push(SaxAttr {
-                local: al.to_string(),
-                prefix: ap.map(str::to_string),
+                local: al_owned,
+                prefix: ap_owned,
                 uri,
-                value: a.value.clone(),
-                value_input_off: Some(a.value_off),
+                // Moved out of raw_attrs rather than copied: one String clone
+                // per attribute in the document.
+                value: std::mem::take(&mut raw_attrs[idx].value),
+                value_input_off: Some(value_off),
             });
         }
 
+        let frame: &[(Option<String>, String)] =
+            self.ns_stack.last().map(Vec::as_slice).unwrap_or(&[]);
         self.sax.start_element_ns(
             local,
             prefix,
             elem_uri.as_deref(),
-            &ns_frame,
+            frame,
             &sax_attrs,
             0,
         );
@@ -947,8 +1007,12 @@ impl<'a> Parser<'a> {
         let elem = self.doc.alloc(NodeKind::Element, local);
         self.doc.node_mut(elem).prefix = prefix.map(str::to_string);
         self.doc.node_mut(elem).ns_uri = elem_uri.clone();
-        for (p, u) in &ns_frame {
-            self.doc.push_ns_def(elem, p.clone(), u.clone());
+        for i in 0..self.ns_stack.last().map_or(0, Vec::len) {
+            let (p, u) = {
+                let f = self.ns_stack.last().unwrap();
+                (f[i].0.clone(), f[i].1.clone())
+            };
+            self.doc.push_ns_def(elem, p, u);
         }
         for a in &sax_attrs {
             let aid = self.doc.add_attr(elem, &a.local, a.prefix.as_deref(), &a.value);
@@ -1020,12 +1084,13 @@ impl<'a> Parser<'a> {
                 self.parse_pi(Some(parent), false)?;
                 continue;
             }
-            if self.peek_byte() == Some(b'<') {
+            let lead = self.peek_byte();
+            if lead == Some(b'<') {
                 self.flush_chars(Some(parent))?;
                 self.parse_element(parent)?;
                 continue;
             }
-            if self.peek_byte() == Some(b'&') {
+            if lead == Some(b'&') {
                 self.flush_chars(Some(parent))?;
                 let repl = self.parse_reference()?;
                 self.char_buf.push_str(&repl);
@@ -1034,6 +1099,33 @@ impl<'a> Parser<'a> {
             }
             if self.starts_with(b"]]>") {
                 return Err(self.err(XML_ERR_MISPLACED_CDATA_END, "Misplaced CDATA end"));
+            }
+            // Character data is the bulk of most documents and is almost all
+            // ordinary ASCII. Take it in one run: one bounds test and one
+            // push_str instead of a decode, two peeks and a push per character.
+            {
+                let start = self.pos;
+                let mut i = start;
+                while i < self.input.len() {
+                    let b = self.input[i];
+                    let plain = b == 0x09 || (0x20..0x80).contains(&b);
+                    if !plain || b == b'<' || b == b'&' || b == b']' {
+                        break;
+                    }
+                    i += 1;
+                }
+                if i > start {
+                    // Every byte in the run is ASCII and a legal XML character.
+                    match std::str::from_utf8(&self.input[start..i]) {
+                        Ok(run) => {
+                            self.char_buf.push_str(run);
+                            self.col += (i - start) as u32;
+                            self.pos = i;
+                            continue;
+                        }
+                        Err(_) => {}
+                    }
+                }
             }
             let c = self.bump_char()?.unwrap();
             if !xml_is_char(c as u32) {
@@ -1122,7 +1214,7 @@ fn parse_doc(
     options: i32,
     sax: &mut dyn SaxHandler,
 ) -> Result<XmlDoc, XmlError> {
-    let (converted, enc_name) = crate::encoding::xml_convert_to_utf8(buffer, encoding)?;
+    let (converted, enc_name) = crate::encoding::xml_convert_to_utf8_cow(buffer, encoding)?;
     parse_utf8(&converted, enc_name.as_deref(), options, sax)
 }
 
@@ -1201,6 +1293,13 @@ fn apply_dtd_defaults(doc: &mut XmlDoc) {
                 .or_default()
                 .push((aname.as_str(), v.as_str()));
         }
+    }
+    // dtd.attributes is a HashMap with a randomly seeded hasher, so without
+    // this the defaulted attributes serialised in a DIFFERENT ORDER ON EVERY
+    // RUN of the same binary. Any signature or digest over the saved tree --
+    // C14N included -- has to be reproducible.
+    for list in by_elem.values_mut() {
+        list.sort_unstable_by(|a, b| a.0.cmp(b.0));
     }
     let n = doc.len();
     for i in 0..n {

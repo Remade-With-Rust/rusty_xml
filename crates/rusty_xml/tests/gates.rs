@@ -1120,3 +1120,37 @@ fn nested_entities_expand_and_bombs_are_refused() {
         );
     }
 }
+
+/// Twelve single-byte encodings beyond ISO-8859 and windows-1252. Real corpora
+/// use them -- Cyrillic, Greek, Arabic, Hebrew, Baltic, Turkish, Vietnamese --
+/// and each costs 256 bytes of table. The pinned oracle cannot read any of them
+/// because it is built ICONV=OFF, so these are checked against the expected
+/// text directly rather than against C.
+#[test]
+fn single_byte_encodings_decode() {
+    let opts = default_parse_options();
+    // (encoding label, bytes of the high-half characters, expected text)
+    let cases: &[(&str, &[u8], &str)] = &[
+        ("windows-1251", &[0xF2, 0xE5, 0xF1, 0xF2], "\u{442}\u{435}\u{441}\u{442}"),
+        ("KOI8-R", &[0xD4, 0xC5, 0xD3, 0xD4], "\u{442}\u{435}\u{441}\u{442}"),
+        ("windows-1253", &[0xE5, 0xEB, 0xEB], "\u{3b5}\u{3bb}\u{3bb}"),
+        ("windows-1250", &[0xE8, 0x65, 0xF0], "\u{10d}e\u{111}"),
+        ("IBM866", &[0xE2, 0xA5, 0xE1], "\u{442}\u{435}\u{441}"),
+        ("macintosh", &[0x8E], "\u{e9}"),
+    ];
+    for (label, high, want) in cases {
+        let mut doc = format!("<?xml version=\"1.0\" encoding=\"{label}\"?><d>").into_bytes();
+        doc.extend_from_slice(high);
+        doc.extend_from_slice(b"</d>");
+        let d = xml_read_memory(&doc, None, None, opts)
+            .unwrap_or_else(|e| panic!("{label} should decode: {e:?}"));
+        let mut text = String::new();
+        for i in 0..d.len() {
+            let id = rusty_xml::NodeId(i as u32);
+            if d.kind(id) == rusty_xml::NodeKind::Text {
+                text.push_str(&d.node(id).content);
+            }
+        }
+        assert_eq!(&text, want, "{label} decoded wrongly");
+    }
+}

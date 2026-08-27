@@ -6,6 +6,7 @@ mod chvalid_tables;
 pub mod chvalid;
 mod error;
 mod encoding_tables;
+mod encoding_tables_more;
 mod encoding;
 mod parse;
 mod catalog;

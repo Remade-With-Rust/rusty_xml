@@ -781,15 +781,13 @@ fn ordinary_xpath_still_compiles() {
     }
 }
 
-/// A depth cap only protects you if the cap is BELOW the stack limit. The
-/// element parser is recursive descent costing ~1.4 KB per level in release but
-/// ~22 KB in debug -- a 17x spread -- so debug overflows around 95 levels. The
-/// old cap of 256 was above that, and XML_PARSE_HUGE removed the cap entirely.
-/// Both meant a deep document ABORTED THE PROCESS instead of returning an
-/// error, and a stack overflow cannot be caught. The cap is now 64, safe in
-/// both profiles, and HUGE no longer lifts it.
+/// The parser used to recurse on document depth, so the cap had to sit below
+/// the stack limit -- 64, because a debug build overflowed at 95 and a stack
+/// overflow aborts the process. The content loop is iterative now, so depth
+/// costs no stack and the cap is a policy limit again. This must hold in BOTH
+/// build profiles: debug is where the old parser died first.
 #[test]
-fn deep_nesting_is_rejected_in_every_build_profile() {
+fn deep_nesting_costs_no_stack_in_any_build_profile() {
     let build = |d: usize| {
         let mut s = String::from("<r>");
         for _ in 0..d {
@@ -804,15 +802,18 @@ fn deep_nesting_is_rejected_in_every_build_profile() {
     };
     let def = default_parse_options();
     let huge = def | rusty_xml::XML_PARSE_HUGE;
-    assert!(xml_read_memory(build(60).as_bytes(), None, None, def).is_ok());
-    for opts in [def, huge] {
-        for d in [70usize, 300, 5_000, 100_000] {
-            assert!(
-                xml_read_memory(build(d).as_bytes(), None, None, opts).is_err(),
-                "{d} levels must return an error, not abort the process"
-            );
-        }
+
+    // Far past where the recursive parser aborted in debug (95 levels).
+    for d in [100usize, 1_000, 4_000] {
+        assert!(
+            xml_read_memory(build(d).as_bytes(), None, None, def).is_ok(),
+            "{d} levels must parse; the parser no longer recurses on depth"
+        );
     }
+    // Still a policy limit, and it returns an error rather than dying.
+    assert!(xml_read_memory(build(6_000).as_bytes(), None, None, def).is_err());
+    // HUGE lifts it, which it can now do safely.
+    assert!(xml_read_memory(build(20_000).as_bytes(), None, None, huge).is_ok());
 }
 
 /// RelaxNG had two ways to kill the caller. `<start/>` with no pattern inside

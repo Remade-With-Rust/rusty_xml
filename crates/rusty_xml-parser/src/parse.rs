@@ -56,21 +56,19 @@ const XMLNS_NS: &str = "http://www.w3.org/2000/xmlns/";
 
 /// Element nesting limit.
 ///
-/// This is 64 and not something larger because the element parser is recursive
-/// descent, and its stack cost per level differs by roughly **17x** between
-/// build profiles: about 1.4 KB in release but about 22 KB in a debug build.
-/// A cap of 256 was therefore never stack-safe in debug -- a 95-level document
-/// aborted the process, and a stack overflow cannot be caught. CI found this,
-/// because CI runs `cargo test` in debug and the author had only ever measured
-/// in release.
+/// This was 64 because the parser recursed and the cap had to sit below the
+/// stack limit -- about 1.4 KB per level in release and 22 KB in debug, so a
+/// deeper document aborted the process instead of returning an error. The
+/// content loop is iterative now and document depth costs no stack, so the cap
+/// is a POLICY limit again rather than a crash guard.
 ///
-/// 64 is safe in both profiles with margin, and is far beyond real markup: the
-/// documents in `corpora/` nest 0 to 3 levels.
-///
-/// The honest fix is an iterative parser. Until that exists, no single constant
-/// is safe on every stack in every profile, so this one is chosen for the worst
-/// case rather than the best.
-const MAX_DEPTH: u32 = 64;
+/// 5000 matches what libxml2 permits by default and is beyond any real markup;
+/// `XML_PARSE_HUGE` lifts it, which it can now do safely.
+const MAX_DEPTH: u32 = 5_000;
+
+/// The ceiling `XML_PARSE_HUGE` raises the nesting limit to. Bounded rather
+/// than unlimited so a hostile document cannot make the arena grow without end.
+const MAX_DEPTH_HUGE: u32 = 1_000_000;
 
 /// `XML_PARSE_HUGE` deliberately does **not** lift the nesting limit.
 ///
@@ -1003,7 +1001,12 @@ impl<'a> Parser<'a> {
     /// by an explicit stack instead of by recursion.
     fn open_element(&mut self, parent: NodeId) -> Result<Option<OpenElem>, XmlError> {
         self.depth += 1;
-        if self.depth > MAX_DEPTH {
+        let cap = if (self.options & XML_PARSE_HUGE) != 0 {
+            MAX_DEPTH_HUGE
+        } else {
+            MAX_DEPTH
+        };
+        if self.depth > cap {
             return Err(self.err(XML_ERR_INTERNAL_ERROR, "Excessive element nesting"));
         }
         self.expect_byte(b'<', XML_ERR_LT_REQUIRED, "'<' required")?;

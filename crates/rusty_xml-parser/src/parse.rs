@@ -1247,7 +1247,8 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    /// The recursive shape, kept while the loop is built alongside it.
+    /// Parse one complete element. Calls into the iterative content loop, so
+    /// this is the only frame a document of any depth costs.
     fn parse_element(&mut self, parent: NodeId) -> Result<(), XmlError> {
         let Some(open) = self.open_element(parent)? else {
             return Ok(());
@@ -1256,15 +1257,47 @@ impl<'a> Parser<'a> {
         self.close_element(&open)
     }
 
+    /// Parse the content of `parent` and of every element nested inside it.
+    ///
+    /// This used to recurse into `parse_element`, which recursed back here, so
+    /// document nesting consumed the call stack -- about 1.4 KB per level in
+    /// release and 22 KB in debug, and a stack overflow aborts the process
+    /// rather than returning an error. The element context was already heap
+    /// state (`stack`, `ns_stack`); only the call frames were not. Now the
+    /// descent is an explicit stack and the depth of a document costs no stack
+    /// at all.
     fn parse_content(&mut self, parent: NodeId) -> Result<(), XmlError> {
+        let mut open: Vec<OpenElem> = Vec::new();
+        // The element the caller asked us to fill. When the innermost element
+        // closes and nothing else is open, content belongs to THIS again --
+        // falling back to the mutable `parent` would name the element that had
+        // just been closed.
+        let outer = parent;
+        let mut parent = parent;
         loop {
             if self.eof() {
                 self.flush_chars(Some(parent))?;
+                if let Some(o) = open.last() {
+                    let (_, local) = Self::split_qname(&o.qname).unwrap_or((None, &o.qname));
+                    return Err(self.err(
+                        XML_ERR_TAG_NOT_FINISHED,
+                        format!("Premature end of data in tag {local}"),
+                    ));
+                }
                 return Ok(());
             }
             if self.starts_with(b"</") {
                 self.flush_chars(Some(parent))?;
-                return Ok(());
+                // Our own end tag closes the innermost open element; when
+                // nothing is open it belongs to the caller.
+                match open.pop() {
+                    Some(o) => {
+                        self.close_element(&o)?;
+                        parent = open.last().map(|f| f.elem).unwrap_or(outer);
+                        continue;
+                    }
+                    None => return Ok(()),
+                }
             }
             if self.starts_with(b"<!--") {
                 self.flush_chars(Some(parent))?;
@@ -1290,7 +1323,10 @@ impl<'a> Parser<'a> {
             let lead = self.peek_byte();
             if lead == Some(b'<') {
                 self.flush_chars(Some(parent))?;
-                self.parse_element(parent)?;
+                if let Some(o) = self.open_element(parent)? {
+                    parent = o.elem;
+                    open.push(o);
+                }
                 continue;
             }
             if lead == Some(b'&') {

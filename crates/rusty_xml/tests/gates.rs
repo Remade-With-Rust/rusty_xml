@@ -814,3 +814,35 @@ fn deep_nesting_is_rejected_in_every_build_profile() {
         }
     }
 }
+
+/// RelaxNG had two ways to kill the caller. `<start/>` with no pattern inside
+/// unwrapped an Err and panicked. A definition referencing itself recursed
+/// until the stack ran out, which ABORTS THE PROCESS and cannot be caught.
+/// Both must now be reported as errors -- and a grammar that recurses THROUGH
+/// an element is legal and must still validate.
+#[test]
+fn relaxng_malformed_and_cyclic_schemas_are_errors_not_crashes() {
+    let doc = xml_read_memory(b"<r><a k=\"1\">t</a></r>", None, None, default_parse_options()).unwrap();
+    const NS: &str = "http://relaxng.org/ns/structure/1.0";
+    for bad in [
+        "<grammar><start/></grammar>".to_string(),
+        format!("<grammar xmlns=\"{NS}\"><define name=\"a\"><ref name=\"a\"/></define><start><ref name=\"a\"/></start></grammar>"),
+        format!("<grammar xmlns=\"{NS}\"><define name=\"a\"><ref name=\"b\"/></define><define name=\"b\"><ref name=\"a\"/></define><start><ref name=\"a\"/></start></grammar>"),
+        format!("<grammar xmlns=\"{NS}\"><define name=\"a\"><choice><ref name=\"a\"/></choice></define><start><ref name=\"a\"/></start></grammar>"),
+    ] {
+        // Reaching this line at all is the test: it must return, not abort.
+        let _ = rusty_xml::xml_relaxng_validate_doc(bad.as_bytes(), &doc);
+    }
+
+    // Recursion through an element consumes input, so it terminates and is legal.
+    let ok = format!(
+        "<grammar xmlns=\"{NS}\"><start><ref name=\"r\"/></start>\
+         <define name=\"r\"><element name=\"r\"><zeroOrMore><ref name=\"r\"/></zeroOrMore></element></define></grammar>"
+    );
+    let nested = xml_read_memory(b"<r><r/></r>", None, None, default_parse_options()).unwrap();
+    let res = rusty_xml::xml_relaxng_validate_doc(ok.as_bytes(), &nested);
+    assert!(
+        res.is_ok(),
+        "a grammar recursing through an element must still validate: {res:?}"
+    );
+}

@@ -46,13 +46,74 @@ fn compile(doc: &XmlDoc) -> Result<Schema, String> {
     let mut defs = HashMap::new();
     harvest_defs(doc, root, &mut defs);
     let start = if is_rng(doc, root, "grammar") {
-        find_child_named(doc, root, "start")
-            .map(|s| compile_pat(doc, first_pat_child(doc, s).ok_or("empty start").unwrap()))
-            .unwrap_or_else(|| compile_pat(doc, root))
+        match find_child_named(doc, root, "start") {
+            // `<start/>` with no pattern inside used to `.unwrap()` an Err and
+            // panic. It is a malformed schema, which is an error to report, not
+            // a reason to kill the caller's thread.
+            Some(s) => compile_pat(doc, first_pat_child(doc, s).ok_or("empty start")?),
+            None => compile_pat(doc, root),
+        }
     } else {
         compile_pat(doc, root)
     };
-    Ok(Schema { start, defs })
+    let schema = Schema { start, defs };
+    check_no_ref_cycle(&schema)?;
+    Ok(schema)
+}
+
+/// Reject a schema whose definitions reference each other in a cycle without
+/// consuming an element.
+///
+/// `<define name="a"><ref name="a"/></define>` made the matcher recurse until
+/// the stack ran out, which ABORTS THE PROCESS -- a stack overflow cannot be
+/// caught. Mutual cycles (a -> b -> a) and cycles through choice/group did the
+/// same. Such a grammar can never match anything, so refusing it at compile
+/// time loses nothing and is decidable here, unlike a depth limit in the
+/// matcher which would only move the cliff.
+fn check_no_ref_cycle(schema: &Schema) -> Result<(), String> {
+    fn walk(
+        schema: &Schema,
+        pat: &Pat,
+        stack: &mut Vec<String>,
+    ) -> Result<(), String> {
+        match pat {
+            // An Element consumes input, so a reference under it cannot loop
+            // forever; that is where recursive grammars are legitimate.
+            Pat::Element { .. } => Ok(()),
+            Pat::Ref(n) => {
+                if stack.iter().any(|s| s == n) {
+                    return Err(format!("cyclic ref {n} in schema"));
+                }
+                let Some(next) = schema.defs.get(n) else {
+                    return Ok(()); // undefined refs are reported while matching
+                };
+                stack.push(n.clone());
+                let r = walk(schema, next, stack);
+                stack.pop();
+                r
+            }
+            Pat::Attribute { inner, .. }
+            | Pat::Optional(inner)
+            | Pat::ZeroOrMore(inner)
+            | Pat::OneOrMore(inner)
+            | Pat::List(inner) => walk(schema, inner, stack),
+            Pat::Group(v) | Pat::Choice(v) | Pat::Interleave(v) => {
+                for p in v {
+                    walk(schema, p, stack)?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+    let mut stack = Vec::new();
+    walk(schema, &schema.start, &mut stack)?;
+    for (name, pat) in &schema.defs {
+        stack.clear();
+        stack.push(name.clone());
+        walk(schema, pat, &mut stack)?;
+    }
+    Ok(())
 }
 
 fn harvest_defs(doc: &XmlDoc, id: NodeId, defs: &mut HashMap<String, Pat>) {

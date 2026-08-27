@@ -1,0 +1,20 @@
+[package]
+name = "rusty_xml-valid"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "DTD, C14N, RelaxNG, XML Schema, Schematron for rusty_xml"
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+rusty_xml-tree = { workspace = true }
+rusty_xml-parser = { workspace = true }
+rusty_xml-xpath = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,15 @@
+[package]
+name = "rusty_xml-sax"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "SAX2 recorder and xmllint-debug dump for rusty_xml"
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true

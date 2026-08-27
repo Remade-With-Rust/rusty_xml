@@ -1,0 +1,15 @@
+[package]
+name = "rusty_xml-tree"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Arena DOM for rusty_xml (libxml2 tree.h semantics)"
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.16)
+project(dump_chvalid C)
+add_executable(dump_chvalid dump_chvalid.c)
+target_include_directories(dump_chvalid PRIVATE "c:/Users/talmo/coding/rusty_xml/oracle/src/include" "c:/Users/talmo/coding/rusty_xml/oracle/build")
+target_compile_definitions(dump_chvalid PRIVATE LIBXML_STATIC)
+target_link_libraries(dump_chvalid PRIVATE "c:/Users/talmo/coding/rusty_xml/oracle/build/Release/libxml2s.lib" ws2_32 bcrypt)

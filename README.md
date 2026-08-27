@@ -1,0 +1,312 @@
+# rusty_xml
+
+[![crates.io](https://img.shields.io/crates/v/rusty_xml?logo=rust)](https://crates.io/crates/rusty_xml)
+[![docs.rs](https://img.shields.io/docsrs/rusty_xml?logo=docsdotrs)](https://docs.rs/rusty_xml)
+[![CI](https://github.com/Remade-With-Rust/rusty_xml/actions/workflows/ci.yml/badge.svg)](https://github.com/Remade-With-Rust/rusty_xml/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
+[![Remade With Rust](https://img.shields.io/badge/Remade%20With-Rust-000?logo=rust&logoColor=fff)](https://github.com/Remade-With-Rust)
+[![By Mata Network](https://img.shields.io/badge/by-Mata%20Network-5b2be0)](https://www.mata.network)
+
+> **rusty_xml** is a ground-up, pure-**Rust** remake of
+> [libxml2](https://gitlab.gnome.org/GNOME/libxml2): well-formed XML 1.0 parse,
+> arena DOM, SAX2, pull reader, writer/save, XPath 1.0, DTD, C14N, HTML, and
+> working subsets of RelaxNG / XSD / Schematron. `#![forbid(unsafe_code)]` on
+> every published crate, **no C**, no `libxml2-sys`, no copyleft. Defaults are
+> **`XML_PARSE_NONET | XML_PARSE_NO_XXE`** — the safe posture libxml2's own
+> README says the C library does not have.
+
+Part of **[Remade With Rust](https://github.com/Remade-With-Rust)** by
+**[Mata Network](https://www.mata.network/)** — the XML toolkit for the stack
+that already ships
+**[rusty_zstd](https://crates.io/crates/rusty_zstd)**,
+**[rusty_h264](https://crates.io/crates/rusty_h264)**, and
+**[remade_ffmpeg_rs](https://github.com/Remade-With-Rust/remade_ffmpeg_rs)**.
+[Jump to the ecosystem ↓](#the-remade-with-rust-ecosystem)
+
+---
+
+## The headline
+
+A pure-**safe-Rust** XML 1.0 toolkit that is a **reimplementation**, not a
+wrapper, with libxml2 function names as `#[doc(alias)]` and **safe defaults**
+C historically got wrong:
+
+- **Parse:** UTF-8 well-formed documents, 15 built-in 8-bit encodings (no
+  iconv), push (`xmlParseChunk`), IO callbacks, local OASIS catalogs. SAX
+  traces are gated line-for-line against pinned `xmllint --sax`.
+- **Tree / save / writer / reader:** arena DOM, `xmlsave` (including
+  `XML_SAVE_NO_EMPTY` / `NO_DECL`), `xmlTextWriter`, `xmlTextReader`. Empty
+  elements are one reader `Element`, no extra `EndElement`.
+  `parse(write(parse(x)))` is a standing gate.
+- **XPath 1.0** compile + eval; `rxmlint --xpath` prints xmllint form.
+- **Validate / canonicalize:** DTD internal subset + default attributes,
+  `xmlValidateDocument`, C14N 1.0 and exclusive, XInclude via a caller loader.
+- **HTML** (`HTMLparser.c` grammar, implied html/head/body) and working
+  subsets of RelaxNG, XML Schema, and Schematron.
+- **CLI is `rxmlint`**, never `xmllint`. Same flag language so a bench script
+  can swap argv[0].
+- **The C oracle is an external process.** We never link libxml2. Pin:
+  libxml2 **v2.15.3** (`oracle/PIN`).
+
+| | libxml2 (C) | **rusty_xml (Rust)** |
+|---|---|---|
+| C/C++ in the dependency tree | all of it | **none** — no `libxml2-sys`, no iconv, no zlib-sys |
+| `unsafe` in the published crates | extensive | **0** — `#![forbid(unsafe_code)]` |
+| License | MIT | **MIT OR Apache-2.0** |
+| Defaults on untrusted input | libxml2 README: *not recommended* | **`NONET \| NO_XXE`**, always |
+| CLI name | `xmllint` | **`rxmlint`** (does not shadow C) |
+| Network entity loads | historically on | **off** unless you pass flags (and the parser still ORs `NONET`) |
+
+### Performance (session, not a publish claim)
+
+First paired board vs pinned **libxml2 v2.15.3** `xmllint`, slashdot.xml
+(3675 bytes, 101 elements / 403 reader ticks), **100000** inner parses,
+N=6 pairs, CPU time, one core (not 0), High priority, ABBA. `us/C` **> 1
+means C is faster**. Full method line in
+[`bench/SIDE-BY-SIDE.md`](bench/SIDE-BY-SIDE.md).
+
+| workload | rusty_xml | libxml2 | us/C | wins (us) |
+|---|---:|---:|---:|---:|
+| `parse-noout` (DOM, discard) | 6.1 MB/s | 33.6 MB/s | **5.5×** | 0/12, z = −3.46 |
+| `stream-noout` (reader) | 5.7 MB/s | 33.1 MB/s | **5.8×** | 0/12, z = −3.46 |
+
+<sub>**Read this as: correctness is gated; speed is the open work (M7).**
+N=6 is a session, not publish (that is N≥20). C's arm was under the ~15 s
+duration floor (`DURATION_SHORT`). Do not quote these cells as "faster than
+libxml2" — they are the opposite, and that is fine: the brick that closes
+the gap has not shipped yet. C default flags are
+`XML_PARSE_COMPACT \| XML_PARSE_BIG_LINES` plus `xmlCtxtReadFile` per
+`--repeat` (Windows pin has no mmap); us is `xml_read_memory` /
+`xml_reader_for_memory` after one `fs::read`, with `NONET \| NO_XXE`.
+That is CLI-vs-CLI.</sub>
+
+---
+
+## What is this?
+
+`rusty_xml` is libxml2 remade in Rust. Unlike
+[`libxml2-sys`](https://crates.io/crates/libxml2-sys) / `quick-xml` /
+`roxmltree` — bindings or different grammars — there is **no C in the
+dependency tree** here and the public names match C (`xmlReadMemory` →
+`xml_read_memory`, documented with `#[doc(alias)]`).
+
+libxml2's own README says it is **not recommended for untrusted data**. That
+is the defect this remake exists to close: semantic identity under matched
+options, **safe defaults** (no network, no XXE, bounded amplification).
+
+It is a reimplementation of the algorithms, not a fork. The C sources are
+neither distributed nor linked; a pinned `xmllint` is used only as an
+external-process oracle (`scripts/fetch-oracle.ps1`).
+
+`cargo-deny` enforces the promise: no `*-sys` crate, no copyleft, and no
+`libxml2-sys` anywhere in the graph.
+
+## The Remade With Rust ecosystem
+
+<!-- ORG BOILERPLATE — keep identical across repos -->
+
+**Remade With Rust** is an initiative by **[Mata Network](https://www.mata.network/)**
+to rebuild essential C and C++ tools in Rust — for the memory safety, the
+predictable performance, and the freedom of a permissive license. Each project
+is a reimplementation, not a fork: same wire protocols and file formats, new
+code you can actually depend on.
+
+We build the core to production grade and open-source it so the community can
+extend it. No copyleft. No surprises. Just the tools we rely on, made faster and
+safer.
+
+| Project | What it is |
+|---|---|
+| 🎬 **[remade_ffmpeg_rs](https://github.com/Remade-With-Rust/remade_ffmpeg_rs)** | **Our FFmpeg alternative.** Drop-in `ffmpeg` and `ffprobe` binaries — demux → decode → filter → encode → mux, rebuilt as composable Rust crates with **zero GPL/LGPL**. Apache-2.0. |
+| 🧠 **[FFAI](https://github.com/Remade-With-Rust/FFAI)** | **Our sister project: media *for* AI.** "The AI media toolkit, remade with rust." Embedded ASR + TTS (**Mercury**), OCR (**Carmenta**) and vision-language captioning (**Argus**) behind an ffmpeg-style, swap-by-name architecture — no Python, no CUDA. MIT OR Apache-2.0. |
+| 🌐 **[Mata Network](https://www.mata.network/)** | **The home page.** *"Stop sacrificing your privacy for convenience."* Sovereign, self-hostable privacy infrastructure — wallet & identity, password manager, contact manager, and a browser extension that stops information leaking as you browse. Remade With Rust is its open-source arm. |
+
+→ All projects: **[github.com/Remade-With-Rust](https://github.com/Remade-With-Rust)**
+
+<!-- /ORG BOILERPLATE -->
+
+## Install
+
+One crate — `rusty_xml` — is the public facade; it re-exports parser, tree,
+SAX, reader, writer, XPath, and validation. Add it with:
+
+```sh
+cargo add rusty_xml
+```
+
+or in `Cargo.toml`:
+
+```toml
+[dependencies]
+rusty_xml = "0.1"
+```
+
+MSRV is **1.85**. The library never sets `#[global_allocator]`.
+
+The published crates (all `0.1`, MIT OR Apache-2.0):
+
+| Crate | Role | Docs |
+|---|---|---|
+| [`rusty_xml`](https://crates.io/crates/rusty_xml) | **the facade — depend on this** | [docs.rs](https://docs.rs/rusty_xml) |
+| [`rusty_xml-parser`](https://crates.io/crates/rusty_xml-parser) | well-formed parse, encodings, push, catalogs, HTML | [docs.rs](https://docs.rs/rusty_xml-parser) |
+| [`rusty_xml-tree`](https://crates.io/crates/rusty_xml-tree) | arena DOM | [docs.rs](https://docs.rs/rusty_xml-tree) |
+| [`rusty_xml-sax`](https://crates.io/crates/rusty_xml-sax) | SAX2 recorder + xmllint-debug dump | [docs.rs](https://docs.rs/rusty_xml-sax) |
+| [`rusty_xml-reader`](https://crates.io/crates/rusty_xml-reader) | `xmlTextReader` | [docs.rs](https://docs.rs/rusty_xml-reader) |
+| [`rusty_xml-writer`](https://crates.io/crates/rusty_xml-writer) | `xmlsave` + `xmlTextWriter` | [docs.rs](https://docs.rs/rusty_xml-writer) |
+| [`rusty_xml-xpath`](https://crates.io/crates/rusty_xml-xpath) | XPath 1.0 | [docs.rs](https://docs.rs/rusty_xml-xpath) |
+| [`rusty_xml-valid`](https://crates.io/crates/rusty_xml-valid) | DTD, C14N, RelaxNG, XSD, Schematron | [docs.rs](https://docs.rs/rusty_xml-valid) |
+| [`rusty_xml-cli`](https://crates.io/crates/rusty_xml-cli) | `rxmlint` binary | — |
+
+Not published: `rusty_xml-bench` (oracle harness), `rusty_xml-c-abi` (M8 stub),
+`rusty_xml-alloc` (binary allocator seam — never used by the library).
+
+**Dropping it into a downstream tool:** depend on the facade. Call
+`xml_read_memory` / `xml_reader_for_memory` / `xml_xpath_eval`. Do not add
+`libxml2-sys`. Safe defaults are already on; you do not opt into `NONET`.
+
+## Quick start
+
+```rust
+use rusty_xml::{default_parse_options, xml_read_memory, xml_save_doc};
+
+fn main() -> Result<(), rusty_xml::XmlError> {
+    let xml = br#"<root><item id="1">hi</item></root>"#;
+    let doc = xml_read_memory(xml, None, None, default_parse_options())?;
+    let bytes = xml_save_doc(&doc, 0);
+    assert!(std::str::from_utf8(&bytes).unwrap().contains("<item"));
+    Ok(())
+}
+```
+
+XPath 1.0 on the same tree:
+
+```rust
+use rusty_xml::{
+    default_parse_options, xml_read_memory, xml_xpath_eval, XmlXPathContext, XPathObject,
+};
+
+fn main() -> Result<(), rusty_xml::XmlError> {
+    let doc = xml_read_memory(
+        br#"<root><item>a</item><item>b</item></root>"#,
+        None,
+        None,
+        default_parse_options(),
+    )?;
+    let ctx = XmlXPathContext::xml_xpath_new_context(&doc);
+    match xml_xpath_eval("count(//item)", &ctx).unwrap() {
+        XPathObject::Number(n) => assert_eq!(n, 2.0),
+        other => panic!("expected number, got {other:?}"),
+    }
+    Ok(())
+}
+```
+
+Pull reader:
+
+```rust
+use rusty_xml::{default_parse_options, xml_reader_for_memory};
+
+fn main() -> Result<(), rusty_xml::XmlError> {
+    let mut r = xml_reader_for_memory(
+        br#"<a><b/></a>"#,
+        None,
+        None,
+        default_parse_options(),
+    )?;
+    let mut ticks = 0u32;
+    while r.read() == 1 {
+        ticks += 1;
+    }
+    assert!(ticks >= 2);
+    Ok(())
+}
+```
+
+Command-line (never installs as `xmllint`):
+
+```sh
+cargo install rusty_xml-cli
+rxmlint --noout file.xml
+rxmlint --sax --noout file.xml
+rxmlint --stream --noout file.xml
+rxmlint --xpath "//item" file.xml
+rxmlint --c14n file.xml
+```
+
+## Architecture
+
+The workspace mirrors libxml2's headers, not its build:
+
+```text
+crates/
+  rusty_xml           public facade  ← depend on this
+  rusty_xml-parser    parser.h — well-formed, encodings, push, catalogs, HTML
+  rusty_xml-tree      tree.h — arena DOM
+  rusty_xml-sax       SAX2.h — recorder + xmllint-debug dump
+  rusty_xml-reader    xmlreader.h
+  rusty_xml-writer    xmlsave.h + xmlwriter.h
+  rusty_xml-xpath     xpath.h
+  rusty_xml-valid     valid.h, c14n, RelaxNG / XSD / Schematron subsets
+  rusty_xml-cli       rxmlint (not xmllint)
+  rusty_xml-c-abi     optional cdylib, stub until M8. Not published.
+  rusty_xml-bench     shells out to pinned xmllint. Never links libxml2.
+  rusty_xml-alloc     rusty_alloc seam for binaries only. Not published.
+bench/                codec-measurement harness (pinvs.ps1)
+oracle/PIN            libxml2 v2.15.3 pin (binary is gitignored)
+```
+
+## Platform support
+
+| Platform | Status |
+|---|---|
+| Windows (x86-64) | ✅ builds + tests |
+| Linux | ✅ builds + tests |
+| macOS | ✅ builds + tests |
+| `wasm32-unknown-unknown` | ✅ library `cargo check` in CI |
+
+No C toolchain, no iconv, no nasm. Gzip (`XML_PARSE_UNZIP`) is not wired yet
+(a `1f 8b` buffer is an error). ISO-2022-JP / Shift_JIS / EUC-JP are
+unsupported, matching libxml2 built **without** iconv.
+
+## Roadmap
+
+- [x] **M0** — pin oracle (libxml2 v2.15.3), C-only board, workspace skeleton
+- [x] **M1** — character classes, UTF-8 well-formed parse, SAX-exact vs `xmllint --sax`
+- [x] **M2** — tree mutation, `xmlsave`, `xmlTextWriter`, `xmlTextReader`, round-trip
+- [x] **M3** — encodings without iconv, push parser, IO callbacks, local catalogs
+- [x] **M4** — XPath 1.0 compile + eval, `rxmlint --xpath`
+- [x] **M5** — DTD validation, C14N 1.0 + exclusive, XInclude (loader-gated)
+- [x] **M6** — HTML parser, RelaxNG / XSD / Schematron working subsets
+- [ ] **M7** — performance campaign vs pinned `xmllint` (`parse-noout` / `stream-noout`)
+- [ ] **M8** — C ABI `cdylib` (`XMLPUBFUN` names) + hardening audit
+- [ ] Optional gzip (`miniz_oxide` / `XML_PARSE_UNZIP`)
+- [ ] Full xmlconf / full RelaxNG corpora (not only the working-subset fixtures)
+
+Plan: [`docs/plan/rusty_xml.md`](docs/plan/rusty_xml.md).
+
+## License
+
+**MIT OR Apache-2.0**, at your option — see [LICENSE-MIT](LICENSE-MIT) and
+[LICENSE-APACHE](LICENSE-APACHE). No GPL/LGPL and no C anywhere in the
+dependency tree, CI-enforced with `cargo-deny`. The C `xmllint` binary used
+as a measurement oracle is neither distributed here nor linked; see
+[NOTICE.md](NOTICE.md).
+
+## About Mata Network
+
+<!-- ORG BOILERPLATE — keep identical across repos -->
+
+**[Mata Network](https://www.mata.network/)** builds sovereign, self-hostable
+privacy infrastructure — *"stop sacrificing your privacy for convenience"*:
+wallet & identity, a password manager, a contact manager, and a browser
+extension that stops your information leaking as you browse.
+
+**Remade With Rust** is our open-source home for the permissively-licensed
+building blocks that work depends on — including
+[remade_ffmpeg_rs](https://github.com/Remade-With-Rust/remade_ffmpeg_rs) (the
+FFmpeg alternative) and [FFAI](https://github.com/Remade-With-Rust/FFAI) (the
+AI media toolkit).
+
+→ **[www.mata.network](https://www.mata.network/)**
+
+<!-- /ORG BOILERPLATE -->

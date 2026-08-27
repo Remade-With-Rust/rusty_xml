@@ -1,0 +1,17 @@
+[package]
+name = "rusty_xml-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Campaign harness helpers for rusty_xml vs pinned xmllint. Never links libxml2."
+publish = false
+
+[dependencies]
+rusty_xml = { workspace = true }
+
+[lints]
+workspace = true

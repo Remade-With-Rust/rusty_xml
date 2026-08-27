@@ -1,0 +1,18 @@
+[package]
+name = "rusty_xml-xpath"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "XPath 1.0 compile + eval for rusty_xml"
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+rusty_xml-tree = { workspace = true }
+
+[lints]
+workspace = true

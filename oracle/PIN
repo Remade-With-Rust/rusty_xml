@@ -1,0 +1,36 @@
+libxml2 oracle pin
+==================
+
+tag:           v2.15.3
+VERSION file:  2.15.3
+git SHA:       c94eb0210183b9d7cb43f8e7fddc6be55843ef49
+xmllint:       using libxml version 21503
+
+Fetch:         scripts/fetch-oracle.ps1
+Source dir:    oracle/src   (gitignored)
+Build dir:     oracle/build (gitignored)
+Binary:        oracle/bin/xmllint.exe
+
+CMake (MSVC multi-config — CMAKE_BUILD_TYPE is ignored; --config Release is the pin):
+
+  cmake -S oracle/src -B oracle/build -G "Visual Studio 17 2022" -A x64
+    -DBUILD_SHARED_LIBS=OFF
+    -DLIBXML2_WITH_ICONV=OFF
+    -DLIBXML2_WITH_ZLIB=OFF
+    -DLIBXML2_WITH_PYTHON=OFF
+    -DLIBXML2_WITH_HTTP=OFF
+    -DLIBXML2_WITH_TESTS=OFF
+    -DLIBXML2_WITH_PROGRAMS=ON
+    -DLIBXML2_WITH_MODULES=OFF
+  cmake --build oracle/build --config Release --target xmllint
+
+SHA256 (oracle/bin/xmllint.exe, this pin):
+  8D7929E076F5D04EEAC2F55B6E8676CA779236F36B09A4C74C941A4CB7F2FF55
+
+compiled with: Threads Tree Output Push Reader Patterns Writer SAXv1 DTDValid
+HTML C14N Catalog XPath XPointer XInclude ISO8859X Regexps Automata RelaxNG
+Schemas Debug
+
+Never link this binary (or libxml2s.lib) into rusty_xml. The bench crate shells
+out to it. Do not put xmllint on PATH for published numbers — always the pinned
+path, or $env:RUSTY_XML_ORACLE.

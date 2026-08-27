@@ -1,0 +1,27 @@
+[package]
+name = "rusty_xml"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "libxml2 remade in Rust — parse, tree, SAX, reader, writer, XPath, validation. No C."
+readme = "../../README.md"
+documentation = "https://docs.rs/rusty_xml"
+keywords.workspace = true
+categories.workspace = true
+exclude = ["tests"]
+
+[dependencies]
+rusty_xml-parser = { workspace = true }
+rusty_xml-tree = { workspace = true }
+rusty_xml-sax = { workspace = true }
+rusty_xml-reader = { workspace = true }
+rusty_xml-writer = { workspace = true }
+rusty_xml-xpath = { workspace = true }
+rusty_xml-valid = { workspace = true }
+
+[lints]
+workspace = true

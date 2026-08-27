@@ -1,0 +1,17 @@
+/target
+**/*.rs.bk
+.idea/
+.vscode/
+*.pdb
+
+# Pinned C oracle — fetch with scripts/fetch-oracle.ps1; never vendor.
+/oracle/src
+/oracle/build
+/oracle/bin
+/oracle/tools/build
+/oracle/tmp-*.xml
+
+# Local / generated
+.DS_Store
+Thumbs.db
+

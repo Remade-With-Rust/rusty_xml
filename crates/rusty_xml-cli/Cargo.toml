@@ -1,0 +1,22 @@
+[package]
+name = "rusty_xml-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "rxmlint — xmllint-shaped CLI for rusty_xml (does not shadow xmllint)"
+keywords.workspace = true
+categories.workspace = true
+
+[[bin]]
+name = "rxmlint"
+path = "src/main.rs"
+
+[dependencies]
+rusty_xml = { workspace = true }
+
+[lints]
+workspace = true

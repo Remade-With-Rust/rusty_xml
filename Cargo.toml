@@ -1,0 +1,45 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/rusty_xml",
+    "crates/rusty_xml-parser",
+    "crates/rusty_xml-tree",
+    "crates/rusty_xml-sax",
+    "crates/rusty_xml-reader",
+    "crates/rusty_xml-writer",
+    "crates/rusty_xml-xpath",
+    "crates/rusty_xml-valid",
+    "crates/rusty_xml-c-abi",
+    "crates/rusty_xml-cli",
+    "crates/rusty_xml-bench",
+    "crates/rusty_xml-alloc",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Remade-With-Rust/rusty_xml"
+authors = ["Mata Network"]
+homepage = "https://www.mata.network/remade-with-rust"
+rust-version = "1.85"
+keywords = ["xml", "libxml2", "parser", "xpath"]
+categories = ["parser-implementations", "encoding"]
+
+[workspace.dependencies]
+rusty_xml-tree = { version = "0.1.0", path = "crates/rusty_xml-tree" }
+rusty_xml-sax = { version = "0.1.0", path = "crates/rusty_xml-sax" }
+rusty_xml-parser = { version = "0.1.0", path = "crates/rusty_xml-parser" }
+rusty_xml-reader = { version = "0.1.0", path = "crates/rusty_xml-reader" }
+rusty_xml-writer = { version = "0.1.0", path = "crates/rusty_xml-writer" }
+rusty_xml-xpath = { version = "0.1.0", path = "crates/rusty_xml-xpath" }
+rusty_xml-valid = { version = "0.1.0", path = "crates/rusty_xml-valid" }
+rusty_xml = { version = "0.1.0", path = "crates/rusty_xml" }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_docs = "allow"
+
+[workspace.lints.clippy]
+too_many_arguments = "allow"
+type_complexity = "allow"

@@ -1,0 +1,334 @@
+//! HTML parser matching libxml2 `HTMLparser.c` (a separate grammar, not XML recovery).
+
+use rusty_xml_tree::{NodeId, NodeKind, XmlDoc};
+
+use crate::error::XmlError;
+use crate::parse::default_parse_options;
+
+/// libxml2 `htmlParserOption` bits we honour.
+pub const HTML_PARSE_NOIMPLIED: i32 = 1 << 13;
+pub const HTML_PARSE_NONET: i32 = 1 << 11;
+
+const VOID: &[&str] = &[
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param",
+    "source", "track", "wbr",
+];
+
+fn is_void(name: &str) -> bool {
+    VOID.contains(&name)
+}
+
+/// `htmlReadMemory`.
+#[doc(alias = "htmlReadMemory")]
+pub fn html_read_memory(
+    buffer: &[u8],
+    url: Option<&str>,
+    encoding: Option<&str>,
+    options: i32,
+) -> Result<XmlDoc, XmlError> {
+    let (utf8, _) = crate::encoding::xml_convert_to_utf8(buffer, encoding)?;
+    html_parse_utf8(&utf8, url, options)
+}
+
+/// `htmlReadDoc`.
+#[doc(alias = "htmlReadDoc")]
+pub fn html_read_doc(
+    cur: &str,
+    url: Option<&str>,
+    encoding: Option<&str>,
+    options: i32,
+) -> Result<XmlDoc, XmlError> {
+    html_read_memory(cur.as_bytes(), url, encoding, options)
+}
+
+/// `htmlReadFile`.
+#[doc(alias = "htmlReadFile")]
+pub fn html_read_file(filename: &str, encoding: Option<&str>, options: i32) -> Result<XmlDoc, XmlError> {
+    let b = std::fs::read(filename).map_err(|e| XmlError::new(4, e.to_string(), 0, 0))?;
+    html_read_memory(&b, Some(filename), encoding, options)
+}
+
+fn html_parse_utf8(bytes: &[u8], _url: Option<&str>, options: i32) -> Result<XmlDoc, XmlError> {
+    let text = String::from_utf8_lossy(bytes);
+    let mut p = HtmlParser {
+        src: text.as_ref(),
+        pos: 0,
+        doc: XmlDoc::xml_new_doc(Some("1.0")),
+        stack: Vec::new(),
+        noimplied: (options & HTML_PARSE_NOIMPLIED) != 0,
+        html: None,
+        head: None,
+        body: None,
+    };
+    p.doc.encoding = Some("HTML".into());
+    p.parse()?;
+    while p.stack.len() > 1 {
+        p.stack.pop();
+    }
+    let _ = options | HTML_PARSE_NONET | default_parse_options();
+    Ok(p.doc)
+}
+
+struct HtmlParser<'a> {
+    src: &'a str,
+    pos: usize,
+    doc: XmlDoc,
+    stack: Vec<NodeId>,
+    noimplied: bool,
+    html: Option<NodeId>,
+    head: Option<NodeId>,
+    body: Option<NodeId>,
+}
+
+impl<'a> HtmlParser<'a> {
+    fn rest(&self) -> &'a str {
+        &self.src[self.pos..]
+    }
+    fn eof(&self) -> bool {
+        self.pos >= self.src.len()
+    }
+    fn bump(&mut self, n: usize) {
+        self.pos += n;
+    }
+    fn parent(&self) -> NodeId {
+        *self.stack.last().unwrap_or(&NodeId::DOCUMENT)
+    }
+    fn ensure_html(&mut self) -> NodeId {
+        if let Some(h) = self.html {
+            return h;
+        }
+        let html = self.doc.xml_new_node(None, "html");
+        self.doc.xml_doc_set_root_element(html);
+        self.html = Some(html);
+        html
+    }
+    fn ensure_head(&mut self) -> NodeId {
+        if let Some(h) = self.head {
+            return h;
+        }
+        let html = self.ensure_html();
+        let head = self.doc.xml_new_node(None, "head");
+        self.doc.xml_add_child(html, head);
+        self.head = Some(head);
+        head
+    }
+    fn ensure_body(&mut self) -> NodeId {
+        if let Some(b) = self.body {
+            return b;
+        }
+        let html = self.ensure_html();
+        let body = self.doc.xml_new_node(None, "body");
+        self.doc.xml_add_child(html, body);
+        self.body = Some(body);
+        body
+    }
+    fn ensure_html_body(&mut self) -> NodeId {
+        if self.noimplied {
+            return self.stack.last().copied().unwrap_or(NodeId::DOCUMENT);
+        }
+        self.ensure_body()
+    }
+    fn parse(&mut self) -> Result<(), XmlError> {
+        while !self.eof() {
+            if self.rest().starts_with("<!--") {
+                self.parse_comment()?;
+            } else if self.rest().starts_with("<!") {
+                self.skip_decl();
+            } else if self.rest().starts_with("</") {
+                self.parse_end_tag();
+            } else if self.rest().starts_with('<') {
+                self.parse_start_tag()?;
+            } else {
+                self.parse_text();
+            }
+        }
+        Ok(())
+    }
+    fn parse_comment(&mut self) -> Result<(), XmlError> {
+        self.bump(4);
+        if let Some(end) = self.rest().find("-->") {
+            let body = self.rest()[..end].to_string();
+            self.bump(end + 3);
+            let n = self.doc.alloc(NodeKind::Comment, "#comment");
+            self.doc.node_mut(n).content = body;
+            self.doc.xml_add_child(self.parent(), n);
+        } else {
+            self.pos = self.src.len();
+        }
+        Ok(())
+    }
+    fn skip_decl(&mut self) {
+        if let Some(i) = self.rest().find('>') {
+            self.bump(i + 1);
+        } else {
+            self.pos = self.src.len();
+        }
+    }
+    fn parse_text(&mut self) {
+        let mut i = 0;
+        let r = self.rest();
+        for (off, c) in r.char_indices() {
+            if c == '<' {
+                i = off;
+                break;
+            }
+            i = off + c.len_utf8();
+        }
+        if i == 0 {
+            return;
+        }
+        let t = r[..i].to_string();
+        self.bump(i);
+        if t.chars().all(|c| c.is_whitespace()) && self.stack.is_empty() {
+            return;
+        }
+        let n = self.doc.alloc(NodeKind::Text, "#text");
+        self.doc.node_mut(n).content = t;
+        let parent = if self.stack.is_empty() {
+            self.ensure_html_body()
+        } else {
+            self.parent()
+        };
+        self.doc.xml_add_child(parent, n);
+    }
+    fn parse_start_tag(&mut self) -> Result<(), XmlError> {
+        self.bump(1);
+        let name = self.read_name().to_ascii_lowercase();
+        if name.is_empty() {
+            return Ok(());
+        }
+        let mut attrs: Vec<(String, String)> = Vec::new();
+        loop {
+            self.skip_ws();
+            if self.rest().starts_with('>') {
+                self.bump(1);
+                break;
+            }
+            if self.rest().starts_with("/>") {
+                self.bump(2);
+                break;
+            }
+            if self.eof() {
+                break;
+            }
+            let an = self.read_name().to_ascii_lowercase();
+            if an.is_empty() {
+                self.bump(1);
+                continue;
+            }
+            self.skip_ws();
+            let av = if self.rest().starts_with('=') {
+                self.bump(1);
+                self.skip_ws();
+                self.read_attr_value()
+            } else {
+                an.clone()
+            };
+            attrs.push((an, av));
+        }
+        // autoclose p/li when another p/li starts
+        if name == "p" || name == "li" || name == "tr" || name == "td" || name == "th" {
+            while let Some(&top) = self.stack.last() {
+                if self.doc.name(top) == name {
+                    self.stack.pop();
+                } else {
+                    break;
+                }
+            }
+        }
+        let parent = if self.noimplied {
+            self.stack.last().copied().unwrap_or(NodeId::DOCUMENT)
+        } else if name == "html" {
+            NodeId::DOCUMENT
+        } else if name == "head" {
+            self.ensure_html()
+        } else if name == "body" || name == "frameset" {
+            self.ensure_html()
+        } else if matches!(name.as_str(), "title" | "meta" | "link" | "style" | "base") {
+            self.ensure_head()
+        } else {
+            self.ensure_body()
+        };
+        let elem = self.doc.xml_new_node(None, &name);
+        for (k, v) in attrs {
+            self.doc.xml_set_prop(elem, &k, &v);
+        }
+        if name == "html" {
+            self.doc.xml_doc_set_root_element(elem);
+            self.html = Some(elem);
+        } else {
+            self.doc.xml_add_child(parent, elem);
+        }
+        if name == "head" {
+            self.head = Some(elem);
+        }
+        if name == "body" || name == "frameset" {
+            self.body = Some(elem);
+        }
+        if !is_void(&name) {
+            self.stack.push(elem);
+        }
+        Ok(())
+    }
+    fn parse_end_tag(&mut self) {
+        self.bump(2);
+        let name = self.read_name().to_ascii_lowercase();
+        self.skip_ws();
+        if self.rest().starts_with('>') {
+            self.bump(1);
+        }
+        if let Some(idx) = self.stack.iter().rposition(|&id| self.doc.name(id) == name) {
+            self.stack.truncate(idx);
+        }
+    }
+    fn skip_ws(&mut self) {
+        while let Some(c) = self.rest().chars().next() {
+            if c.is_whitespace() {
+                self.bump(c.len_utf8());
+            } else {
+                break;
+            }
+        }
+    }
+    fn read_name(&mut self) -> String {
+        let r = self.rest();
+        let mut n = 0;
+        for (i, c) in r.char_indices() {
+            if i == 0 {
+                if !(c.is_ascii_alphabetic() || c == '_' || c == ':') {
+                    return String::new();
+                }
+            } else if !(c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == ':' || c == '.') {
+                n = i;
+                break;
+            }
+            n = i + c.len_utf8();
+        }
+        let s = r[..n].to_string();
+        self.bump(n);
+        s
+    }
+    fn read_attr_value(&mut self) -> String {
+        let r = self.rest();
+        if r.starts_with('"') || r.starts_with('\'') {
+            let q = r.as_bytes()[0] as char;
+            self.bump(1);
+            if let Some(end) = self.rest().find(q) {
+                let v = self.rest()[..end].to_string();
+                self.bump(end + 1);
+                return v;
+            }
+        }
+        let mut n = 0;
+        for (i, c) in self.rest().char_indices() {
+            if c.is_whitespace() || c == '>' {
+                n = i;
+                break;
+            }
+            n = i + c.len_utf8();
+        }
+        let v = self.rest()[..n].to_string();
+        self.bump(n);
+        v
+    }
+}

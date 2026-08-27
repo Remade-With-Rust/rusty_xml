@@ -32,6 +32,21 @@ pub const XML_PARSE_IGNORE_ENC: i32 = 1 << 21;
 pub const XML_PARSE_BIG_LINES: i32 = 1 << 22;
 pub const XML_PARSE_NO_XXE: i32 = 1 << 23;
 pub const XML_PARSE_UNZIP: i32 = 1 << 24;
+
+/// Deliver SAX events without building a document tree.
+/// **A rusty_xml extension, not a libxml2 flag.**
+///
+/// Every entry point here materialises the whole document, including the ones
+/// whose job is streaming: `xml_sax_parse_memory` built a full tree and then
+/// discarded it, and `xml_reader_for_memory` builds a tree and walks it with a
+/// cursor. A consumer that only wants text -- an indexer, a document converter
+/// -- paid for a DOM it never touched.
+///
+/// With this set, character data, CDATA, comments, processing instructions and
+/// attributes create no nodes. The SAX event stream is unchanged and complete;
+/// the returned [`XmlDoc`] holds only the element skeleton and should be
+/// ignored.
+pub const XML_PARSE_NO_TREE: i32 = 1 << 30;
 pub const XML_PARSE_NO_SYS_CATALOG: i32 = 1 << 25;
 pub const XML_PARSE_CATALOG_PI: i32 = 1 << 26;
 pub const XML_PARSE_SKIP_IDS: i32 = 1 << 27;
@@ -344,6 +359,7 @@ struct Parser<'a> {
     scratch_raw: Vec<RawAttr>,
     scratch_sax: Vec<SaxAttr>,
     started: bool,
+    no_tree: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -606,7 +622,7 @@ impl<'a> Parser<'a> {
             && self.char_buf.chars().all(|c| crate::chvalid::xml_is_blank(c as u32));
         if !skip_blank {
             self.sax.characters(&self.char_buf);
-            if let Some(p) = parent {
+            if let Some(p) = parent.filter(|_| !self.no_tree) {
                 let t = self.doc.alloc_unnamed(NodeKind::Text);
                 // Moved, not copied: the buffer is cleared immediately after,
                 // so the clone was a pure allocation plus memcpy per text node.
@@ -640,7 +656,7 @@ impl<'a> Parser<'a> {
             body.push(c);
         }
         self.sax.comment(&body);
-        if let Some(p) = parent {
+        if let Some(p) = parent.filter(|_| !self.no_tree) {
             let n = self.doc.alloc_unnamed(NodeKind::Comment);
             self.doc.node_mut(n).content = body;
             self.doc.xml_add_child(p, n);
@@ -681,7 +697,7 @@ impl<'a> Parser<'a> {
             None
         };
         self.sax.processing_instruction(&target, data.as_deref());
-        if let Some(p) = parent {
+        if let Some(p) = parent.filter(|_| !self.no_tree) {
             let n = self.doc.alloc(NodeKind::Pi, target);
             self.doc.node_mut(n).content = data.unwrap_or_default();
             self.doc.xml_add_child(p, n);
@@ -768,14 +784,14 @@ impl<'a> Parser<'a> {
         }
         if (self.options & XML_PARSE_NOCDATA) != 0 {
             self.sax.characters(&body);
-            if let Some(p) = parent {
+            if let Some(p) = parent.filter(|_| !self.no_tree) {
                 let t = self.doc.alloc_unnamed(NodeKind::Text);
                 self.doc.node_mut(t).content = body;
                 self.doc.xml_add_child(p, t);
             }
         } else {
             self.sax.cdata_block(&body);
-            if let Some(p) = parent {
+            if let Some(p) = parent.filter(|_| !self.no_tree) {
                 let t = self.doc.alloc_unnamed(NodeKind::CData);
                 self.doc.node_mut(t).content = body;
                 self.doc.xml_add_child(p, t);
@@ -1152,10 +1168,14 @@ impl<'a> Parser<'a> {
             };
             self.doc.push_ns_def(elem, p, u);
         }
-        for a in sax_attrs.drain(..) {
-            let uri = a.uri;
-            let aid = self.doc.add_attr_owned(elem, a.local, a.prefix, a.value);
-            self.doc.node_mut(aid).ns_uri = uri;
+        if self.no_tree {
+            sax_attrs.clear();
+        } else {
+            for a in sax_attrs.drain(..) {
+                let uri = a.uri;
+                let aid = self.doc.add_attr_owned(elem, a.local, a.prefix, a.value);
+                self.doc.node_mut(aid).ns_uri = uri;
+            }
         }
         self.doc.xml_add_child(parent, elem);
 
@@ -1382,9 +1402,22 @@ fn parse_utf8(
         depth: 0,
         ns_stack: Vec::new(),
         sax,
-        doc: XmlDoc::with_node_capacity(Some("1.0"), buffer.len() / 10),
+        // Reserving a full arena is the dominant cost of a no-tree parse --
+        // pre-allocating a tree only to leave it empty.
+        doc: XmlDoc::with_node_capacity(
+            Some("1.0"),
+            if (options & XML_PARSE_NO_TREE) != 0 {
+                // Only element nodes are created in this mode, which measure
+                // about one per 36 input bytes. Reserving for a full tree
+                // wasted the arena; reserving nothing made it double instead.
+                buffer.len() / 32
+            } else {
+                buffer.len() / 10
+            },
+        ),
         stack: Vec::new(),
         char_buf: String::new(),
+        no_tree: (options & XML_PARSE_NO_TREE) != 0,
         scratch_raw: Vec::new(),
         scratch_sax: Vec::new(),
         started: false,

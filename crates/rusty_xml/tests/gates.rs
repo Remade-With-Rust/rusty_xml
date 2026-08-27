@@ -846,3 +846,39 @@ fn relaxng_malformed_and_cyclic_schemas_are_errors_not_crashes() {
         "a grammar recursing through an element must still validate: {res:?}"
     );
 }
+
+/// Every entry point in this library materialised the whole document, including
+/// the ones whose job is streaming: `xml_sax_parse_memory` built a full tree and
+/// discarded it. XML_PARSE_NO_TREE lets a consumer that only wants events skip
+/// it. The event stream must be IDENTICAL either way -- that is the whole
+/// contract.
+#[test]
+fn no_tree_mode_delivers_identical_events() {
+    let root = workspace_root();
+    for name in ["slashdot.xml", "big-300k.xml", "big-attr.xml", "svg-lite.xml"] {
+        let p = root.join("corpora").join(name);
+        if !p.exists() {
+            continue;
+        }
+        let xml = std::fs::read(&p).unwrap();
+        let opts = default_parse_options();
+
+        let mut with_tree = SaxRecorder::new();
+        let d1 = xml_sax_parse_memory(&xml, opts, &mut with_tree).unwrap();
+        let mut no_tree = SaxRecorder::new();
+        let d2 = xml_sax_parse_memory(&xml, opts | rusty_xml::XML_PARSE_NO_TREE, &mut no_tree)
+            .unwrap();
+
+        assert_eq!(
+            with_tree.to_xmllint_debug(&xml),
+            no_tree.to_xmllint_debug(&xml),
+            "{name}: NO_TREE changed the event stream"
+        );
+        assert!(
+            d2.len() < d1.len(),
+            "{name}: NO_TREE should build fewer nodes ({} vs {})",
+            d2.len(),
+            d1.len()
+        );
+    }
+}

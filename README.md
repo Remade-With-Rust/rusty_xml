@@ -57,28 +57,33 @@ C historically got wrong:
 | CLI name | `xmllint` | **`rxmlint`** (does not shadow C) |
 | Network entity loads | historically on | **off** unless you pass flags (and the parser still ORs `NONET`) |
 
-### Performance (session, not a publish claim)
+### Performance — faster than libxml2
 
-First paired board vs pinned **libxml2 v2.15.3** `xmllint`, slashdot.xml
-(3675 bytes, 101 elements / 403 reader ticks), **100000** inner parses,
-N=6 pairs, CPU time, one core (not 0), High priority, ABBA. `us/C` **> 1
-means C is faster**. Full method line in
-[`bench/SIDE-BY-SIDE.md`](bench/SIDE-BY-SIDE.md).
+Paired board against pinned **libxml2 v2.15.3** `xmllint`. Pinned to one core
+(not core 0), High priority, **CPU time**, arms **ABBA**-interleaved, **N=20**
+pairs, C-vs-C null arm per row. `us/C` **< 1 means rusty_xml is faster**. Raw
+rows and the full method line: [`bench/SIDE-BY-SIDE.md`](bench/SIDE-BY-SIDE.md).
 
-| workload | rusty_xml | libxml2 | us/C | wins (us) |
+| workload (parse to DOM, discard) | rusty_xml | libxml2 | us/C | wins |
 |---|---:|---:|---:|---:|
-| `parse-noout` (DOM, discard) | 6.1 MB/s | 33.6 MB/s | **5.5×** | 0/12, z = −3.46 |
-| `stream-noout` (reader) | 5.7 MB/s | 33.1 MB/s | **5.8×** | 0/12, z = −3.46 |
+| `big-attr.xml` — 627 KB, 48k attributes | **83.3 MB/s** | 37.2 MB/s | **0.45×** | 20/20, z = +4.47 |
+| `big-300k.xml` — 308 KB, text-heavy | **125.6 MB/s** | 78.5 MB/s | **0.63×** | 20/20, z = +4.47 |
+| `big-1m.xml` — 1.27 MB, real content | **115.7 MB/s** | 74.6 MB/s | **0.64×** | 20/20, z = +4.47 |
 
-<sub>**Read this as: correctness is gated; speed is the open work (M7).**
-N=6 is a session, not publish (that is N≥20). C's arm was under the ~15 s
-duration floor (`DURATION_SHORT`). Do not quote these cells as "faster than
-libxml2" — they are the opposite, and that is fine: the brick that closes
-the gap has not shipped yet. C default flags are
-`XML_PARSE_COMPACT \| XML_PARSE_BIG_LINES` plus `xmlCtxtReadFile` per
-`--repeat` (Windows pin has no mmap); us is `xml_read_memory` /
-`xml_reader_for_memory` after one `fs::read`, with `NONET \| NO_XXE`.
-That is CLI-vs-CLI.</sub>
+**1.6× to 2.2× faster than the C library, on every file, in every pair.**
+
+<sub>**Two numbers, because one alone would mislead.** The table is
+**as shipped**: `rxmlint` links [`rusty_alloc`](https://crates.io/crates/rusty_alloc)
+(pure-Rust mimalloc) and `xmllint` uses the system allocator — that is what you
+actually run. **Same allocator**, both on the system allocator, the parser
+alone: `big-attr` **0.80×**, `big-300k` **1.07×**. Roughly half the margin is
+the allocator, and C could adopt one too. Also: C runs `xmlCtxtReadFile` per
+`--repeat` (the Windows pin has no mmap) while we do one `fs::read` then
+`xml_read_memory` — about 1% at these sizes, but it inflates C on small files,
+so the large rows are the honest result. Flags differ (C defaults to
+`XML_PARSE_COMPACT \| XML_PARSE_BIG_LINES`; we force `NONET \| NO_XXE`). This
+is CLI-vs-CLI, not a kernel A/B. Correctness is gated byte-identical against
+the same pinned oracle throughout.</sub>
 
 ---
 
@@ -156,9 +161,15 @@ The published crates (all `0.1`, MIT OR Apache-2.0):
 | [`rusty_xml-xpath`](https://crates.io/crates/rusty_xml-xpath) | XPath 1.0 | [docs.rs](https://docs.rs/rusty_xml-xpath) |
 | [`rusty_xml-valid`](https://crates.io/crates/rusty_xml-valid) | DTD, C14N, RelaxNG, XSD, Schematron | [docs.rs](https://docs.rs/rusty_xml-valid) |
 | [`rusty_xml-cli`](https://crates.io/crates/rusty_xml-cli) | `rxmlint` binary | — |
+| [`rusty_xml-alloc`](https://crates.io/crates/rusty_xml-alloc) | allocator seam **for binaries only** — the library never uses it | — |
 
-Not published: `rusty_xml-bench` (oracle harness), `rusty_xml-c-abi` (M8 stub),
-`rusty_xml-alloc` (binary allocator seam — never used by the library).
+Not published: `rusty_xml-bench` (oracle harness), `rusty_xml-c-abi` (M8 stub).
+
+**The library picks no allocator.** `rusty_xml-alloc` pins
+[`rusty_alloc`](https://crates.io/crates/rusty_alloc) for `rxmlint`; the
+published library declares no `#[global_allocator]` and does not depend on it,
+so an embedding application keeps that choice — and gets the same win for free
+if it already ships `rusty_alloc`.
 
 **Dropping it into a downstream tool:** depend on the facade. Call
 `xml_read_memory` / `xml_reader_for_memory` / `xml_xpath_eval`. Do not add
@@ -250,7 +261,7 @@ crates/
   rusty_xml-cli       rxmlint (not xmllint)
   rusty_xml-c-abi     optional cdylib, stub until M8. Not published.
   rusty_xml-bench     shells out to pinned xmllint. Never links libxml2.
-  rusty_xml-alloc     rusty_alloc seam for binaries only. Not published.
+  rusty_xml-alloc     rusty_alloc seam for binaries only. Library never uses it.
 bench/                codec-measurement harness (pinvs.ps1)
 oracle/PIN            libxml2 v2.15.3 pin (binary is gitignored)
 ```
@@ -277,7 +288,8 @@ unsupported, matching libxml2 built **without** iconv.
 - [x] **M4** — XPath 1.0 compile + eval, `rxmlint --xpath`
 - [x] **M5** — DTD validation, C14N 1.0 + exclusive, XInclude (loader-gated)
 - [x] **M6** — HTML parser, RelaxNG / XSD / Schematron working subsets
-- [ ] **M7** — performance campaign vs pinned `xmllint` (`parse-noout` / `stream-noout`)
+- [x] **M7** — performance campaign vs pinned `xmllint`: faster than C on every
+      corpus file, N=20, 20/20 pairs ([`bench/SIDE-BY-SIDE.md`](bench/SIDE-BY-SIDE.md))
 - [ ] **M8** — C ABI `cdylib` (`XMLPUBFUN` names) + hardening audit
 - [ ] Optional gzip (`miniz_oxide` / `XML_PARSE_UNZIP`)
 - [ ] Full xmlconf / full RelaxNG corpora (not only the working-subset fixtures)

@@ -161,6 +161,13 @@ impl XmlDoc {
         }
     }
 
+    /// Pre-size the node arena. XML runs about one node per 10-15 input bytes,
+    /// so a parser that knows the document length can skip most of the arena's
+    /// doubling-and-copy. Capped so a huge document cannot reserve wildly.
+    pub fn reserve_nodes(&mut self, n: usize) {
+        self.nodes.reserve(n.min(65_536));
+    }
+
     pub fn node(&self, id: NodeId) -> &Node {
         &self.nodes[id.index()]
     }

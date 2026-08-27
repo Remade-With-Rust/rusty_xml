@@ -379,26 +379,46 @@ impl<'a> Parser<'a> {
         if !xml_is_name_start_char(c as u32, self.old10) {
             return Err(self.err(XML_ERR_NAME_REQUIRED, "Name expected"));
         }
-        let mut s = String::new();
-        s.push(self.bump_char()?.unwrap());
-        while let Some(c) = self.peek_char()? {
-            if xml_is_name_char(c as u32, self.old10) {
-                if s.len() >= MAX_NAME && (self.options & XML_PARSE_HUGE) == 0 {
+        // Scan the name in place and copy it out once. Name characters are
+        // overwhelmingly ASCII, and an ASCII byte needs no decode at all -- the
+        // char-at-a-time form decoded every character twice (peek, then bump)
+        // and grew the String one push at a time.
+        let start = self.pos;
+        self.bump_char()?;
+        loop {
+            let Some(b) = self.peek_byte() else { break };
+            if b < 0x80 {
+                if !xml_is_name_char(b as u32, self.old10) {
+                    break;
+                }
+                if self.pos - start >= MAX_NAME && (self.options & XML_PARSE_HUGE) == 0 {
                     return Err(self.err(XML_ERR_NAME_REQUIRED, "Name too long"));
                 }
-                s.push(self.bump_char()?.unwrap());
+                self.bump_byte();
             } else {
-                break;
+                let Some(c) = self.peek_char()? else { break };
+                if !xml_is_name_char(c as u32, self.old10) {
+                    break;
+                }
+                if self.pos - start >= MAX_NAME && (self.options & XML_PARSE_HUGE) == 0 {
+                    return Err(self.err(XML_ERR_NAME_REQUIRED, "Name too long"));
+                }
+                self.bump_char()?;
             }
         }
-        Ok(s)
+        // Every byte in the span was accepted as part of a decoded character,
+        // so this is valid UTF-8; validate anyway rather than reach for unsafe.
+        match std::str::from_utf8(&self.input[start..self.pos]) {
+            Ok(name) => Ok(name.to_string()),
+            Err(_) => Err(self.err(XML_ERR_INVALID_CHAR, "Invalid UTF-8")),
+        }
     }
 
-    fn split_qname(name: &str) -> Result<(Option<String>, String), XmlError> {
+    fn split_qname(name: &str) -> Result<(Option<&str>, &str), XmlError> {
         let mut parts = name.split(':');
         let a = parts.next().unwrap();
         match parts.next() {
-            None => Ok((None, a.to_string())),
+            None => Ok((None, a)),
             Some(b) => {
                 if parts.next().is_some() || a.is_empty() || b.is_empty() {
                     return Err(XmlError::new(
@@ -408,7 +428,7 @@ impl<'a> Parser<'a> {
                         0,
                     ));
                 }
-                Ok((Some(a.to_string()), b.to_string()))
+                Ok((Some(a), b))
             }
         }
     }
@@ -859,7 +879,7 @@ impl<'a> Parser<'a> {
                     self.sax.warning(&msg);
                 }
                 ns_frame.push((None, a.value.clone()));
-            } else if ap.as_deref() == Some("xmlns") {
+            } else if ap == Some("xmlns") {
                 if !a.value.is_empty()
                     && !Self::uri_has_scheme(&a.value)
                     && (self.options & XML_PARSE_PEDANTIC) != 0
@@ -867,46 +887,48 @@ impl<'a> Parser<'a> {
                     let msg = format!("xmlns:{}: URI {} is not absolute\n", al, a.value);
                     self.sax.warning(&msg);
                 }
-                ns_frame.push((Some(al), a.value.clone()));
+                ns_frame.push((Some(al.to_string()), a.value.clone()));
             }
         }
         self.ns_stack.push(ns_frame.clone());
 
-        let elem_uri = self.lookup_ns(prefix.as_deref());
+        let elem_uri = self.lookup_ns(prefix);
         if prefix.is_some() && elem_uri.is_none() {
             return Err(self.err(
                 XML_NS_ERR_UNDEFINED_NAMESPACE,
-                format!("Undefined namespace prefix {}", prefix.as_deref().unwrap()),
+                format!("Undefined namespace prefix {}", prefix.unwrap()),
             ));
         }
 
         let mut sax_attrs: Vec<SaxAttr> = Vec::new();
-        let mut seen: Vec<(Option<String>, String)> = Vec::new();
+        let mut seen: Vec<(Option<String>, &str)> = Vec::new();
         for a in &raw_attrs {
             let (ap, al) = Self::split_qname(&a.qname).unwrap();
-            if (ap.is_none() && al == "xmlns") || ap.as_deref() == Some("xmlns") {
+            if (ap.is_none() && al == "xmlns") || ap == Some("xmlns") {
                 continue;
             }
             let uri = if ap.is_some() {
-                let u = self.lookup_ns(ap.as_deref());
+                let u = self.lookup_ns(ap);
                 if u.is_none() {
                     return Err(self.err(
                         XML_NS_ERR_UNDEFINED_NAMESPACE,
-                        format!("Undefined namespace prefix {}", ap.as_deref().unwrap()),
+                        format!("Undefined namespace prefix {}", ap.unwrap()),
                     ));
                 }
                 u
             } else {
                 None
             };
-            let key = (uri.clone(), al.clone());
-            if seen.iter().any(|s| s == &key) {
+            if seen
+                .iter()
+                .any(|(u, l): &(Option<String>, &str)| u.as_deref() == uri.as_deref() && *l == al)
+            {
                 return Err(self.err(XML_ERR_ATTRIBUTE_REDEFINED, "Attribute redefined"));
             }
-            seen.push(key);
+            seen.push((uri.clone(), al));
             sax_attrs.push(SaxAttr {
-                local: al,
-                prefix: ap,
+                local: al.to_string(),
+                prefix: ap.map(str::to_string),
                 uri,
                 value: a.value.clone(),
                 value_input_off: Some(a.value_off),
@@ -914,16 +936,16 @@ impl<'a> Parser<'a> {
         }
 
         self.sax.start_element_ns(
-            &local,
-            prefix.as_deref(),
+            local,
+            prefix,
             elem_uri.as_deref(),
             &ns_frame,
             &sax_attrs,
             0,
         );
 
-        let elem = self.doc.alloc(NodeKind::Element, local.clone());
-        self.doc.node_mut(elem).prefix = prefix.clone();
+        let elem = self.doc.alloc(NodeKind::Element, local);
+        self.doc.node_mut(elem).prefix = prefix.map(str::to_string);
         self.doc.node_mut(elem).ns_uri = elem_uri.clone();
         for (p, u) in &ns_frame {
             self.doc.push_ns_def(elem, p.clone(), u.clone());
@@ -935,7 +957,7 @@ impl<'a> Parser<'a> {
         self.doc.xml_add_child(parent, elem);
 
         if empty {
-            self.sax.end_element_ns(&local, prefix.as_deref(), elem_uri.as_deref());
+            self.sax.end_element_ns(local, prefix, elem_uri.as_deref());
             self.ns_stack.pop();
             self.depth -= 1;
             return Ok(());
@@ -1121,7 +1143,11 @@ fn parse_utf8(
         depth: 0,
         ns_stack: Vec::new(),
         sax,
-        doc: XmlDoc::xml_new_doc(Some("1.0")),
+        doc: {
+            let mut d = XmlDoc::xml_new_doc(Some("1.0"));
+            d.reserve_nodes(buffer.len() / 16);
+            d
+        },
         stack: Vec::new(),
         char_buf: String::new(),
         started: false,
@@ -1148,22 +1174,45 @@ fn parse_utf8(
 }
 
 fn apply_dtd_defaults(doc: &mut XmlDoc) {
-    let Some(dtd) = doc.dtd.clone() else { return };
+    // The common cases -- no DTD, or a DTD carrying no ATTLIST default -- cost
+    // nothing now. Testing before the clone matters: cloning the DTD copies
+    // every entity and declaration in it.
+    match &doc.dtd {
+        None => return,
+        Some(d) => {
+            if !d.attributes.values().any(|a| a.default_value.is_some()) {
+                return;
+            }
+        }
+    }
+    let dtd = match doc.dtd.clone() {
+        Some(d) => d,
+        None => return,
+    };
+    // Group the defaults by element name once. The previous form rescanned
+    // every declaration for every element in the document, and allocated the
+    // element's name each time round.
+    let mut by_elem: std::collections::HashMap<&str, Vec<(&str, &str)>> =
+        std::collections::HashMap::new();
+    for ((elem, aname), ad) in &dtd.attributes {
+        if let Some(v) = &ad.default_value {
+            by_elem
+                .entry(elem.as_str())
+                .or_default()
+                .push((aname.as_str(), v.as_str()));
+        }
+    }
     let n = doc.len();
     for i in 0..n {
         let id = NodeId(i as u32);
         if doc.kind(id) != NodeKind::Element {
             continue;
         }
-        let name = doc.name(id).to_string();
-        for ((elem, aname), ad) in &dtd.attributes {
-            if elem != &name {
-                continue;
-            }
-            if doc.xml_get_prop(id, aname).is_some() {
-                continue;
-            }
-            if let Some(v) = &ad.default_value {
+        let Some(list) = by_elem.get(doc.name(id)) else {
+            continue;
+        };
+        for (aname, v) in list.iter() {
+            if doc.xml_get_prop(id, aname).is_none() {
                 doc.xml_set_prop(id, aname, v);
             }
         }

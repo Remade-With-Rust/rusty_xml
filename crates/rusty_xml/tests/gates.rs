@@ -780,3 +780,38 @@ fn ordinary_xpath_still_compiles() {
         other => panic!("expected 2 items, got {other:?}"),
     }
 }
+
+/// XML_PARSE_HUGE used to REMOVE the nesting cap rather than raise it, so an
+/// opt-in caller got a stack overflow -- a process abort, not an error -- at
+/// around 800 levels. The element parser is recursive descent at roughly 1.4 KB
+/// of stack per level. HUGE now raises the ceiling; it does not delete it.
+#[test]
+fn huge_raises_the_depth_cap_without_removing_it() {
+    let build = |d: usize| {
+        let mut s = String::from("<r>");
+        for _ in 0..d {
+            s.push_str("<a>");
+        }
+        s.push('x');
+        for _ in 0..d {
+            s.push_str("</a>");
+        }
+        s.push_str("</r>");
+        s
+    };
+    let def = default_parse_options();
+    let huge = def | rusty_xml::XML_PARSE_HUGE;
+
+    // default ceiling
+    assert!(xml_read_memory(build(250).as_bytes(), None, None, def).is_ok());
+    assert!(xml_read_memory(build(300).as_bytes(), None, None, def).is_err());
+
+    // HUGE goes further, but still stops -- reaching these lines is the point
+    assert!(xml_read_memory(build(400).as_bytes(), None, None, huge).is_ok());
+    for d in [600usize, 5_000, 50_000] {
+        assert!(
+            xml_read_memory(build(d).as_bytes(), None, None, huge).is_err(),
+            "HUGE must still refuse {d} levels rather than abort the process"
+        );
+    }
+}

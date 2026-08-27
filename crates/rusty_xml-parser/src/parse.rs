@@ -40,6 +40,16 @@ const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
 const XMLNS_NS: &str = "http://www.w3.org/2000/xmlns/";
 
 const MAX_DEPTH: u32 = 256;
+
+/// The ceiling `XML_PARSE_HUGE` raises the nesting limit to -- it does not
+/// remove it. The element parser is recursive descent and costs roughly 1.4 KB
+/// of stack per level (measured: overflow between 700 and 800 on a 1 MB stack),
+/// and a stack overflow ABORTS THE PROCESS rather than returning an error.
+/// HUGE is meant to lift a policy limit, not to hand the caller a crash.
+///
+/// An embedder running on a stack much smaller than 1 MB should not set HUGE;
+/// making this unbounded needs an iterative parser, not a bigger number.
+const MAX_DEPTH_HUGE: u32 = 512;
 const MAX_NAME: usize = 50_000;
 const MAX_TEXT: usize = 10_000_000;
 
@@ -923,7 +933,12 @@ impl<'a> Parser<'a> {
 
     fn parse_element(&mut self, parent: NodeId) -> Result<(), XmlError> {
         self.depth += 1;
-        if self.depth > MAX_DEPTH && (self.options & XML_PARSE_HUGE) == 0 {
+        let cap = if (self.options & XML_PARSE_HUGE) != 0 {
+            MAX_DEPTH_HUGE
+        } else {
+            MAX_DEPTH
+        };
+        if self.depth > cap {
             return Err(self.err(XML_ERR_INTERNAL_ERROR, "Excessive element nesting"));
         }
         self.expect_byte(b'<', XML_ERR_LT_REQUIRED, "'<' required")?;

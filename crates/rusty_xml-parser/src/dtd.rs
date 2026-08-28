@@ -40,6 +40,13 @@ fn parse_subset(src: &str, internal: bool, old10: bool) -> Result<XmlDtd, XmlErr
         old10,
     };
     p.parse_markup()?;
+    // A parameter entity reference in the subset means the declarations may be
+    // incomplete, which changes "Entity Declared" from a well-formedness
+    // constraint into a validity one.
+    dtd.has_parameter_entity_refs = expanded != src
+        || src.chars().zip(src.chars().skip(1)).any(|(a, b)| {
+            a == '%' && crate::chvalid::xml_is_name_start_char(b as u32, false)
+        });
     check_entity_graph(&dtd)?;
     Ok(dtd)
 }
@@ -142,6 +149,23 @@ fn subst_pe(
                 None if c == '"' || c == '\'' => in_quote = Some(c),
                 _ => {}
             }
+        }
+        // A processing instruction is markup too, and a parameter entity may
+        // not supply part of one in the internal subset. `<?music %pe;` where
+        // the entity carries the `?>` was going through.
+        if c == '<' && chars.peek() == Some(&'?') {
+            in_decl = true;
+            decl_is_entity = false;
+            in_quote = None;
+            out.push(c);
+            out.push(chars.next().unwrap());
+            continue;
+        }
+        if c == '?' && in_decl && chars.peek() == Some(&'>') {
+            in_decl = false;
+            out.push(c);
+            out.push(chars.next().unwrap());
+            continue;
         }
         if c == '<' && chars.peek() == Some(&'!') {
             in_decl = true;
@@ -971,6 +995,7 @@ pub fn merge_dtd(dst: &mut XmlDtd, src: XmlDtd) {
     dst.duplicate_elements.extend(src.duplicate_elements);
     dst.notations.extend(src.notations);
     dst.ndata_notations.extend(src.ndata_notations);
+    dst.has_parameter_entity_refs |= src.has_parameter_entity_refs;
     dst.parameter_entities.extend(src.parameter_entities);
     dst.elements.extend(src.elements);
     dst.attributes.extend(src.attributes);

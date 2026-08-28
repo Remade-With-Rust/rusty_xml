@@ -1974,3 +1974,27 @@ fn tokenized_attribute_values_are_normalized() {
     // CDATA is left exactly as the parser produced it.
     assert!(out.contains("c=\"  keep  me  \""), "CDATA was normalized:\n{out}");
 }
+
+/// A parameter entity reference in the subset changes what "Entity Declared"
+/// means.
+///
+/// XML 1.0 4.1: when the subset used one, the declarations may be incomplete,
+/// so an unresolvable entity is a VALIDITY error rather than a well-formedness
+/// one. Killing the parse there refused documents libxml2 reads -- and the
+/// reference is recorded so the validator still reports it.
+#[test]
+fn an_incomplete_subset_downgrades_undeclared_entities() {
+    let opts = default_parse_options();
+    // With a PE reference: parses, but does not validate.
+    let src = b"<!DOCTYPE foo [<!ENTITY % pe \"<!ENTITY ent1 'text'>\">\n%pe;\n\
+                <!ELEMENT foo ANY>]><foo>&ent2;</foo>";
+    let doc = xml_read_memory(src, None, None, opts).expect("must not be fatal");
+    assert!(
+        rusty_xml::xml_validate_document(&doc).is_err(),
+        "an unresolved entity is still an error, just a validity one"
+    );
+
+    // Without one, the declarations are complete and it stays fatal.
+    let strict = b"<!DOCTYPE foo [<!ELEMENT foo ANY>]><foo>&nope;</foo>";
+    assert!(xml_read_memory(strict, None, None, opts).is_err());
+}

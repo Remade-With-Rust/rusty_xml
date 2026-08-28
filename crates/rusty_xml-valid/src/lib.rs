@@ -37,6 +37,12 @@ pub fn xml_validate_dtd(doc: &XmlDoc, dtd: &XmlDtd) -> Result<(), String> {
     // Constraints on the DECLARATIONS themselves, before any instance of them
     // is looked at. None of these was checked, so a declaration could promise
     // something no document could satisfy.
+    // An entity the parse could not resolve is a validity error when the
+    // subset was incomplete -- it stopped being a well-formedness one, but it
+    // did not stop being an error.
+    if let Some(e) = doc.undeclared_entity_refs.first() {
+        return Err(format!("Entity '{e}' not defined"));
+    }
     // "Notation Declared": a notation named by an NDATA annotation or by a
     // NOTATION attribute type has to have been declared. We were parsing
     // <!NOTATION> and throwing the name away, so nothing could tell.

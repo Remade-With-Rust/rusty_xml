@@ -1121,11 +1121,21 @@ impl<'a> Parser<'a> {
                     // back out escaped: `&b;&b;` became `&amp;b;&amp;b;`.
                     return self.expand_entity(&name, &raw, 0);
                 }
-                if self.recover {
-                    // Recovering: keep the reference as written rather than
-                    // losing the whole document over one unknown entity.
+                // XML 1.0 4.1: when the subset used a parameter entity
+                // reference the declarations may be incomplete, so an
+                // unresolvable entity is a VALIDITY error rather than a
+                // well-formedness one. Killing the parse there refused
+                // documents libxml2 reads, and the reference is recorded so
+                // the validator can still report it.
+                let subset_incomplete = self
+                    .doc
+                    .dtd
+                    .as_ref()
+                    .is_some_and(|d| d.has_parameter_entity_refs);
+                if self.recover || subset_incomplete {
                     self.sax
                         .error(&format!("Entity '{name}' not defined"));
+                    self.doc.undeclared_entity_refs.push(name.clone());
                     return Ok(format!("&{name};"));
                 }
                 Err(self.err(

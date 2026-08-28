@@ -54,6 +54,11 @@ pub struct XmlDtd {
     /// "Notation Declared" constraint can be checked once the whole subset is
     /// read rather than in declaration order.
     pub ndata_notations: Vec<String>,
+    /// The internal subset used a parameter entity reference, so the set of
+    /// entity declarations may be incomplete. XML 1.0 4.1 turns "Entity
+    /// Declared" from a well-formedness constraint into a validity one in that
+    /// case: an unresolvable entity must not kill the parse.
+    pub has_parameter_entity_refs: bool,
     /// Element name → content model.
     pub elements: HashMap<String, ElementDecl>,
     /// Element types declared more than once. A map cannot represent that, and
@@ -156,6 +161,10 @@ pub struct XmlDoc {
     root: Option<NodeId>,
     /// Internal / attached DTD, if any.
     pub dtd: Option<XmlDtd>,
+    /// Entity references the parse could not resolve. They are kept as written
+    /// rather than being fatal when the subset is incomplete, and the
+    /// validator reports them.
+    pub undeclared_entity_refs: Vec<String>,
 }
 
 impl Default for XmlDoc {
@@ -189,6 +198,7 @@ impl XmlDoc {
             standalone: None,
             root: None,
             dtd: None,
+            undeclared_entity_refs: Vec::new(),
         }
     }
 

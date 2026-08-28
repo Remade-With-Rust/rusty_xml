@@ -165,6 +165,17 @@ pub struct XmlDoc {
     /// rather than being fatal when the subset is incomplete, and the
     /// validator reports them.
     pub undeclared_entity_refs: Vec<String>,
+    /// Text nodes whose content came from a character or entity reference.
+    ///
+    /// Such text is never ignorable whitespace: `<foo><foo/>&#32;<foo/></foo>`
+    /// against an element-only content model is character data where none is
+    /// allowed, and looking only at whether the text is blank cannot tell it
+    /// from the indentation beside it.
+    pub reference_text: std::collections::HashSet<NodeId>,
+    /// Elements whose content included an entity reference, including one that
+    /// expanded to nothing. `<foo>&empty;</foo>` against EMPTY is content, and
+    /// the tree has no node to show for it.
+    pub elements_with_entity_refs: std::collections::HashSet<NodeId>,
 }
 
 impl Default for XmlDoc {
@@ -199,6 +210,8 @@ impl XmlDoc {
             root: None,
             dtd: None,
             undeclared_entity_refs: Vec::new(),
+            reference_text: Default::default(),
+            elements_with_entity_refs: Default::default(),
         }
     }
 
@@ -754,6 +767,13 @@ impl XmlDoc {
                 d.ns_defs = n.ns_defs.clone();
             }
             self.xml_add_child(parent, copy);
+            // Carry the source's own judgement across rather than marking
+            // everything: a literal space in an entity's replacement is still
+            // ignorable whitespace, only a character reference written out in
+            // that replacement is not.
+            if src.reference_text.contains(&s) {
+                self.reference_text.insert(copy);
+            }
             // Attributes are a separate chain, not children.
             let mut a = src.first_attr(s);
             while let Some(x) = a {

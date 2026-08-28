@@ -1998,3 +1998,96 @@ fn an_incomplete_subset_downgrades_undeclared_entities() {
     let strict = b"<!DOCTYPE foo [<!ELEMENT foo ANY>]><foo>&nope;</foo>";
     assert!(xml_read_memory(strict, None, None, opts).is_err());
 }
+
+/// Where whitespace came from decides whether it is ignorable.
+///
+/// The XML 1.0 2e erratum E15 draws a line that the tree alone cannot: a
+/// character reference standing in the DOCUMENT is character data, while an
+/// entity whose replacement IS whitespace contributes ignorable whitespace,
+/// because the reference is replaced by its content.
+///
+/// All four of these have the same shape and the suite splits them two and
+/// two, so getting it right means tracking provenance, not inspecting text.
+#[test]
+fn whitespace_provenance_decides_ignorability() {
+    let opts = default_parse_options();
+    let verdict = |src: &str| -> bool {
+        let d = xml_read_memory(src.as_bytes(), None, None, opts)
+            .unwrap_or_else(|e| panic!("should parse: {src}\n{e}"));
+        rusty_xml::xml_validate_document(&d).is_ok()
+    };
+    // An entity whose value is whitespace: ignorable, so valid.
+    assert!(verdict("<!DOCTYPE foo [<!ELEMENT foo (foo*)><!ENTITY s \" \">]>\
+                     <foo><foo/>&s;<foo/></foo>"), "literal-space entity should be valid");
+    // Same, where the entity value used a character reference -- resolved when
+    // the declaration was read, so the replacement is a space.
+    assert!(verdict("<!DOCTYPE foo [<!ELEMENT foo (foo*)><!ENTITY s \"&#32;\">]>\
+                     <foo><foo/>&s;<foo/></foo>"), "charref-in-value should be valid");
+    // A character reference in the document itself: character data.
+    assert!(!verdict("<!DOCTYPE foo [<!ELEMENT foo (foo*)>]>\
+                      <foo><foo/>&#32;<foo/></foo>"), "charref in content should be invalid");
+    // An entity whose replacement TEXT is literally `&#32;`, so the reference
+    // is read in content when the entity is used.
+    assert!(!verdict("<!DOCTYPE foo [<!ELEMENT foo (foo*)><!ENTITY s \"&#38;#32;\">]>\
+                      <foo><foo/>&s;<foo/></foo>"), "charref via replacement should be invalid");
+
+    // An entity reference is content even when it expands to nothing.
+    assert!(!verdict("<!DOCTYPE foo [<!ELEMENT foo EMPTY><!ENTITY e \"\">]><foo>&e;</foo>"),
+            "EMPTY element with an entity reference should be invalid");
+    assert!(verdict("<!DOCTYPE foo [<!ELEMENT foo EMPTY>]><foo/>"), "EMPTY should still be valid");
+}
+
+/// List-typed attribute values separate on #x20 and nothing else.
+///
+/// Literal tab and newline become spaces during attribute-value normalization,
+/// but a character reference contributes its character unchanged -- so
+/// `abc&#9;xyz` is ONE token holding a tab, and not a valid Nmtoken at all.
+/// Splitting on any whitespace turned it into two tokens that both looked fine.
+#[test]
+fn list_attributes_split_on_space_only() {
+    let opts = default_parse_options();
+    let d = xml_read_memory(
+        b"<!DOCTYPE f [<!ELEMENT f ANY><!ATTLIST f bar NMTOKENS #IMPLIED>]>\
+          <f bar=\"abc&#9;xyz\"/>",
+        None, None, opts,
+    ).unwrap();
+    assert!(rusty_xml::xml_validate_document(&d).is_err(), "referenced tab should not separate");
+
+    // Literal whitespace does separate, and the value normalizes.
+    let d = xml_read_memory(
+        b"<!DOCTYPE f [<!ELEMENT f ANY><!ATTLIST f bar NMTOKENS #IMPLIED>]>\
+          <f bar=\"  abc\txyz  \"/>",
+        None, None, opts,
+    ).unwrap();
+    rusty_xml::xml_validate_document(&d).expect("literal whitespace should separate");
+    let out = String::from_utf8(xml_save_doc(&d, 0)).unwrap();
+    assert!(out.contains("bar=\"abc xyz\""), "not normalized: {out}");
+
+    // A default value in the DTD normalizes the same way.
+    let d = xml_read_memory(
+        b"<!DOCTYPE f [<!ELEMENT f ANY><!ATTLIST f bar NMTOKENS \" 1  \tx \t\">]>\
+          <f/>",
+        None, None, opts | rusty_xml::XML_PARSE_DTDATTR,
+    ).unwrap();
+    rusty_xml::xml_validate_document(&d).expect("default should normalize too");
+}
+
+/// An ID or IDREF value is an NCName (Namespaces in XML erratum NE05).
+///
+/// Stricter than libxml2, which does not check it -- but a VALIDITY constraint
+/// costs nothing at parse time and refuses no document anyone can read.
+#[test]
+fn id_values_are_ncnames() {
+    let opts = default_parse_options();
+    let d = xml_read_memory(
+        b"<!DOCTYPE f [<!ELEMENT f ANY><!ATTLIST f id ID #REQUIRED>]><f id=\"a:b\"/>",
+        None, None, opts,
+    ).unwrap();
+    assert!(rusty_xml::xml_validate_document(&d).is_err(), "colon in an ID should be invalid");
+
+    let d = xml_read_memory(
+        b"<!DOCTYPE f [<!ELEMENT f ANY><!ATTLIST f id ID #REQUIRED>]><f id=\"ab\"/>",
+        None, None, opts,
+    ).unwrap();
+    rusty_xml::xml_validate_document(&d).expect("a plain NCName is fine");
+}

@@ -118,13 +118,13 @@ pub fn xml_validate_dtd(doc: &XmlDoc, dtd: &XmlDtd) -> Result<(), String> {
         let ok = match ad.att_type.as_str() {
             "ID" | "IDREF" | "ENTITY" => is_name(def),
             "IDREFS" | "ENTITIES" => {
-                def.split_ascii_whitespace().next().is_some()
-                    && def.split_ascii_whitespace().all(is_name)
+                def.split_space().next().is_some()
+                    && def.split_space().all(is_name)
             }
             "NMTOKEN" => is_nmtoken(def),
             "NMTOKENS" => {
-                def.split_ascii_whitespace().next().is_some()
-                    && def.split_ascii_whitespace().all(is_nmtoken)
+                def.split_space().next().is_some()
+                    && def.split_space().all(is_nmtoken)
             }
             _ => true,
         };
@@ -159,6 +159,26 @@ pub fn xml_validate_dtd(doc: &XmlDoc, dtd: &XmlDtd) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Split a list-typed attribute value on #x20, and only on #x20.
+///
+/// The tokenized list types are `Nmtoken (#x20 Nmtoken)*`. Literal tab and
+/// newline become spaces during attribute-value normalization, but a character
+/// reference contributes its character unchanged -- so `abc&#9;xyz` is ONE
+/// token holding a tab, and not a valid Nmtoken at all. Splitting on any
+/// whitespace turned it into two tokens that both looked fine.
+trait SplitSpace {
+    fn split_space(&self) -> std::iter::Filter<std::str::Split<'_, char>, fn(&&str) -> bool>;
+}
+
+impl SplitSpace for str {
+    fn split_space(&self) -> std::iter::Filter<std::str::Split<'_, char>, fn(&&str) -> bool> {
+        fn non_empty(s: &&str) -> bool {
+            !s.is_empty()
+        }
+        self.split(' ').filter(non_empty as fn(&&str) -> bool)
+    }
 }
 
 /// A Name, as the ID / IDREF validity constraints require.
@@ -205,7 +225,12 @@ fn validate_element(
     if let Some(decl) = dtd.elements.get(&name) {
         match decl {
             ElementDecl::Empty => {
-                if doc.first_child(id).is_some() {
+                // An entity reference is content even when it expands to
+                // nothing: `<foo>&empty;</foo>` leaves no node behind, so the
+                // child list alone cannot see it.
+                if doc.first_child(id).is_some()
+                    || doc.elements_with_entity_refs.contains(&id)
+                {
                     return Err(format!("element {name} must be EMPTY"));
                 }
             }
@@ -234,7 +259,12 @@ fn validate_element(
                     while let Some(x) = c {
                         if doc.kind(x) == NodeKind::Element {
                             v.push(doc.qname(x));
-                        } else if doc.kind(x) == NodeKind::Text && !doc.xml_is_blank_node(x) {
+                        } else if doc.kind(x) == NodeKind::Text
+                            && (!doc.xml_is_blank_node(x) || doc.reference_text.contains(&x))
+                        {
+                            // Whitespace that arrived as `&#32;` is character
+                            // data, not the ignorable indentation beside it,
+                            // and only the parser can tell them apart.
                             return Err(format!("character data not allowed in {name}"));
                         } else if doc.kind(x) == NodeKind::CData {
                             // A CDATA section is character data whatever is in
@@ -297,6 +327,16 @@ fn validate_element(
             // "uniqueness checked loosely", which meant not at all.
             match ad.att_type.as_str() {
                 "ID" | "IDREF" => {
+                    // Namespaces in XML erratum NE05: an ID or IDREF value is
+                    // an NCName, so a colon in one is a validity error. This
+                    // is stricter than libxml2, which does not check it -- but
+                    // it is a VALIDITY constraint, so it costs nothing at
+                    // parse time and refuses no document anyone can read.
+                    if v.contains(':') {
+                        return Err(format!(
+                            "Value {v} for attribute {aname} of {name} is not an NCName"
+                        ));
+                    }
                     if !is_name(v) {
                         return Err(format!(
                             "Syntax of value for attribute {aname} of {name} is not valid"
@@ -312,8 +352,13 @@ fn validate_element(
                 }
                 "IDREFS" => {
                     let mut any = false;
-                    for part in v.split_ascii_whitespace() {
+                    for part in v.split_space() {
                         any = true;
+                        if part.contains(':') {
+                            return Err(format!(
+                                "Value {part} for attribute {aname} of {name} is not an NCName"
+                            ));
+                        }
                         if !is_name(part) {
                             return Err(format!(
                                 "Syntax of value for attribute {aname} of {name} is not valid"
@@ -335,8 +380,8 @@ fn validate_element(
                     }
                 }
                 "NMTOKENS" => {
-                    if v.split_ascii_whitespace().next().is_none()
-                        || !v.split_ascii_whitespace().all(is_nmtoken)
+                    if v.split_space().next().is_none()
+                        || !v.split_space().all(is_nmtoken)
                     {
                         return Err(format!(
                             "Syntax of value for attribute {aname} of {name} is not valid"
@@ -344,7 +389,7 @@ fn validate_element(
                     }
                 }
                 "ENTITY" | "ENTITIES" => {
-                    for part in v.split_ascii_whitespace() {
+                    for part in v.split_space() {
                         if !is_name(part) {
                             return Err(format!(
                                 "Syntax of value for attribute {aname} of {name} is not valid"

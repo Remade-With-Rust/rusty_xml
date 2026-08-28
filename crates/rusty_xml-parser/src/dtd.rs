@@ -761,6 +761,16 @@ impl<'a> DtdParser<'a> {
             // binding and later declarations are ignored." We were inserting
             // into a map, so the last one won and a later #REQUIRED overrode
             // an earlier default.
+            // Attribute-value normalization applies to a default too, and to
+            // the LITERAL whitespace only: a tab written out becomes a space,
+            // a character-referenced one stays a tab. Entity values and system
+            // identifiers get no such treatment, so this belongs here and not
+            // in the shared literal reader.
+            let default_value = default_value.map(|v: String| {
+                v.chars()
+                    .map(|c| if matches!(c, '\t' | '\n' | '\r') { ' ' } else { c })
+                    .collect::<String>()
+            });
             // In an attribute default the references ARE expanded, so the
             // entity has to be declared already -- unlike an EntityValue,
             // where they are bypassed and a forward reference is legal. The

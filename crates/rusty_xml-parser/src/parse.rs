@@ -417,6 +417,7 @@ fn fresh_parser<'a>(
         ),
         stack: Vec::new(),
         char_buf: String::new(),
+        char_buf_from_reference: false,
         no_tree: (options & XML_PARSE_NO_TREE) != 0,
         recover: (options & XML_PARSE_RECOVER) != 0,
         // libxml2 bounds entity amplification at a small multiple of the input
@@ -542,6 +543,10 @@ struct Parser<'a> {
     started: bool,
     no_tree: bool,
     recover: bool,
+    /// Whether anything now in `char_buf` arrived by way of a character or
+    /// entity reference. Referenced text is never ignorable whitespace, and
+    /// the text itself cannot say so.
+    char_buf_from_reference: bool,
     /// Bytes of entity expansion still permitted. Expanding nested entities
     /// creates the billion-laughs vector, so it is bounded from the start.
     entity_budget: usize,
@@ -823,9 +828,13 @@ impl<'a> Parser<'a> {
                 // so the clone was a pure allocation plus memcpy per text node.
                 self.doc.node_mut(t).content = std::mem::take(&mut self.char_buf);
                 self.doc.xml_add_child(p, t);
+                if self.char_buf_from_reference {
+                    self.doc.reference_text.insert(t);
+                }
             }
         }
         self.char_buf.clear();
+        self.char_buf_from_reference = false;
         Ok(())
     }
 
@@ -1211,6 +1220,7 @@ impl<'a> Parser<'a> {
             doc: XmlDoc::with_node_capacity(Some("1.0"), 8),
             stack: Vec::new(),
             char_buf: String::new(),
+        char_buf_from_reference: false,
             scratch_raw: Vec::new(),
             scratch_sax: Vec::new(),
             started: false,
@@ -1915,6 +1925,7 @@ impl<'a> Parser<'a> {
             doc: st.doc,
             stack: st.stack,
             char_buf: st.char_buf,
+            char_buf_from_reference: false,
             no_tree: (options & XML_PARSE_NO_TREE) != 0,
             recover: (options & XML_PARSE_RECOVER) != 0,
         // libxml2 bounds entity amplification at a small multiple of the input
@@ -2124,6 +2135,7 @@ impl<'a> Parser<'a> {
                 if is_charref {
                     let repl = self.parse_reference()?;
                     self.char_buf.push_str(&repl);
+                    self.char_buf_from_reference = true;
                 } else {
                     self.flush_chars(Some(parent))?;
                     let raw = self.reference_raw_value();
@@ -2155,9 +2167,23 @@ impl<'a> Parser<'a> {
                     // '&' as well as '<': `<!ENTITY e "&#38;">` stores a bare
                     // ampersand, and a bare ampersand in content is an error,
                     // not text. Re-parsing the replacement is what says so.
+                    // The element contained a reference, whatever it expanded
+                    // to -- including nothing, which leaves no node to see.
+                    if !self.no_tree {
+                        self.doc.elements_with_entity_refs.insert(parent);
+                    }
                     if will_splice {
                         self.splice_entity(raw.as_deref().unwrap(), parent)?;
                     } else {
+                        // NOT marked as referenced text. An entity whose value
+                        // IS whitespace contributes ignorable whitespace --
+                        // `<!ENTITY space " ">` and `<!ENTITY space "&#32;">`
+                        // are both valid in element-only content, because the
+                        // reference is replaced by its content. It is a
+                        // character reference standing in the DOCUMENT that is
+                        // character data, and that case is marked where it is
+                        // read, or by the sub-parse when an entity's
+                        // replacement text contains one literally.
                         self.char_buf.push_str(&repl);
                         self.flush_chars(Some(parent))?;
                     }
@@ -2324,6 +2350,7 @@ fn parse_utf8(
         ),
         stack: Vec::new(),
         char_buf: String::new(),
+        char_buf_from_reference: false,
         no_tree: (options & XML_PARSE_NO_TREE) != 0,
         recover: (options & XML_PARSE_RECOVER) != 0,
         // libxml2 bounds entity amplification at a small multiple of the input
@@ -2551,7 +2578,17 @@ fn normalize_tokenized_attrs(doc: &mut XmlDoc) {
                 while let Some(at) = a {
                     if tokenized.contains(&(elem.clone(), doc.qname(at))) {
                         let v = doc.content(at);
-                        let norm = v.split_ascii_whitespace().collect::<Vec<_>>().join(" ");
+                        // Space-separated, not whitespace-separated. XML 1.0
+                        // 3.3.3 turns LITERAL tab/newline into a space during
+                        // normalization, but a character reference contributes
+                        // its character unchanged -- so a referenced tab is
+                        // still a tab here and belongs to the token around it.
+                        // Splitting on it merged two tokens out of one.
+                        let norm = v
+                            .split(' ')
+                            .filter(|t| !t.is_empty())
+                            .collect::<Vec<_>>()
+                            .join(" ");
                         if norm != v {
                             edits.push((at, norm));
                         }

@@ -1458,3 +1458,28 @@ fn a_malformed_doctype_does_not_panic() {
         let _ = rusty_xml::html_read_memory(src.as_bytes(), None, None, 0);
     }
 }
+
+/// A block element closes an open paragraph.
+///
+/// Only same-name autoclose was implemented, so `<p>two<div>three` nested the
+/// div INSIDE the paragraph where C makes them siblings. Anything reading the
+/// tree for structure -- rag-converter, in particular -- saw the text one level
+/// too deep and attributed it to the wrong block.
+#[test]
+fn a_block_element_closes_an_open_paragraph() {
+    let save = |src: &str| -> String {
+        let d = rusty_xml::html_read_memory(src.as_bytes(), None, None, 0).expect("parses");
+        String::from_utf8(xml_save_doc(&d, 0)).unwrap()
+    };
+    let out = save("<html><body><div><p>one<p>two<div>three</body></html>");
+    assert!(
+        out.contains("<p>one</p><p>two</p><div>three</div>"),
+        "paragraph not closed by the block element:\n{out}"
+    );
+    // Inline elements do NOT close it.
+    let out = save("<html><body><p>a<span>b</span>c</p></body></html>");
+    assert!(out.contains("<p>a<span>b</span>c</p>"), "inline closed a p:\n{out}");
+    // Nor does a block element close anything other than a paragraph.
+    let out = save("<html><body><div>a<div>b</div></div></body></html>");
+    assert!(out.contains("<div>a<div>b</div></div>"), "div closed a div:\n{out}");
+}

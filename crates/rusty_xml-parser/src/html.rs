@@ -265,6 +265,16 @@ impl<'a> HtmlParser<'a> {
                 }
             }
         }
+        // A block element also closes an open <p>: a paragraph cannot contain
+        // one. Only same-name autoclose was implemented, so <p>two<div>three
+        // nested the div INSIDE the paragraph where C makes them siblings --
+        // which puts the text at the wrong depth for anything walking the tree
+        // for structure.
+        if is_block_element(&name) {
+            while self.stack.last().is_some_and(|&t| self.doc.name(t) == "p") {
+                self.stack.pop();
+            }
+        }
         let parent = if self.noimplied {
             self.stack.last().copied().unwrap_or(NodeId::DOCUMENT)
         } else if name == "html" {
@@ -404,4 +414,45 @@ fn parse_html_doctype(body: &str) -> rusty_xml_tree::XmlDtd {
         dtd.system_id = literal(&mut rest);
     }
     dtd
+}
+
+/// Block-level elements, which cannot appear inside a paragraph and therefore
+/// close an open one. This is libxml2's `htmlStartClose` table for `p`.
+fn is_block_element(name: &str) -> bool {
+    matches!(
+        name,
+        "address"
+            | "article"
+            | "aside"
+            | "blockquote"
+            | "center"
+            | "details"
+            | "dialog"
+            | "dir"
+            | "div"
+            | "dl"
+            | "fieldset"
+            | "figcaption"
+            | "figure"
+            | "footer"
+            | "form"
+            | "h1"
+            | "h2"
+            | "h3"
+            | "h4"
+            | "h5"
+            | "h6"
+            | "header"
+            | "hgroup"
+            | "hr"
+            | "main"
+            | "menu"
+            | "nav"
+            | "ol"
+            | "p"
+            | "pre"
+            | "section"
+            | "table"
+            | "ul"
+    )
 }

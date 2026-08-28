@@ -1055,11 +1055,17 @@ fn recover_yields_a_partial_document_instead_of_nothing() {
     let d = xml_read_memory(trunc, None, None, recover).expect("recover yields a tree");
     assert!(text_of(&d).contains("text that should survive"));
 
-    // An undeclared namespace prefix -- endemic in scraped markup.
+    // An undeclared namespace prefix -- endemic in scraped markup -- is a
+    // namespace error, not a well-formedness one. libxml2 reports it and exits
+    // zero, so it must not be fatal for us either, in EITHER mode. Refusing
+    // input C accepts is a worse trade than any conformance case, and it cost
+    // us a valid one outright: `<A.-:x/>` is a legal Name whose colon is not a
+    // prefix at all.
     let ns = b"<r><a:e>body</a:e></r>";
-    assert!(xml_read_memory(ns, None, None, strict).is_err());
-    let d = xml_read_memory(ns, None, None, recover).expect("recover yields a tree");
-    assert!(text_of(&d).contains("body"));
+    for opts in [strict, recover] {
+        let d = xml_read_memory(ns, None, None, opts).expect("must not be fatal");
+        assert!(text_of(&d).contains("body"));
+    }
 
     // An entity we cannot resolve keeps its reference rather than killing the parse.
     let ent = b"<?xml version=\"1.0\"?>\n<!DOCTYPE d [<!ENTITY c SYSTEM \"x.xml\">]>\n<d>before &c; after</d>";

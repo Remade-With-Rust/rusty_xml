@@ -40,7 +40,30 @@ pub fn xml_validate_dtd(doc: &XmlDoc, dtd: &XmlDtd) -> Result<(), String> {
     if let Some(dup) = dtd.duplicate_elements.first() {
         return Err(format!("Redefinition of element {dup}"));
     }
+    // "No Duplicate Types": a mixed content model may not name the same
+    // element twice.
+    for (elem, decl) in &dtd.elements {
+        if let ElementDecl::Mixed(names) = decl {
+            let mut seen = std::collections::HashSet::new();
+            for n in names {
+                if !seen.insert(n) {
+                    return Err(format!(
+                        "Definition of {elem} has duplicate references of {n}"
+                    ));
+                }
+            }
+        }
+    }
     for ((elem, aname), ad) in &dtd.attributes {
+        // "No Duplicate Tokens": an enumeration may not repeat a value.
+        let mut seen = std::collections::HashSet::new();
+        for e in &ad.enumerated {
+            if !seen.insert(e) {
+                return Err(format!(
+                    "attribute {aname} of {elem}: enumeration value token {e} duplicated"
+                ));
+            }
+        }
         // "ID Attribute Default": an ID attribute must be #IMPLIED or
         // #REQUIRED -- it cannot carry a default value, since two elements
         // taking the default would share an ID.

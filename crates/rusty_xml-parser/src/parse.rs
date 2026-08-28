@@ -1628,17 +1628,15 @@ impl<'a> Parser<'a> {
 
         let elem_uri = self.lookup_ns(prefix);
         if prefix.is_some() && elem_uri.is_none() {
-            // Scraped markup is full of prefixes nobody declared. libxml2
-            // reports this and carries on; refusing the document loses all of
-            // its text over a namespace nicety.
-            if !self.recover {
-                return Err(self.err(
-                    XML_NS_ERR_UNDEFINED_NAMESPACE,
-                    format!("Undefined namespace prefix {}", prefix.unwrap()),
-                ));
-            }
+            // Scraped markup is full of prefixes nobody declared, and an
+            // undeclared prefix is a namespace error, not a well-formedness
+            // one. libxml2 reports it and carries on -- exits zero -- so
+            // refusing the document made us reject input C accepts, which is a
+            // worse trade than any number of conformance cases. It also cost a
+            // valid case outright: `<A.-:x/>` is a legal Name whose colon is
+            // not a prefix at all.
             self.sax.error(&format!(
-                "Undefined namespace prefix {}",
+                "Namespace prefix {} is not defined",
                 prefix.unwrap_or_default()
             ));
         }

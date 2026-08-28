@@ -48,6 +48,11 @@ pub struct XmlDtd {
     pub unparsed_entities: std::collections::HashSet<String>,
     /// Element name → content model.
     pub elements: HashMap<String, ElementDecl>,
+    /// Element types declared more than once. A map cannot represent that, and
+    /// "Unique Element Type Declaration" is a validity constraint, so it has to
+    /// be recorded as the declarations go by and reported at validation time
+    /// rather than at parse time.
+    pub duplicate_elements: Vec<String>,
     /// (element, attribute) → declaration.
     pub attributes: HashMap<(String, String), AttrDecl>,
 }

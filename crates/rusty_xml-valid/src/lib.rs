@@ -35,7 +35,22 @@ pub fn xml_validate_dtd(doc: &XmlDoc, dtd: &XmlDtd) -> Result<(), String> {
     // Constraints on the DECLARATIONS themselves, before any instance of them
     // is looked at. None of these was checked, so a declaration could promise
     // something no document could satisfy.
+    // "Unique Element Type Declaration": no element type may be declared more
+    // than once. A HashMap cannot say so on its own, so the parser records it.
+    if let Some(dup) = dtd.duplicate_elements.first() {
+        return Err(format!("Redefinition of element {dup}"));
+    }
     for ((elem, aname), ad) in &dtd.attributes {
+        // "ID Attribute Default": an ID attribute must be #IMPLIED or
+        // #REQUIRED -- it cannot carry a default value, since two elements
+        // taking the default would share an ID.
+        if ad.att_type == "ID"
+            && matches!(ad.default, AttrDefault::Value | AttrDefault::Fixed)
+        {
+            return Err(format!(
+                "ID attribute {aname} of {elem} is not valid, must be #IMPLIED or #REQUIRED"
+            ));
+        }
         // "No Notation on Empty Element": an element declared EMPTY cannot
         // carry a NOTATION attribute, since it can never have content for the
         // notation to describe.
@@ -162,6 +177,13 @@ fn validate_element(
                         if doc.kind(x) == NodeKind::Element {
                             v.push(doc.name(x).to_string());
                         } else if doc.kind(x) == NodeKind::Text && !doc.xml_is_blank_node(x) {
+                            return Err(format!("character data not allowed in {name}"));
+                        } else if doc.kind(x) == NodeKind::CData {
+                            // A CDATA section is character data whatever is in
+                            // it. Whitespace inside one is never the ignorable
+                            // kind, so an empty `<![CDATA[]]>` still breaks an
+                            // element-only content model -- and we were only
+                            // looking at Text nodes.
                             return Err(format!("character data not allowed in {name}"));
                         }
                         c = doc.next_sibling(x);

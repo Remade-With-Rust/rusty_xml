@@ -578,6 +578,9 @@ impl<'a> DtdParser<'a> {
         } else {
             return Err(self.err("xmlParseElementDecl: 'EMPTY', 'ANY' or '(' expected"));
         };
+        if self.dtd.elements.contains_key(&name) {
+            self.dtd.duplicate_elements.push(name.clone());
+        }
         self.dtd.elements.insert(name, decl);
         self.expect_decl_end("Element")
     }
@@ -934,6 +937,7 @@ impl<'a> DtdParser<'a> {
 pub fn merge_dtd(dst: &mut XmlDtd, src: XmlDtd) {
     dst.entities.extend(src.entities);
     dst.unparsed_entities.extend(src.unparsed_entities);
+    dst.duplicate_elements.extend(src.duplicate_elements);
     dst.parameter_entities.extend(src.parameter_entities);
     dst.elements.extend(src.elements);
     dst.attributes.extend(src.attributes);

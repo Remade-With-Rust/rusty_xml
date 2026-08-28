@@ -93,23 +93,28 @@ Speed is the easy half. Here is the hard half, measured against the **W3C XML
 Conformance Test Suite** rather than against our own corpus, with the pinned C
 build scored on the identical cases:
 
-| | rusty_xml 0.7.0 | libxml2 2.15.3 |
+| | rusty_xml 0.8.0 | libxml2 2.15.3 |
 |---|---|---|
-| **Total** (2039 scored cases) | **99.4%** | 94.8% |
+| **Total** (2036 scored cases) | **99.9%** | 95.9% |
 | valid documents accepted (601) | **100.0%** | 100.0% |
 | invalid documents rejected (175) | **100.0%** | 53.7% |
-| well-formedness (`not-wf`, 1263) | **99.0%** | 98.0% |
+| well-formedness (`not-wf`, 1260) | **99.8%** | 99.8% |
 
-**Both document categories are perfect**: every valid document in the suite is
-accepted, every invalid one is rejected.
+**2034 of 2036.** Every valid document accepted, every invalid one rejected,
+and one more not-well-formed case caught than libxml2.
 
-All thirteen remaining failures are not-well-formed cases, and libxml2 fails
-twelve of them for the reason we do: they expect a namespace violation to be
-*fatal*, and C reports those and exits zero. Making them fatal would refuse
-documents libxml2 reads -- a worse trade than thirteen cases. Where being
-stricter than C costs nothing, we are: four of the validity constraints we
-enforce are ones libxml2 does not check at all, which is safe precisely because
-a validity error only surfaces when you ask for validation.
+The namespace cases are scored the way libxml2's own `runxmlconf.c` scores them
+-- a namespace violation is not a well-formedness error, so the document must
+PARSE and the error must be REPORTED. Reading them any other way marks both
+implementations wrong. `doc.namespace_errors` carries the reports, because the
+default SAX handler discards errors and a tree-parsing caller would never see
+them.
+
+The two cases left are not closable honestly: one is a duplicate attribute with
+the same QName, which is a well-formedness error we reject and libxml2 rejects
+(the namespace scorer counts that as a failure for both), and the other wants a
+contradiction between a declared encoding and the byte-order mark to be fatal,
+where C exits zero. libxml2 fails three; we fail two.
 
 **A correction.** 0.4.0 published "79.9%, level with libxml2" and that number
 was measured wrong. The suite marks 313 cases `EDITION="1 2 3 4"` -- they test
@@ -211,7 +216,7 @@ or in `Cargo.toml`:
 
 ```toml
 [dependencies]
-rusty_xml = "0.7"
+rusty_xml = "0.8"
 ```
 
 MSRV is **1.85**. The library never sets `#[global_allocator]`.
@@ -361,8 +366,8 @@ unsupported, matching libxml2 built **without** iconv.
 - [ ] Optional gzip (`miniz_oxide` / `XML_PARSE_UNZIP`)
 - [x] **M8** — W3C conformance suite wired up and scored against the C oracle
       (65.0% vs libxml2 79.9%); seeded fuzzer; corpus widened 7 -> 16 files
-- [x] **M9** — close the conformance gap: 65.0% -> 99.4% on the W3C suite,
-      ahead of libxml2's 94.8%; 601/601 valid and 175/175 invalid
+- [x] **M9** — close the conformance gap: 65.0% -> 99.9% on the W3C suite,
+      ahead of libxml2's 95.9%; 601/601 valid, 175/175 invalid, 1258/1260 not-wf
 - [ ] C ABI `cdylib` (`XMLPUBFUN` names) + hardening audit
 - [ ] Optional gzip (`miniz_oxide` / `XML_PARSE_UNZIP`)
 - [ ] XML 1.1, external entity loading, CJK multi-byte encodings

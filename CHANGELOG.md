@@ -4,6 +4,61 @@ All notable changes to this project are documented here. The format is loosely
 based on [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.8.0]
+
+**2034 of 2036 on the W3C XML Conformance Test Suite, against pinned libxml2's
+1952.** Every valid document accepted, every invalid one rejected, and one more
+not-well-formed case caught than C.
+
+| | 0.7.0 | 0.8.0 | libxml2 2.15.3 |
+|---|---|---|---|
+| Total | 99.4% | **99.9%** | 95.9% |
+| valid accepted | 100.0% | **100.0%** | 100.0% |
+| invalid rejected | 100.0% | **100.0%** | 53.7% |
+| not-well-formed rejected | 99.0% | **99.8%** | 99.8% |
+
+### A measurement correction
+
+libxml2's own runner has a separate scorer for namespace cases,
+`xmlconfTestNotNSWF`: a namespace violation is not a well-formedness error, so
+the document must PARSE and the error must be REPORTED. Our runner asked "did
+the parse fail" for all 51 of them, which marked libxml2 wrong on cases it
+passes and let us "pass" several by doing the wrong thing. It reads
+`RECOMMENDATION` now and scores NS1.0 cases as C's does.
+
+### Changed
+
+- **No namespace violation is fatal.** Rejecting one refused documents libxml2
+  reads *and* failed the tests it was meant to pass. This covers the reserved
+  `xml` and `xmlns` prefixes and URIs (in prefixed **and** default
+  declarations -- only the prefixed form was checked), prefix undeclaring, an
+  unbound prefix on an attribute, a colon that does not form a QName in any
+  name, `xmlns` as an element prefix, and a collision that appears only after
+  namespace expansion. They are reported on `doc.namespace_errors`.
+- The **same QName twice** stays fatal -- that is a well-formedness error, not
+  a namespace one, and treating both alike was refusing valid input.
+
+### Fixed
+
+- **Namespace declarations are attributes**, so a tokenized declaration has its
+  value normalized before it binds: `" urn:x "` and `"urn:x"` are the same
+  namespace and we were binding them as two.
+- **A declared encoding that contradicts the byte-order mark is reported.** A
+  UTF-16 file declaring `utf-8` decodes correctly from the mark, and we said
+  nothing at all. It lands on `doc.warnings` as well as the SAX channel,
+  because the default handler discards errors.
+
+### Known gaps
+
+- Two not-well-formed cases, neither closable honestly. One is a duplicate
+  attribute with the same QName -- a well-formedness error we reject and
+  libxml2 rejects, which the namespace scorer counts as a failure for both.
+  The other wants the encoding contradiction to be fatal, where C exits zero.
+- No XML 1.1, no external entity loading, no gzip, no CJK multi-byte encodings.
+- Two byte-identity divergences from C, both deliberate: we serialize the
+  internal DTD subset verbatim where C reorders it, and we expand entity
+  references where C keeps them as reference nodes.
+
 ## [0.7.0]
 
 **Both document categories are perfect.** Every valid document in the W3C suite

@@ -17,7 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 rusty_xml = { workspace = true }
-rusty_xml-alloc = { version = "0.7.0", path = "../rusty_xml-alloc" }
+rusty_xml-alloc = { version = "0.8.0", path = "../rusty_xml-alloc" }
 
 [lints]
 workspace = true

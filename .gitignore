@@ -15,3 +15,6 @@
 .DS_Store
 Thumbs.db
 
+
+# W3C XML conformance suite - fetch with scripts/fetch-xmlconf.ps1; never vendor.
+/oracle/xmlconf

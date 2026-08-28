@@ -160,7 +160,20 @@ fn tokenize_content(spec: &str) -> Vec<Tok> {
                 *p = &p[1..];
                 continue;
             }
-            v.push(parse_particle(p));
+            // A particle that consumes nothing is the end of what we can
+            // read, not a reason to try again.
+            //
+            // `<!ELEMENT doc (a & b)?>` used SGML's "and" connector: `&` is
+            // not a name character, so take_name returned "" and the position
+            // never moved. This loop pushed an empty Name forever -- 32 bytes
+            // of DTD grew a Vec until the process died asking for 32 GB. Any
+            // document with a DTD could do it to anything that validates.
+            let before = p.len();
+            let particle = parse_particle(p);
+            if p.len() == before {
+                break;
+            }
+            v.push(particle);
         }
         v
     }

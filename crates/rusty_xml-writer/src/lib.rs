@@ -65,6 +65,9 @@ fn escape_as(s: &str, attr: bool, non_ascii: bool, html: bool) -> String {
 /// kind, never by a caller, and deliberately above the public XML_SAVE_* bits.
 const SAVE_AS_HTML: i32 = 1 << 29;
 
+/// Serialize empty elements as `<br />`. Private, set from the DOCTYPE.
+const SAVE_XHTML_EMPTY: i32 = 1 << 28;
+
 /// Elements that never take an end tag in HTML. C writes `<br>`, not `<br/>`
 /// and not `<br></br>`.
 const VOID_ELEMENTS: &[&str] = &[
@@ -87,10 +90,27 @@ fn indent_unit() -> String {
     std::env::var("XMLLINT_INDENT").unwrap_or_else(|_| "  ".into())
 }
 
+/// libxml2 keeps a fixed 60-character indent buffer and writes
+/// `min(level * indent_size, 60)` of it, so indentation stops growing at 60
+/// columns however deep the document goes. We grew forever, which diverged
+/// from C at level 31 with the default two-space unit.
+const MAX_INDENT_CHARS: usize = 60;
+
 fn write_indent(out: &mut String, level: i32) {
     let unit = indent_unit();
-    for _ in 0..level {
-        out.push_str(&unit);
+    if unit.is_empty() || level <= 0 {
+        return;
+    }
+    let want = (level as usize).saturating_mul(unit.chars().count());
+    let mut written = 0;
+    while written < want.min(MAX_INDENT_CHARS) {
+        for c in unit.chars() {
+            if written >= MAX_INDENT_CHARS {
+                break;
+            }
+            out.push(c);
+            written += 1;
+        }
     }
 }
 
@@ -182,6 +202,9 @@ fn write_one(
                 // HTML has no empty-element syntax: a non-void element always
                 // gets its end tag, exactly as XML_SAVE_NO_EMPTY does.
                 if (opts & XML_SAVE_NO_EMPTY) == 0 && !html {
+                    if (opts & SAVE_XHTML_EMPTY) != 0 {
+                        out.push(' ');
+                    }
                     out.push_str("/>");
                 } else {
                     out.push_str("></");
@@ -307,6 +330,11 @@ pub fn xml_save_doc(doc: &XmlDoc, options: i32) -> Vec<u8> {
         }
         out.push_str("?>\n");
     }
+    write_doctype(doc, &mut out);
+    let mut options = options;
+    if is_xhtml(doc) {
+        options |= SAVE_XHTML_EMPTY;
+    }
     let format = (options & XML_SAVE_FORMAT) != 0;
     let mut child = doc.first_child(rusty_xml_tree::NodeId::DOCUMENT);
     while let Some(id) = child {
@@ -315,6 +343,62 @@ pub fn xml_save_doc(doc: &XmlDoc, options: i32) -> Vec<u8> {
         child = doc.next_sibling(id);
     }
     out.into_bytes()
+}
+
+/// Write the document type declaration.
+///
+/// This was not written at all: a document with a DTD lost it on save, so any
+/// read-modify-write silently dropped every entity and ATTLIST default it
+/// declared. The internal subset is emitted VERBATIM, exactly as it was read.
+/// libxml2 re-serializes it from its parsed form instead, which reorders the
+/// declarations and respaces the content models -- faithful to the meaning but
+/// not to the document. Preserving the bytes is the better answer for a
+/// round trip, and it is the difference the corpus records.
+fn write_doctype(doc: &XmlDoc, out: &mut String) {
+    let Some(dtd) = doc.dtd.as_ref() else { return };
+    let Some(name) = dtd.name.as_deref() else { return };
+    out.push_str("<!DOCTYPE ");
+    out.push_str(name);
+    match (dtd.public_id.as_deref(), dtd.system_id.as_deref()) {
+        (Some(p), Some(s)) => {
+            out.push_str(" PUBLIC \"");
+            out.push_str(p);
+            out.push_str("\" \"");
+            out.push_str(s);
+            out.push('"');
+        }
+        (Some(p), None) => {
+            out.push_str(" PUBLIC \"");
+            out.push_str(p);
+            out.push('"');
+        }
+        (None, Some(s)) => {
+            out.push_str(" SYSTEM \"");
+            out.push_str(s);
+            out.push('"');
+        }
+        (None, None) => {}
+    }
+    if let Some(sub) = dtd.int_subset.as_deref() {
+        if !sub.trim().is_empty() {
+            out.push_str(" [");
+            out.push_str(sub);
+            out.push(']');
+        }
+    }
+    out.push_str(">\n");
+}
+
+/// XHTML is serialized with a space before the empty-element slash --
+/// `<br />`, not `<br/>` -- so that HTML parsers that predate XML do not read
+/// the slash as part of the tag name. libxml2 switches on the DOCTYPE.
+fn is_xhtml(doc: &XmlDoc) -> bool {
+    let Some(dtd) = doc.dtd.as_ref() else {
+        return false;
+    };
+    let pubid = dtd.public_id.as_deref().unwrap_or("");
+    let sysid = dtd.system_id.as_deref().unwrap_or("");
+    pubid.starts_with("-//W3C//DTD XHTML") || sysid.contains("xhtml1")
 }
 
 /// `xmlDocDumpFormatMemory`.

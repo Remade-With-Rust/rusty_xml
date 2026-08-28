@@ -184,6 +184,16 @@ impl<'a> DtdParser<'a> {
     fn rest(&self) -> &'a str {
         &self.src[self.pos..]
     }
+    /// Whitespace only. Where the grammar says S it means S, not "whatever
+    /// happens to be in the way" -- skip_ws_and_comments swallows the SGML
+    /// `-- comment --` form and PIs, which is exactly how a malformed
+    /// declaration slipped past.
+    fn skip_ws(&mut self) {
+        let r = self.rest();
+        let trimmed = r.trim_start_matches([' ', '\t', '\r', '\n']);
+        self.pos += r.len() - trimmed.len();
+    }
+
     fn skip_ws_and_comments(&mut self) {
         loop {
             let r = self.rest();
@@ -401,15 +411,46 @@ impl<'a> DtdParser<'a> {
             let mut enumerated = Vec::new();
             let att_type = if self.rest().starts_with('(') {
                 let spec = self.take_until_gt_paren();
-                for part in spec.split('|') {
-                    let t = part.trim().trim_matches(|c: char| "()".contains(c));
-                    if !t.is_empty() {
-                        enumerated.push(t.to_string());
+                // Enumeration ::= '(' S? Nmtoken (S? '|' S? Nmtoken)* S? ')'
+                // Only '|' separates. `(foo,bar)` used to be accepted because
+                // this split on '|' and shrugged at whatever else was inside.
+                let body = spec.trim();
+                if !body.starts_with('(') || !body.ends_with(')') {
+                    return Err(self.err("')' required to finish ATTLIST enumeration"));
+                }
+                for part in body[1..body.len() - 1].split('|') {
+                    let t = part.trim();
+                    if t.is_empty() || !t.chars().all(|c| crate::chvalid::xml_is_name_char(c as u32, false)) {
+                        return Err(self.err("')' required to finish ATTLIST enumeration"));
                     }
+                    enumerated.push(t.to_string());
                 }
                 "ENUMERATION".into()
             } else {
-                self.parse_name()
+                let t = self.parse_name();
+                // AttType is a closed set. `NAME` is not in it, and was taken
+                // as a perfectly good type.
+                const TYPES: &[&str] = &[
+                    "CDATA", "ID", "IDREF", "IDREFS", "ENTITY", "ENTITIES", "NMTOKEN",
+                    "NMTOKENS", "NOTATION",
+                ];
+                if !TYPES.contains(&t.as_str()) {
+                    return Err(self.err("'(' required to start ATTLIST enumeration"));
+                }
+                if t == "NOTATION" {
+                    self.skip_ws();
+                    if !self.rest().starts_with('(') {
+                        return Err(self.err("'(' required to start ATTLIST enumeration"));
+                    }
+                    let spec = self.take_until_gt_paren();
+                    for part in spec.trim().trim_matches(['(', ')']).split('|') {
+                        let n = part.trim();
+                        if !n.is_empty() {
+                            enumerated.push(n.to_string());
+                        }
+                    }
+                }
+                t
             };
             self.skip_ws_and_comments();
             let (default, default_value) = if self.rest().starts_with("#REQUIRED") {
@@ -420,8 +461,19 @@ impl<'a> DtdParser<'a> {
                 (AttrDefault::Implied, None)
             } else if self.rest().starts_with("#FIXED") {
                 self.bump(6);
+                if !self.require_ws() {
+                    return Err(self.err("Space required after '#FIXED'"));
+                }
+                if !self.at_quote() {
+                    return Err(self.err("AttValue: \" or ' expected"));
+                }
                 (AttrDefault::Fixed, Some(self.parse_quoted()?))
             } else {
+                // A default value is an AttValue, which is quoted. `v1` bare
+                // was accepted and silently became an empty string.
+                if !self.at_quote() {
+                    return Err(self.err("AttValue: \" or ' expected"));
+                }
                 (AttrDefault::Value, Some(self.parse_quoted()?))
             };
             self.dtd.attributes.insert(
@@ -438,17 +490,60 @@ impl<'a> DtdParser<'a> {
     }
     fn parse_entity(&mut self) -> Result<(), XmlError> {
         self.bump("<!ENTITY".len());
-        self.skip_ws_and_comments();
+        if !self.require_ws() {
+            return Err(self.err("Space required after '<!ENTITY'"));
+        }
         let pe = self.rest().starts_with('%');
         if pe {
             self.bump(1);
-            self.skip_ws_and_comments();
+            if !self.require_ws() {
+                return Err(self.err("Space required after '%'"));
+            }
         }
         let name = self.parse_name();
-        self.skip_ws_and_comments();
+        if name.is_empty() {
+            return Err(self.err("Entity name expected"));
+        }
+        // EntityDecl requires S between the name and the definition. Without
+        // this, `<!ENTITY foo"some text">` was accepted.
+        if !self.require_ws() {
+            return Err(self.err("Space required after the entity name"));
+        }
         if self.rest().starts_with("SYSTEM") || self.rest().starts_with("PUBLIC") {
-            self.skip_decl()?;
-            return Ok(());
+            let public = self.rest().starts_with("PUBLIC");
+            self.bump(6);
+            if !self.require_ws() {
+                return Err(self.err("Space required after the external ID keyword"));
+            }
+            if public {
+                // ExternalID ::= 'PUBLIC' S PubidLiteral S SystemLiteral --
+                // two literals, with space between them. One was accepted, and
+                // so was `"whatever""e.ent"` with no space.
+                self.parse_quoted()?;
+                if !self.require_ws() {
+                    return Err(self.err("Space required after the Public Identifier"));
+                }
+                if !self.at_quote() {
+                    return Err(self.err("SystemLiteral expected"));
+                }
+            }
+            self.parse_quoted()?;
+            self.skip_ws_and_comments();
+            // NDataDecl is the only thing allowed to follow.
+            if self.rest().starts_with("NDATA") {
+                self.bump(5);
+                if !self.require_ws() {
+                    return Err(self.err("Space required after 'NDATA'"));
+                }
+                if self.parse_name().is_empty() {
+                    return Err(self.err("Notation name expected after 'NDATA'"));
+                }
+                self.skip_ws();
+            }
+            return self.expect_decl_end("entity");
+        }
+        if !self.at_quote() {
+            return Err(self.err("Entity value expected"));
         }
         let val = self.parse_quoted()?;
         if pe {
@@ -456,13 +551,53 @@ impl<'a> DtdParser<'a> {
         } else {
             self.dtd.entities.insert(name, val);
         }
-        self.skip_ws_and_comments();
+        self.skip_ws();
+        self.expect_decl_end("entity")
+    }
+
+    /// Position of the parser as a line and column, so an error points at the
+    /// declaration rather than at 0:0.
+    fn line_col(&self) -> (u32, u32) {
+        let mut line = 1u32;
+        let mut col = 1u32;
+        for c in self.src[..self.pos.min(self.src.len())].chars() {
+            if c == '\n' {
+                line += 1;
+                col = 1;
+            } else {
+                col += 1;
+            }
+        }
+        (line, col)
+    }
+
+    fn err(&self, msg: &str) -> XmlError {
+        let (line, col) = self.line_col();
+        XmlError::new(crate::error::XML_ERR_SPACE_REQUIRED, msg, line, col)
+    }
+
+    /// Consume required whitespace, reporting whether any was there.
+    fn require_ws(&mut self) -> bool {
+        let before = self.pos;
+        self.skip_ws();
+        self.pos > before || self.pos >= self.src.len()
+    }
+
+    fn at_quote(&self) -> bool {
+        self.rest().starts_with('"') || self.rest().starts_with('\'')
+    }
+
+    /// A declaration ends at '>' and nothing else. It used to fall through to
+    /// skip_decl(), which swallowed whatever was in the way -- including the
+    /// SGML `-- comment --` form that XML does not have.
+    fn expect_decl_end(&mut self, what: &str) -> Result<(), XmlError> {
+        self.skip_ws();
         if self.rest().starts_with('>') {
             self.bump(1);
+            Ok(())
         } else {
-            self.skip_decl()?;
+            Err(self.err(&format!("xmlParse{what}Decl: not terminated")))
         }
-        Ok(())
     }
 }
 

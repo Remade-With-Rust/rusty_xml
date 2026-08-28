@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<document xml:lang="mul">
+  <cjk>日本語のテキストです。中文测试。한국어</cjk>
+  <rtl dir="rtl">مرحبا بالعالم שלום</rtl>
+  <combining>é à ñ ö क्ष</combining>
+  <astral>😀 🇬🇧 𝄞</astral>
+  <élément attribut="à valeur">accented element and attribute names</élément>
+  <refs>&#x65E5; &#26085; &#x1F600; &#128512;</refs>
+  <mixed>ASCII then 中文 then ASCII again</mixed>
+</document>

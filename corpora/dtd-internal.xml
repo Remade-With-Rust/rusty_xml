@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE catalogue [
+  <!ELEMENT catalogue (product+)>
+  <!ELEMENT product (name, price, note?)>
+  <!ELEMENT name (#PCDATA)>
+  <!ELEMENT price (#PCDATA)>
+  <!ELEMENT note (#PCDATA)>
+  <!ATTLIST catalogue version CDATA #FIXED "1.0">
+  <!ATTLIST product id ID #REQUIRED
+                    stock (in|out|backorder) "in"
+                    currency CDATA "GBP">
+  <!ENTITY company "Example Ltd">
+  <!ENTITY tm "&#8482;">
+  <!ENTITY full "&company;&tm;">
+  <!NOTATION gif SYSTEM "image/gif">
+]>
+<catalogue>
+  <product id="p1"><name>Widget by &full;</name><price>9.99</price></product>
+  <product id="p2" stock="out"><name>Gadget</name><price>19.99</price>
+    <note>Back in stock soon &#8212; ask &company;.</note></product>
+  <product id="p3" stock="backorder" currency="EUR">
+    <name>Doohickey</name><price>4.50</price></product>
+</catalogue>

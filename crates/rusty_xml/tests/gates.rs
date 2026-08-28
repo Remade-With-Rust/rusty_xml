@@ -1483,3 +1483,157 @@ fn a_block_element_closes_an_open_paragraph() {
     let out = save("<html><body><div>a<div>b</div></div></body></html>");
     assert!(out.contains("<div>a<div>b</div></div>"), "div closed a div:\n{out}");
 }
+
+/// A malformed content model must not eat the machine.
+///
+/// `<!ELEMENT doc (a & b)?>` uses SGML's "and" connector. `&` is not a name
+/// character, so the content-model reader's take_name returned "" and the
+/// position never advanced -- the loop pushed an empty token forever. Thirty-two
+/// bytes of DTD grew a Vec until the process died asking for 32 GB, and any
+/// document with a DTD could do it to anything that validates.
+///
+/// Found by the W3C conformance suite (not-wf-sa-135) on its very first run.
+#[test]
+fn a_malformed_content_model_terminates() {
+    for model in [
+        "(a & b)?", "(a b)", "(&)", "((((", "(a|", "(a,,b)", "(", "()",
+        "(#PCDATA|a)*", "(a,b,c)+", "(a**)", "(|)", "(a|)", "(~)",
+    ] {
+        let src = format!("<!DOCTYPE doc [\n<!ELEMENT doc {model}>\n]>\n<doc></doc>");
+        // Either verdict is fine. Returning at all is the point.
+        if let Ok(doc) = xml_read_memory(src.as_bytes(), None, None, default_parse_options()) {
+            let _ = rusty_xml::xml_validate_document(&doc);
+        }
+    }
+}
+
+/// Declaration syntax in the internal subset is checked, not skimmed.
+///
+/// The subset parser was a lenient scanner: it took anything up to the next
+/// '>' and shrugged. Every case below is one the W3C suite rejects and we
+/// accepted, and each is a real ambiguity -- an unquoted default silently
+/// became an empty string, and a bad enumeration silently lost its members.
+#[test]
+fn malformed_declarations_are_rejected() {
+    let bad = [
+        // Entity declarations.
+        ("no space after entity name", "<!DOCTYPE d [<!ENTITY foo\"text\">]><d/>"),
+        ("PUBLIC needs two literals", "<!DOCTYPE d [<!ENTITY e PUBLIC \"only one\">]><d/>"),
+        ("no space between literals", "<!DOCTYPE d [<!ENTITY e PUBLIC \"a\"\"b\">]><d/>"),
+        ("SGML comment in a decl", "<!DOCTYPE d [<!ENTITY e \"v\" -- c -->]><d/>"),
+        // Attribute-list declarations.
+        ("comma in an enumeration", "<!DOCTYPE d [<!ATTLIST d a (foo,bar) #IMPLIED>]><d/>"),
+        ("unquoted default value", "<!DOCTYPE d [<!ATTLIST d a NMTOKEN v1>]><d/>"),
+        ("NAME is not an AttType", "<!DOCTYPE d [<!ATTLIST d a NAME #IMPLIED>]><d/>"),
+    ];
+    for (what, src) in bad {
+        assert!(
+            xml_read_memory(src.as_bytes(), None, None, default_parse_options()).is_err(),
+            "accepted a malformed declaration: {what}"
+        );
+    }
+
+    // The well-formed equivalents must still parse, or the strictness is just
+    // breakage wearing a hat.
+    let good = [
+        "<!DOCTYPE d [<!ENTITY foo \"text\">]><d>&foo;</d>",
+        "<!DOCTYPE d [<!ENTITY e PUBLIC \"pub\" \"sys\">]><d/>",
+        "<!DOCTYPE d [<!ATTLIST d a (foo|bar) #IMPLIED>]><d a=\"foo\"/>",
+        "<!DOCTYPE d [<!ATTLIST d a NMTOKEN 'v1'>]><d/>",
+        "<!DOCTYPE d [<!ATTLIST d a CDATA #REQUIRED>]><d a=\"x\"/>",
+        "<!DOCTYPE d [<!ATTLIST d a CDATA #FIXED 'k'>]><d/>",
+        "<!DOCTYPE d [<!NOTATION n SYSTEM 'x'><!ATTLIST d a NOTATION (n) #IMPLIED>]><d/>",
+        "<!DOCTYPE d [<!ENTITY e SYSTEM 'x' NDATA gif>]><d/>",
+    ];
+    for src in good {
+        assert!(
+            xml_read_memory(src.as_bytes(), None, None, default_parse_options()).is_ok(),
+            "rejected a well-formed declaration: {src}"
+        );
+    }
+}
+
+/// Saving a document must not lose its DOCTYPE.
+///
+/// The writer never emitted one, so a read-modify-write silently dropped every
+/// entity, ATTLIST default and notation the document declared. Found by
+/// widening the corpus past the original seven files.
+///
+/// We emit the internal subset VERBATIM. libxml2 re-serializes it from its
+/// parsed form, which reorders the declarations and respaces the content
+/// models; faithful to the meaning, but not to the document. This is the one
+/// deliberate serialization divergence from C.
+#[test]
+fn the_doctype_survives_a_round_trip() {
+    let src = concat!(
+        "<!DOCTYPE cat [\n",
+        "  <!ELEMENT cat (item+)>\n",
+        "  <!ATTLIST item id ID #REQUIRED>\n",
+        "  <!ENTITY co \"Example Ltd\">\n",
+        "]>\n<cat><item id=\"a\">&co;</item></cat>"
+    );
+    let doc = xml_read_memory(src.as_bytes(), None, None, default_parse_options()).unwrap();
+    let out = String::from_utf8(xml_save_doc(&doc, 0)).unwrap();
+    assert!(out.contains("<!DOCTYPE cat ["), "no doctype in output:\n{out}");
+    assert!(out.contains("<!ENTITY co \"Example Ltd\">"), "subset lost:\n{out}");
+    // And it must still parse, with the entity still declared.
+    let again = xml_read_memory(out.as_bytes(), None, None, default_parse_options()).unwrap();
+    assert!(String::from_utf8(xml_save_doc(&again, 0)).unwrap().contains("<!ENTITY co"));
+
+    // External identifiers round-trip too.
+    let ext = "<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.0 Strict//EN\" \
+               \"http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd\">\n<html/>";
+    let d = xml_read_memory(ext.as_bytes(), None, None, default_parse_options()).unwrap();
+    let o = String::from_utf8(xml_save_doc(&d, 0)).unwrap();
+    assert!(o.contains("PUBLIC \"-//W3C//DTD XHTML 1.0 Strict//EN\""), "external id lost:\n{o}");
+    // XHTML serializes empty elements as `<html />`, with the space, so that
+    // pre-XML HTML parsers do not read the slash as part of the name.
+    assert!(o.contains("<html />"), "not XHTML empty-tag form:\n{o}");
+}
+
+/// A character reference belongs to the text run it sits in.
+///
+/// Every reference was flushed into a text node of its own, so `&#65; &#66;`
+/// became three nodes and the middle one was whitespace-only --
+/// XML_PARSE_NOBLANKS then deleted it and `A B` came back as `AB`. Losing a
+/// space between two character references is silent text corruption, and
+/// rag-converter reads exactly this kind of text.
+#[test]
+fn a_character_reference_does_not_split_the_text_run() {
+    let src = b"<r><a>&#65; &#66; C</a><b>x &#67; y</b></r>";
+    for opts in [
+        default_parse_options(),
+        default_parse_options() | rusty_xml::XML_PARSE_NOBLANKS,
+    ] {
+        let doc = xml_read_memory(src, None, None, opts).unwrap();
+        let out = String::from_utf8(xml_save_doc(&doc, 0)).unwrap();
+        assert!(out.contains("<a>A B C</a>"), "lost a space: {out}");
+        assert!(out.contains("<b>x C y</b>"), "lost a space: {out}");
+    }
+}
+
+/// Indentation stops growing at 60 columns, as libxml2's does.
+///
+/// C keeps a fixed 60-character indent buffer and writes as much of it as the
+/// level calls for. We grew without limit, so a deep document diverged from C
+/// at level 31 with the default two-space unit.
+#[test]
+fn indentation_is_capped_like_c() {
+    let mut src = String::from("<r>");
+    for i in 0..80 {
+        src.push_str(&format!("<l n=\"{i}\">"));
+    }
+    src.push_str("x");
+    for _ in 0..80 {
+        src.push_str("</l>");
+    }
+    src.push_str("</r>");
+    let doc = xml_read_memory(src.as_bytes(), None, None, default_parse_options()).unwrap();
+    let out = String::from_utf8(xml_save_doc(&doc, rusty_xml::XML_SAVE_FORMAT)).unwrap();
+    let deepest = out
+        .lines()
+        .map(|l| l.len() - l.trim_start().len())
+        .max()
+        .unwrap();
+    assert_eq!(deepest, 60, "indent should cap at 60 columns, got {deepest}");
+}

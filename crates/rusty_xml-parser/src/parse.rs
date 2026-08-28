@@ -1823,10 +1823,28 @@ impl<'a> Parser<'a> {
                 continue;
             }
             if lead == Some(b'&') {
-                self.flush_chars(Some(parent))?;
-                let repl = self.parse_reference()?;
-                self.char_buf.push_str(&repl);
-                self.flush_chars(Some(parent))?;
+                // A CHARACTER reference is character data by definition -- it
+                // cannot introduce markup -- so it belongs in the run it sits
+                // in, not in a text node of its own.
+                //
+                // Flushing around it split `&#65; &#66;` into three nodes, and
+                // the middle one was whitespace-only, so XML_PARSE_NOBLANKS
+                // deleted it: `A B` came back as `AB`. Losing a space between
+                // two character references is silent text corruption. It also
+                // costs a node and an allocation per reference.
+                //
+                // A general entity still gets its own node: its replacement can
+                // contain markup and is not ours to inline here.
+                let is_charref = self.input.get(self.pos + 1) == Some(&b'#');
+                if is_charref {
+                    let repl = self.parse_reference()?;
+                    self.char_buf.push_str(&repl);
+                } else {
+                    self.flush_chars(Some(parent))?;
+                    let repl = self.parse_reference()?;
+                    self.char_buf.push_str(&repl);
+                    self.flush_chars(Some(parent))?;
+                }
                 continue;
             }
             if self.starts_with(b"]]>") {

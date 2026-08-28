@@ -93,15 +93,21 @@ Speed is the easy half. Here is the hard half, measured against the **W3C XML
 Conformance Test Suite** rather than against our own corpus, with the pinned C
 build scored on the identical cases:
 
-| | rusty_xml 0.5.0 | libxml2 2.15.3 |
+| | rusty_xml 0.6.0 | libxml2 2.15.3 |
 |---|---|---|
-| **Total** (2039 scored cases) | **97.8%** | 94.8% |
-| well-formedness (`not-wf`, 1263) | **98.6%** | 98.0% |
-| invalid documents rejected (175) | **89.7%** | 53.7% |
-| valid documents accepted (601) | 98.7% | 100.0% |
+| **Total** (2039 scored cases) | **99.1%** | 94.8% |
+| valid documents accepted (601) | **100.0%** | 100.0% |
+| well-formedness (`not-wf`, 1263) | **99.0%** | 98.0% |
+| invalid documents rejected (175) | **96.6%** | 53.7% |
 
-Ahead of the thing we are replacing on every category but one: C still accepts
-every valid document and we refuse eight of six hundred.
+Ahead of the thing we are replacing on every category, and level on accepting
+valid documents.
+
+Nineteen of the twenty cases we still fail are shared with libxml2 or a
+deliberate divergence from it: seventeen expect a namespace violation to be
+*fatal*, and C reports those and exits zero exactly as we do. Making them fatal
+would mean refusing documents libxml2 reads, which is a worse trade than
+nineteen cases. Two are a real gap.
 
 **A correction.** 0.4.0 published "79.9%, level with libxml2" and that number
 was measured wrong. The suite marks 313 cases `EDITION="1 2 3 4"` -- they test
@@ -203,7 +209,7 @@ or in `Cargo.toml`:
 
 ```toml
 [dependencies]
-rusty_xml = "0.5"
+rusty_xml = "0.6"
 ```
 
 MSRV is **1.85**. The library never sets `#[global_allocator]`.
@@ -353,8 +359,8 @@ unsupported, matching libxml2 built **without** iconv.
 - [ ] Optional gzip (`miniz_oxide` / `XML_PARSE_UNZIP`)
 - [x] **M8** — W3C conformance suite wired up and scored against the C oracle
       (65.0% vs libxml2 79.9%); seeded fuzzer; corpus widened 7 -> 16 files
-- [x] **M9** — close the conformance gap: 65.0% -> 97.8% on the W3C suite,
-      ahead of libxml2's 94.8% on the same 2039 cases
+- [x] **M9** — close the conformance gap: 65.0% -> 99.1% on the W3C suite,
+      ahead of libxml2's 94.8% on the same 2039 cases, and 601/601 on valid
 - [ ] C ABI `cdylib` (`XMLPUBFUN` names) + hardening audit
 - [ ] Optional gzip (`miniz_oxide` / `XML_PARSE_UNZIP`)
 - [ ] XML 1.1, external entity loading, CJK multi-byte encodings

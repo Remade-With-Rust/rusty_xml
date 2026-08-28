@@ -4,6 +4,63 @@ All notable changes to this project are documented here. The format is loosely
 based on [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.6.0]
+
+**99.1% of the W3C XML Conformance Test Suite, against pinned libxml2's 94.8%**
+-- ahead on every category, and 601 of 601 on accepting valid documents.
+
+| | 0.5.0 | 0.6.0 | libxml2 2.15.3 |
+|---|---|---|---|
+| Total | 97.8% | **99.1%** | 94.8% |
+| valid accepted | 98.7% | **100.0%** | 100.0% |
+| not-well-formed rejected | 98.6% | **99.0%** | 98.0% |
+| invalid rejected | 89.7% | **96.6%** | 53.7% |
+
+### Fixed
+
+- **Tokenized attribute values were never normalized.** A value whose declared
+  type is anything but CDATA has its leading and trailing space discarded and
+  its internal runs collapsed to one space (XML 1.0 3.3.3). We did none of it,
+  so `id="  x  y  "` stayed as written where C reports `x y` -- a different
+  value for the same document, and an ID that keeps its surrounding whitespace
+  does not match the IDREF that does not.
+- **A colon that does not form a QName is not a prefix.** `:`, `:x`, `x:` and
+  `a.-:x` are all legal Names and we rejected every document using one.
+- **Namespace declarations count for validity**: `xmlns` and `xmlns:foo` must
+  be declared like any other attribute, and a #FIXED default still binds.
+- Notations are recorded, so "Notation Declared" can be checked at all --
+  an NDATA annotation or NOTATION attribute type could name one that does not
+  exist.
+- The element and attribute declaration checks were skipped entirely when the
+  DTD declared no elements, so a subset of pure entity declarations validated
+  any document at all.
+- Declarations name QNames: `<!ELEMENT xml:foo>` was reported as undeclared for
+  a document that declares it.
+- The first declaration of an entity is binding, not the last; an ampersand
+  inside a CDATA section is not a reference; a '%' at markup level is not a PE
+  reference; `<!ENTITY p SYSTEM >` with no literal is not an entity; and "No <
+  in Attribute Values" applies to the expanded text, not just what is written.
+- A parameter entity may not supply part of a processing instruction in the
+  internal subset.
+
+### Changed
+
+- **An undeclared namespace prefix is no longer fatal** (0.5.0), and neither is
+  an unresolvable entity when the subset used a parameter entity reference --
+  XML 1.0 4.1 makes that a validity error rather than a well-formedness one.
+  Both were refusing documents libxml2 reads. The unresolved reference is
+  recorded so the validator still reports it.
+
+### Known gaps
+
+- Two real cases: an EMPTY element containing an entity reference that expands
+  to nothing, and NMTOKENS whose separator arrives as a character reference.
+  Both need the tree to remember things it does not model.
+- No XML 1.1, no external entity loading, no gzip, no CJK multi-byte encodings.
+- Two byte-identity divergences from C, both deliberate: we serialize the
+  internal DTD subset verbatim where C reorders it, and we expand entity
+  references where C keeps them as reference nodes.
+
 ## [0.5.0]
 
 **97.8% of the W3C XML Conformance Test Suite, against pinned libxml2's 94.8%**

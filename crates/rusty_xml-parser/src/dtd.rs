@@ -438,13 +438,17 @@ impl<'a> DtdParser<'a> {
         let _ = self.skip_ws_and_comments();
         let r = self.rest();
         let mut n = 0;
+        // Names here were ASCII-only, so `<!ELEMENT เจมส์ (#PCDATA)>` -- a
+        // perfectly valid declaration -- came back empty and the document was
+        // rejected. The document body accepted the same name happily; only the
+        // DTD disagreed.
         for (i, c) in r.char_indices() {
-            if i == 0 {
-                if !(c.is_ascii_alphabetic() || c == '_' || c == ':') {
-                    break;
-                }
-            } else if !(c.is_ascii_alphanumeric() || "-._:".contains(c)) {
-                n = i;
+            let ok = if i == 0 {
+                crate::chvalid::xml_is_name_start_char(c as u32, false)
+            } else {
+                crate::chvalid::xml_is_name_char(c as u32, false)
+            };
+            if !ok {
                 break;
             }
             n = i + c.len_utf8();

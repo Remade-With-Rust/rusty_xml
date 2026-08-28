@@ -1308,6 +1308,29 @@ impl<'a> Parser<'a> {
             let mut depth = 1i32;
             let mut in_quote: Option<u8> = None;
             while depth > 0 {
+                // A comment's contents are not markup, and an apostrophe in
+                // one is not a quote. `<!--NOTE: XML doesn't specify...-->`
+                // opened a quote that never closed, so the scan swallowed the
+                // rest of the document and reported "Unterminated DOCTYPE" at
+                // the last line.
+                if in_quote.is_none() && self.starts_with(b"<!--") {
+                    match self.input[self.pos..]
+                        .windows(3)
+                        .position(|w| w == b"-->")
+                    {
+                        Some(off) => {
+                            for _ in 0..off + 3 {
+                                self.bump_byte();
+                            }
+                            continue;
+                        }
+                        None => {
+                            return Err(
+                                self.err(XML_ERR_COMMENT_NOT_FINISHED, "Comment not finished")
+                            );
+                        }
+                    }
+                }
                 let b = self.bump_byte().ok_or_else(|| {
                     self.err(XML_ERR_DOCUMENT_END, "Unterminated DOCTYPE")
                 })?;

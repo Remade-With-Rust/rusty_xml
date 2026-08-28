@@ -178,7 +178,23 @@ fn validate_element(
         if elem != &name {
             continue;
         }
-        let have = doc.xml_get_prop(id, aname);
+        // An ATTLIST declares a QName, so `xml:lang` is looked up as
+        // `xml:lang`. xml_get_prop is xmlGetProp -- it matches unprefixed
+        // attributes only -- so every prefixed declared attribute looked
+        // absent, and a #REQUIRED one was reported missing on a document that
+        // plainly had it.
+        let have = {
+            let mut found = None;
+            let mut a = doc.first_attr(id);
+            while let Some(x) = a {
+                if doc.qname(x) == *aname {
+                    found = Some(doc.content(x).to_string());
+                    break;
+                }
+                a = doc.next_sibling(x);
+            }
+            found
+        };
         match ad.default {
             AttrDefault::Required if have.is_none() => {
                 return Err(format!("attribute {aname} of {name} is required"));

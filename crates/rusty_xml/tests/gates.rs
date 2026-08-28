@@ -1713,3 +1713,41 @@ fn the_entity_graph_is_checked() {
     let good = "<!DOCTYPE d [<!ENTITY a \"x&b;\"><!ENTITY b \"y&amp;z\">]><d>&a;</d>";
     assert!(xml_read_memory(good.as_bytes(), None, None, default_parse_options()).is_ok());
 }
+
+/// Three ways a perfectly valid document was rejected or mis-validated.
+///
+/// All three were found by the conformance suite, and all three are the kind
+/// that only show up on documents nobody in the corpus happened to write.
+#[test]
+fn valid_documents_that_used_to_be_rejected() {
+    let opts = default_parse_options();
+
+    // The DTD's own name parser was ASCII-only, so a non-ASCII element name in
+    // a declaration came back empty and the document was refused -- while the
+    // document body accepted the very same name.
+    let thai = "<!DOCTYPE \u{0e40}\u{0e08} [<!ELEMENT \u{0e40}\u{0e08} (#PCDATA)>]>\
+                <\u{0e40}\u{0e08}>x</\u{0e40}\u{0e08}>";
+    assert!(
+        xml_read_memory(thai.as_bytes(), None, None, opts).is_ok(),
+        "non-ASCII name rejected in the DTD"
+    );
+
+    // An apostrophe inside a comment in the internal subset is not a quote.
+    // It opened one that never closed, so the scan ate the rest of the file.
+    let apos = "<!DOCTYPE d [\n<!--NOTE: XML doesn't say-->\n<!ELEMENT d EMPTY>\n]>\n<d/>";
+    assert!(
+        xml_read_memory(apos.as_bytes(), None, None, opts).is_ok(),
+        "apostrophe in a DTD comment swallowed the document"
+    );
+
+    // An ATTLIST declares a QName. Looking it up with xmlGetProp semantics
+    // (unprefixed only) meant every prefixed declared attribute looked absent,
+    // so a #REQUIRED one was reported missing from a document that had it.
+    let lang = "<!DOCTYPE b [<!ELEMENT b ANY><!ATTLIST b xml:lang CDATA #REQUIRED>]>\
+                <b xml:lang=\"en\">t</b>";
+    let doc = xml_read_memory(lang.as_bytes(), None, None, opts).unwrap();
+    assert!(
+        rusty_xml::xml_validate_document(&doc).is_ok(),
+        "a present prefixed attribute was reported missing"
+    );
+}

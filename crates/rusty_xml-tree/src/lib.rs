@@ -695,3 +695,61 @@ impl Iterator for NodeIter<'_> {
 /// `xmlFreeDoc` is `Drop`.
 #[doc(alias = "xmlFreeDoc")]
 pub fn xml_free_doc(_doc: XmlDoc) {}
+
+impl XmlDoc {
+    /// Deep-copy every child of `src_parent` in `src` under `dst_parent` here.
+    ///
+    /// Needed because an entity whose replacement text contains markup has to
+    /// become NODES, not the escaped text of that markup. `<!ENTITY e
+    /// "<b>x</b>">` used in content produced the literal string `<b>x</b>` in
+    /// the tree, so anything reading the document for structure got garbage
+    /// and DTD validation saw character data where an element was declared.
+    ///
+    /// Iterative, like every other traversal here: the replacement is
+    /// attacker-supplied and may be arbitrarily deep.
+    pub fn xml_copy_children_from(
+        &mut self,
+        src: &XmlDoc,
+        src_parent: NodeId,
+        dst_parent: NodeId,
+    ) {
+        // (source node, destination parent), pushed so they pop in order.
+        let mut stack: Vec<(NodeId, NodeId)> = Vec::new();
+        let mut c = src.last_child(src_parent);
+        while let Some(x) = c {
+            stack.push((x, dst_parent));
+            c = src.prev_sibling(x);
+        }
+        while let Some((s, parent)) = stack.pop() {
+            let n = src.node(s);
+            let copy = self.alloc(n.kind, n.name.clone());
+            {
+                let d = self.node_mut(copy);
+                d.prefix = n.prefix.clone();
+                d.ns_uri = n.ns_uri.clone();
+                d.content = n.content.clone();
+                d.ns_defs = n.ns_defs.clone();
+            }
+            self.xml_add_child(parent, copy);
+            // Attributes are a separate chain, not children.
+            let mut a = src.first_attr(s);
+            while let Some(x) = a {
+                let an = src.node(x);
+                let (nm, pre, val, uri) = (
+                    an.name.clone(),
+                    an.prefix.clone(),
+                    an.content.clone(),
+                    an.ns_uri.clone(),
+                );
+                let ac = self.add_attr_owned(copy, nm, pre, val);
+                self.node_mut(ac).ns_uri = uri;
+                a = src.next_sibling(x);
+            }
+            let mut k = src.last_child(s);
+            while let Some(x) = k {
+                stack.push((x, copy));
+                k = src.prev_sibling(x);
+            }
+        }
+    }
+}

@@ -1751,3 +1751,61 @@ fn valid_documents_that_used_to_be_rejected() {
         "a present prefixed attribute was reported missing"
     );
 }
+
+/// An entity whose replacement text is markup must become NODES.
+///
+/// It was inserted as text and escaped on the way out, so `<!ENTITY e
+/// "<b>x</b>">` put the literal string `&lt;b&gt;x&lt;/b&gt;` into the tree.
+/// Structure lost, and DTD validation saw character data where an element was
+/// declared.
+///
+/// The decision is made on the STORED replacement, not the expanded one, and
+/// that distinction is the whole thing: a character reference in an entity
+/// value is expanded when the declaration is read, so `&#60;foo/>` really does
+/// hold markup -- while `&lt;` is bypassed and stays written out, so
+/// `&lt;AB&gt;` is three characters and no markup at all.
+#[test]
+fn entity_replacement_that_is_markup_becomes_markup() {
+    let opts = default_parse_options();
+    let text_of = |d: &rusty_xml::XmlDoc| -> String {
+        String::from_utf8(xml_save_doc(d, 0)).unwrap()
+    };
+
+    // Markup written directly.
+    let d = xml_read_memory(
+        b"<!DOCTYPE d [<!ENTITY e \"<b>x</b>\">]><d>&e;</d>",
+        None, None, opts,
+    ).unwrap();
+    assert!(text_of(&d).contains("<d><b>x</b></d>"), "not spliced: {}", text_of(&d));
+
+    // Markup arriving by character reference -- expanded at declaration time,
+    // so it IS markup.
+    let d = xml_read_memory(
+        b"<!DOCTYPE d [<!ELEMENT d (foo)><!ELEMENT foo EMPTY><!ENTITY e \"&#60;foo/>\">]><d>&e;</d>",
+        None, None, opts,
+    ).unwrap();
+    assert!(text_of(&d).contains("<foo/>"), "charref markup not spliced: {}", text_of(&d));
+    assert!(rusty_xml::xml_validate_document(&d).is_ok(), "validation should see the element");
+
+    // A predefined reference is bypassed and stays a character.
+    let d = xml_read_memory(
+        b"<!DOCTYPE d [<!ENTITY e \"&lt;AB&gt;\">]><d>&e;</d>",
+        None, None, opts,
+    ).unwrap();
+    let out = text_of(&d);
+    assert!(out.contains("&lt;AB&gt;"), "predefined ref treated as markup: {out}");
+    assert!(!out.contains("<AB>"), "predefined ref treated as markup: {out}");
+
+    // Replacement text has to be well formed in its own right.
+    for bad in [
+        &b"<!DOCTYPE d [<!ENTITY e \"<foo a='&#38;'></foo>\">]><d>&e;</d>"[..],
+        &b"<!DOCTYPE d [<!ENTITY e \"<foo></bar>\">]><d>&e;</d>"[..],
+        &b"<!DOCTYPE d [<!ENTITY e \"<foo>\">]><d>&e;</d>"[..],
+    ] {
+        assert!(
+            xml_read_memory(bad, None, None, opts).is_err(),
+            "accepted a malformed replacement: {}",
+            String::from_utf8_lossy(bad)
+        );
+    }
+}

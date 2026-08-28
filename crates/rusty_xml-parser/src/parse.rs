@@ -1108,6 +1108,76 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// The declared replacement text of the reference at the cursor, as
+    /// STORED -- character references already expanded, entity references
+    /// still written out.
+    ///
+    /// That distinction is the whole point. A character reference in an entity
+    /// value is expanded when the declaration is read, so `<!ENTITY e
+    /// "&#60;foo/>">` really does hold a '<' and really is markup. `&lt;` is
+    /// bypassed and stays written out, so `<!ENTITY e "&lt;AB&gt;">` holds no
+    /// markup at all and must come out as the three characters `<AB>`.
+    /// Deciding on the fully expanded text cannot tell those apart.
+    fn reference_raw_value(&self) -> Option<String> {
+        let rest = self.input.get((self.pos + 1).min(self.input.len())..)?;
+        let end = rest.iter().position(|b| *b == b';')?;
+        let name = std::str::from_utf8(&rest[..end]).ok()?;
+        self.doc.dtd.as_ref()?.entities.get(name).cloned()
+    }
+
+    /// Parse an entity's replacement text as content and graft the result in.
+    ///
+    /// The replacement is parsed in isolation, wrapped in a synthetic root, so
+    /// its well-formedness is checked as the "Well-Formed Parsed Entity"
+    /// constraint requires -- a bare `&` or `<` arriving by way of a character
+    /// reference in the declaration is an error, not text.
+    ///
+    /// A prefix declared on the REFERENCING element is not in scope for an
+    /// isolated parse, so an undefined-prefix failure falls back to the old
+    /// text behaviour rather than rejecting a document libxml2 accepts.
+    fn splice_entity(&mut self, repl: &str, parent: NodeId) -> Result<(), XmlError> {
+        let wrapped = format!("<rusty-xml-entity>{repl}</rusty-xml-entity>");
+        let mut null = rusty_xml_sax::NullSax;
+        let mut sub = Parser {
+            input: wrapped.as_bytes(),
+            pos: 0,
+            line: self.line,
+            col: self.col,
+            options: self.options,
+            old10: self.old10,
+            depth: self.depth + 1,
+            ns_stack: Vec::new(),
+            sax: &mut null,
+            doc: XmlDoc::with_node_capacity(Some("1.0"), 8),
+            stack: Vec::new(),
+            char_buf: String::new(),
+            scratch_raw: Vec::new(),
+            scratch_sax: Vec::new(),
+            started: false,
+            no_tree: false,
+            recover: self.recover,
+            // The nested expansion draws on the SAME budget, so an entity that
+            // splices markup cannot buy itself a fresh allowance.
+            entity_budget: self.entity_budget,
+        };
+        sub.doc.dtd = self.doc.dtd.clone();
+        let r = sub.parse_document();
+        self.entity_budget = sub.entity_budget;
+        match r {
+            Ok(()) => {
+                if let Some(root) = sub.doc.xml_doc_get_root_element() {
+                    self.doc.xml_copy_children_from(&sub.doc, root, parent);
+                }
+                Ok(())
+            }
+            Err(e) if e.code == XML_NS_ERR_UNDEFINED_NAMESPACE => {
+                self.char_buf.push_str(repl);
+                self.flush_chars(Some(parent))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     /// Expand an entity's replacement text, resolving references inside it.
     ///
     /// Bounded twice, because recursion here IS the billion-laughs vector: by
@@ -1937,9 +2007,24 @@ impl<'a> Parser<'a> {
                     self.char_buf.push_str(&repl);
                 } else {
                     self.flush_chars(Some(parent))?;
+                    let raw = self.reference_raw_value();
                     let repl = self.parse_reference()?;
-                    self.char_buf.push_str(&repl);
-                    self.flush_chars(Some(parent))?;
+                    // Replacement text containing markup has to become NODES.
+                    // It was inserted as text and escaped on the way out, so
+                    // `<!ENTITY e "<b>x</b>">` put the literal string
+                    // `&lt;b&gt;x&lt;/b&gt;` in the tree: structure lost, and
+                    // DTD validation saw character data where an element was
+                    // declared.
+                    // Only a DTD-declared entity whose STORED text holds
+                    // markup is re-parsed. The predefined five produce literal
+                    // characters, and splicing those as markup broke every
+                    // document that so much as mentions `&lt;`.
+                    if raw.as_deref().is_some_and(|r| r.contains('<')) && !self.no_tree {
+                        self.splice_entity(raw.as_deref().unwrap(), parent)?;
+                    } else {
+                        self.char_buf.push_str(&repl);
+                        self.flush_chars(Some(parent))?;
+                    }
                 }
                 continue;
             }

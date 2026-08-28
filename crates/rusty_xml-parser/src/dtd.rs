@@ -672,8 +672,12 @@ impl<'a> DtdParser<'a> {
                 }
                 (AttrDefault::Value, Some(self.parse_quoted()?))
             };
-            self.dtd.attributes.insert(
-                (elem.clone(), aname),
+            // "When more than one definition is provided for the same
+            // attribute of a given element type, the FIRST declaration is
+            // binding and later declarations are ignored." We were inserting
+            // into a map, so the last one won and a later #REQUIRED overrode
+            // an earlier default.
+            self.dtd.attributes.entry((elem.clone(), aname)).or_insert(
                 AttrDecl {
                     att_type,
                     default,

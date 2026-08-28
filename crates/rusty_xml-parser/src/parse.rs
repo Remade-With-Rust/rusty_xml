@@ -1332,7 +1332,18 @@ impl<'a> Parser<'a> {
                 return Err(self.err(XML_ERR_LT_IN_ATTRIBUTE, "'<' in attribute value"));
             }
             if self.peek_byte() == Some(b'&') {
-                val.push_str(&self.parse_reference()?);
+                let raw = self.reference_raw_value();
+                let repl = self.parse_reference()?;
+                // "No < in Attribute Values": the constraint is about the
+                // replacement TEXT, not just what is written in the document,
+                // so an entity carrying one is caught here and nowhere else.
+                if raw.as_deref().is_some_and(|r| r.contains('<')) {
+                    return Err(self.err(
+                        XML_ERR_LT_IN_ATTRIBUTE,
+                        "'<' in entity is not allowed in attribute values",
+                    ));
+                }
+                val.push_str(&repl);
                 continue;
             }
             let c = self.bump_char()?.unwrap();
@@ -2070,7 +2081,14 @@ impl<'a> Parser<'a> {
                     // markup is re-parsed. The predefined five produce literal
                     // characters, and splicing those as markup broke every
                     // document that so much as mentions `&lt;`.
-                    if raw.as_deref().is_some_and(|r| r.contains('<')) && !self.no_tree {
+                    // '&' as well as '<': `<!ENTITY e "&#38;">` stores a bare
+                    // ampersand, and a bare ampersand in content is an error,
+                    // not text. Re-parsing the replacement is what says so.
+                    if raw
+                        .as_deref()
+                        .is_some_and(|r| r.contains('<') || r.contains('&'))
+                        && !self.no_tree
+                    {
                         self.splice_entity(raw.as_deref().unwrap(), parent)?;
                     } else {
                         self.char_buf.push_str(&repl);

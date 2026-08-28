@@ -1307,3 +1307,67 @@ fn format_reindents_rather_than_echoing_source_whitespace() {
     let out2 = String::from_utf8(xml_save_doc(&kept, rusty_xml::XML_SAVE_FORMAT)).unwrap();
     assert!(out2.contains("\n <a>"), "blank text should have been preserved:\n{out2}");
 }
+
+/// Every literal in the language must be character-validated, not just text.
+///
+/// Character data was checked; attribute values, CDATA, entity values and
+/// ATTLIST defaults were not. A C0 control byte in any of them was accepted
+/// and the writer quietly substituted U+FFFD for it on the way out, so the
+/// document came back holding a character it never contained -- and an ATTLIST
+/// default propagated that into every element that took the default. C rejects
+/// all four.
+///
+/// Found by the fuzzer, not by reading: the round-trip check saw the first
+/// save escape the character as &#xFFFD; and the second emit it raw, which
+/// made serialization non-idempotent.
+#[test]
+fn invalid_characters_are_rejected_in_every_literal() {
+    let opts = default_parse_options();
+    let cases: &[(&str, &[u8])] = &[
+        ("attribute value", b"<a k=\"x\x1fy\">t</a>"),
+        ("CDATA", b"<a><![CDATA[x\x1fy]]></a>"),
+        ("entity value", b"<!DOCTYPE a [<!ENTITY e \"v\x1f\">]><a>&e;</a>"),
+        ("ATTLIST default", b"<!DOCTYPE a [<!ATTLIST a k CDATA 'd\x1f'>]><a/>"),
+        ("character data", b"<a>x\x1fy</a>"),
+    ];
+    for (what, src) in cases {
+        assert!(
+            xml_read_memory(src, None, None, opts).is_err(),
+            "invalid character accepted in {what}"
+        );
+    }
+    // The control characters XML does allow must still pass, in all of them.
+    for src in [
+        &b"<a k=\"x\ty\nz\rw\">t</a>"[..],
+        &b"<a><![CDATA[x\ty]]></a>"[..],
+        &b"<!DOCTYPE a [<!ENTITY e \"v\tw\">]><a>&e;</a>"[..],
+    ] {
+        assert!(
+            xml_read_memory(src, None, None, opts).is_ok(),
+            "legal whitespace rejected: {:?}",
+            String::from_utf8_lossy(src)
+        );
+    }
+}
+
+/// A malformed internal subset must be reported, not silently dropped.
+///
+/// The subset was parsed with `unwrap_or_default()`, so ANY error in it threw
+/// the whole DTD away and left an empty one. The entities and ATTLIST defaults
+/// it declared vanished, and the failure surfaced later as a bogus "entity not
+/// defined" pointing at the reference rather than the declaration.
+#[test]
+fn a_broken_internal_subset_is_reported_not_discarded() {
+    let src = b"<!DOCTYPE a [<!ENTITY e \"v\x1f\">]><a>&e;</a>";
+    let e = xml_read_memory(src, None, None, default_parse_options()).unwrap_err();
+    assert!(
+        e.message.contains("invalid character"),
+        "blamed the wrong thing: {e}"
+    );
+    // Recovery still tolerates it -- that is what recovery is for.
+    assert!(
+        xml_read_memory(src, None, None, default_parse_options() | rusty_xml::XML_PARSE_RECOVER)
+            .is_ok(),
+        "recover mode should still produce a tree"
+    );
+}

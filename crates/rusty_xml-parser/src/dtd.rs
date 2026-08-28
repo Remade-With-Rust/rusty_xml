@@ -284,7 +284,16 @@ impl<'a> DtdParser<'a> {
         self.bump(n);
         s
     }
-    fn parse_quoted(&mut self) -> String {
+    /// Read a quoted literal from the internal subset.
+    ///
+    /// This returned a bare String and so could not report anything. An
+    /// ATTLIST default or entity value holding a C0 control byte was
+    /// therefore accepted, copied into every element that took the default,
+    /// and written back out as U+FFFD -- a value the document never
+    /// contained. C stops at the declaration with "invalid character in
+    /// entity value". Found by the fuzz round-trip check, which saw the
+    /// first save escape the character and the second not.
+    fn parse_quoted(&mut self) -> Result<String, XmlError> {
         self.skip_ws_and_comments();
         let r = self.rest();
         if r.starts_with('"') || r.starts_with('\'') {
@@ -293,10 +302,20 @@ impl<'a> DtdParser<'a> {
             if let Some(e) = self.rest().find(q) {
                 let s = decode_charrefs(&self.rest()[..e]);
                 self.bump(e + 1);
-                return s;
+                if let Some(bad) =
+                    s.chars().find(|c| !crate::chvalid::xml_is_char(*c as u32))
+                {
+                    return Err(XmlError::new(
+                        crate::error::XML_ERR_INVALID_CHAR,
+                        format!("invalid character 0x{:X} in entity value", bad as u32),
+                        0,
+                        0,
+                    ));
+                }
+                return Ok(s);
             }
         }
-        String::new()
+        Ok(String::new())
     }
     fn parse_element(&mut self) -> Result<(), XmlError> {
         self.bump("<!ELEMENT".len());
@@ -401,9 +420,9 @@ impl<'a> DtdParser<'a> {
                 (AttrDefault::Implied, None)
             } else if self.rest().starts_with("#FIXED") {
                 self.bump(6);
-                (AttrDefault::Fixed, Some(self.parse_quoted()))
+                (AttrDefault::Fixed, Some(self.parse_quoted()?))
             } else {
-                (AttrDefault::Value, Some(self.parse_quoted()))
+                (AttrDefault::Value, Some(self.parse_quoted()?))
             };
             self.dtd.attributes.insert(
                 (elem.clone(), aname),
@@ -431,7 +450,7 @@ impl<'a> DtdParser<'a> {
             self.skip_decl()?;
             return Ok(());
         }
-        let val = self.parse_quoted();
+        let val = self.parse_quoted()?;
         if pe {
             self.dtd.parameter_entities.insert(name, val);
         } else {

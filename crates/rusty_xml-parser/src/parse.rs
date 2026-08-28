@@ -947,6 +947,15 @@ impl<'a> Parser<'a> {
             if c as u8 == q && c.is_ascii() {
                 break;
             }
+            // The shared literal reader: ATTLIST defaults, entity values,
+            // system and public identifiers, and the XML declaration all come
+            // through here, and none of them validated. A control byte in an
+            // ATTLIST default was injected into every element that took the
+            // default and written back as U+FFFD; C says "invalid character in
+            // entity value" and stops.
+            if !xml_is_char(c as u32) {
+                return Err(self.err(XML_ERR_INVALID_CHAR, "invalid character in literal"));
+            }
             s.push(c);
         }
         Ok(s)
@@ -964,7 +973,13 @@ impl<'a> Parser<'a> {
             if self.eof() {
                 return Err(self.err(XML_ERR_CDATA_NOT_FINISHED, "CDATA not finished"));
             }
-            body.push(self.bump_char()?.unwrap());
+            let c = self.bump_char()?.unwrap();
+            // CDATA is unparsed, not unchecked: the character rule still
+            // applies inside it.
+            if !xml_is_char(c as u32) {
+                return Err(self.err(XML_ERR_INVALID_CHAR, "invalid character in CDATA"));
+            }
+            body.push(c);
         }
         if (self.options & XML_PARSE_NOCDATA) != 0 {
             self.sax.characters(&body);
@@ -1204,6 +1219,18 @@ impl<'a> Parser<'a> {
                 continue;
             }
             let c = self.bump_char()?.unwrap();
+            // Character data is validated; attribute values were not, so a
+            // stray C0 control byte sailed straight through and the writer
+            // quietly substituted U+FFFD for it on the way out -- a silently
+            // corrupted value where C reports "invalid character in attribute
+            // value". Found by the round-trip check: escaping it on the first
+            // save and not the second made serialization non-idempotent.
+            if !xml_is_char(c as u32) {
+                return Err(self.err(
+                    XML_ERR_INVALID_CHAR,
+                    "invalid character in attribute value",
+                ));
+            }
             // AttValue: physical whitespace → space
             if c == '\n' || c == '\t' {
                 val.push(' ');
@@ -1264,7 +1291,16 @@ impl<'a> Parser<'a> {
         self.skip_s()?;
         self.expect_byte(b'>', XML_ERR_GT_REQUIRED, "'>' required")?;
         let mut dtd = if let Some(ref subset) = int_subset {
-            crate::dtd::parse_dtd_subset(subset).unwrap_or_default()
+            // unwrap_or_default() here discarded EVERY internal-subset
+            // error: a malformed DTD silently became an empty one, so the
+            // entities and ATTLIST defaults it declared just vanished and the
+            // failure surfaced later as a bogus "entity not defined". Recovery
+            // mode still tolerates it, because that is what recovery is for.
+            match crate::dtd::parse_dtd_subset(subset) {
+                Ok(d) => d,
+                Err(_) if self.recover => rusty_xml_tree::XmlDtd::default(),
+                Err(e) => return Err(e),
+            }
         } else {
             rusty_xml_tree::XmlDtd::default()
         };

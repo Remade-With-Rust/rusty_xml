@@ -358,6 +358,30 @@ fn validate_element(
     // "Attribute Value Type": every attribute an element carries must be
     // declared for that element type. Nothing checked, so `xml:space` on an
     // element whose ATTLIST never mentions it was fine by us.
+    // A namespace declaration is an attribute as far as validity is concerned:
+    // it has to be declared, and a #FIXED default still binds its value. We
+    // keep ns declarations off the attribute chain, so nothing looked at them
+    // at all.
+    for (pre, uri) in doc.ns_defs(id) {
+        let q = match pre {
+            Some(p) => format!("xmlns:{p}"),
+            None => "xmlns".to_string(),
+        };
+        match dtd.attributes.get(&(name.clone(), q.clone())) {
+            None => return Err(format!("No declaration for attribute {q} of element {name}")),
+            Some(ad) => {
+                if ad.default == AttrDefault::Fixed {
+                    if let Some(fix) = ad.default_value.as_deref() {
+                        if uri != fix {
+                            return Err(format!(
+                                "Value for attribute {q} of {name} is different from default {fix}"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
     {
         let mut a = doc.first_attr(id);
         while let Some(x) = a {

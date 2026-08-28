@@ -32,15 +32,65 @@ pub fn xml_validate_dtd(doc: &XmlDoc, dtd: &XmlDtd) -> Result<(), String> {
             return Err(format!("root element {} does not match DOCTYPE {n}", doc.name(root)));
         }
     }
-    validate_element(doc, root, dtd)?;
+    // Walk iteratively: validation used to recurse per element, which is the
+    // same stack cliff the parser, the writer and C14N all had.
+    let mut ids: std::collections::HashMap<String, ()> = Default::default();
+    let mut idrefs: Vec<String> = Vec::new();
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        validate_element(doc, id, dtd, &mut ids, &mut idrefs)?;
+        let mut c = doc.last_child(id);
+        while let Some(x) = c {
+            if doc.kind(x) == NodeKind::Element {
+                stack.push(x);
+            }
+            c = doc.prev_sibling(x);
+        }
+    }
+    // IDREF VC: every referenced ID must be declared somewhere in the
+    // document. This was never checked at all.
+    for r in &idrefs {
+        if !ids.contains_key(r) {
+            return Err(format!("IDREF attribute references unknown ID \"{r}\""));
+        }
+    }
     Ok(())
 }
 
-fn validate_element(doc: &XmlDoc, id: NodeId, dtd: &XmlDtd) -> Result<(), String> {
+/// A Name, as the ID / IDREF validity constraints require.
+fn is_name(v: &str) -> bool {
+    let mut cs = v.chars();
+    match cs.next() {
+        Some(c) if rusty_xml_parser::chvalid::xml_is_name_start_char(c as u32, false) => {}
+        _ => return false,
+    }
+    cs.all(|c| rusty_xml_parser::chvalid::xml_is_name_char(c as u32, false))
+}
+
+/// An Nmtoken: like a Name but with no restriction on the first character.
+fn is_nmtoken(v: &str) -> bool {
+    !v.is_empty()
+        && v.chars()
+            .all(|c| rusty_xml_parser::chvalid::xml_is_name_char(c as u32, false))
+}
+
+fn validate_element(
+    doc: &XmlDoc,
+    id: NodeId,
+    dtd: &XmlDtd,
+    ids: &mut std::collections::HashMap<String, ()>,
+    idrefs: &mut Vec<String>,
+) -> Result<(), String> {
     if doc.kind(id) != NodeKind::Element {
         return Ok(());
     }
     let name = doc.name(id).to_string();
+    // "Element Valid": an element with no declaration is invalid, and nothing
+    // said so. A DTD that declares nothing at all is not a validating DTD, so
+    // only complain when there are declarations to be missing from.
+    if !dtd.elements.is_empty() && !dtd.elements.contains_key(&name) {
+        return Err(format!("No declaration for element {name}"));
+    }
     if let Some(decl) = dtd.elements.get(&name) {
         match decl {
             ElementDecl::Empty => {
@@ -59,7 +109,6 @@ fn validate_element(doc: &XmlDoc, id: NodeId, dtd: &XmlDtd) -> Result<(), String
                                     return Err(format!("element {} not allowed in mixed {name}", doc.name(x)));
                                 }
                             }
-                            validate_element(doc, x, dtd)?;
                         }
                         NodeKind::Text | NodeKind::CData | NodeKind::Comment | NodeKind::Pi => {}
                         _ => {}
@@ -74,7 +123,6 @@ fn validate_element(doc: &XmlDoc, id: NodeId, dtd: &XmlDtd) -> Result<(), String
                     while let Some(x) = c {
                         if doc.kind(x) == NodeKind::Element {
                             v.push(doc.name(x).to_string());
-                            validate_element(doc, x, dtd)?;
                         } else if doc.kind(x) == NodeKind::Text && !doc.xml_is_blank_node(x) {
                             return Err(format!("character data not allowed in {name}"));
                         }
@@ -110,10 +158,84 @@ fn validate_element(doc: &XmlDoc, id: NodeId, dtd: &XmlDtd) -> Result<(), String
             if !ad.enumerated.is_empty() && !ad.enumerated.iter().any(|e| e == v) {
                 return Err(format!("attribute {aname} value not in enumeration"));
             }
-            if ad.att_type == "ID" {
-                // uniqueness checked loosely
+            // The tokenized types carry validity constraints on their VALUES,
+            // and not one of them was enforced -- the ID branch said
+            // "uniqueness checked loosely", which meant not at all.
+            match ad.att_type.as_str() {
+                "ID" | "IDREF" => {
+                    if !is_name(v) {
+                        return Err(format!(
+                            "Syntax of value for attribute {aname} of {name} is not valid"
+                        ));
+                    }
+                    if ad.att_type == "ID" {
+                        if ids.insert(v.clone(), ()).is_some() {
+                            return Err(format!("ID {v} already defined"));
+                        }
+                    } else {
+                        idrefs.push(v.clone());
+                    }
+                }
+                "IDREFS" => {
+                    let mut any = false;
+                    for part in v.split_ascii_whitespace() {
+                        any = true;
+                        if !is_name(part) {
+                            return Err(format!(
+                                "Syntax of value for attribute {aname} of {name} is not valid"
+                            ));
+                        }
+                        idrefs.push(part.to_string());
+                    }
+                    if !any {
+                        return Err(format!(
+                            "Syntax of value for attribute {aname} of {name} is not valid"
+                        ));
+                    }
+                }
+                "NMTOKEN" => {
+                    if !is_nmtoken(v) {
+                        return Err(format!(
+                            "Syntax of value for attribute {aname} of {name} is not valid"
+                        ));
+                    }
+                }
+                "NMTOKENS" => {
+                    if v.split_ascii_whitespace().next().is_none()
+                        || !v.split_ascii_whitespace().all(is_nmtoken)
+                    {
+                        return Err(format!(
+                            "Syntax of value for attribute {aname} of {name} is not valid"
+                        ));
+                    }
+                }
+                "ENTITY" | "ENTITIES" => {
+                    for part in v.split_ascii_whitespace() {
+                        if !is_name(part) {
+                            return Err(format!(
+                                "Syntax of value for attribute {aname} of {name} is not valid"
+                            ));
+                        }
+                        if !dtd.unparsed_entities.contains(part) {
+                            return Err(format!(
+                                "ENTITY attribute {aname} references an unknown entity \"{part}\""
+                            ));
+                        }
+                    }
+                }
+                _ => {}
             }
         }
+    }
+    // "One ID per Element Type": an element type may carry at most one ID
+    // attribute, however the declarations are spread across ATTLISTs.
+    let id_attrs = dtd
+        .attributes
+        .iter()
+        .filter(|((e, _), ad)| e == &name && ad.att_type == "ID")
+        .count();
+    if id_attrs > 1 {
+        return Err(format!("Element {name} has {id_attrs} ID attributes"));
     }
     Ok(())
 }

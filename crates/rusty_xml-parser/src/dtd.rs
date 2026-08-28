@@ -228,7 +228,7 @@ impl<'a> DtdParser<'a> {
             } else if self.rest().starts_with("<!ENTITY") {
                 self.parse_entity()?;
             } else if self.rest().starts_with("<!NOTATION") {
-                self.skip_decl()?;
+                self.parse_notation()?;
             } else if self.rest().starts_with("<![") {
                 self.skip_cond()?;
             } else if self.rest().starts_with('<') {
@@ -329,8 +329,16 @@ impl<'a> DtdParser<'a> {
     }
     fn parse_element(&mut self) -> Result<(), XmlError> {
         self.bump("<!ELEMENT".len());
+        if !self.require_ws() {
+            return Err(self.err("Space required after '<!ELEMENT'"));
+        }
         let name = self.parse_name();
-        self.skip_ws_and_comments();
+        if name.is_empty() {
+            return Err(self.err("Element name expected"));
+        }
+        if !self.require_ws() {
+            return Err(self.err("Space required after the element name"));
+        }
         let decl = if self.rest().starts_with("EMPTY") {
             self.bump(5);
             ElementDecl::Empty
@@ -338,8 +346,21 @@ impl<'a> DtdParser<'a> {
             self.bump(3);
             ElementDecl::Any
         } else if self.rest().starts_with('(') {
-            let spec = self.take_until_gt_paren();
-            if spec.contains("#PCDATA") {
+            let mut spec = self.take_until_gt_paren();
+            // take_until_gt_paren stops at the closing paren, so a trailing
+            // occurrence indicator is still in the stream. It is part of the
+            // content spec and Mixed content is not valid without it.
+            if let Some(q @ ('?' | '*' | '+')) = self.rest().chars().next() {
+                self.bump(1);
+                spec.push(q);
+            }
+            // The content model was never checked, only scanned for '#PCDATA'
+            // and split on '|'. Everything else was accepted: `(a & b)`,
+            // `(a b)`, `(a|b,c)` mixing connectors, `(doc*?)`, `()`. That is
+            // 73 conformance cases, and the unchecked loop behind it was the
+            // 32 GB allocation.
+            let mixed = validate_contentspec(&spec).map_err(|e| self.err(e))?;
+            if mixed {
                 let mut names = Vec::new();
                 for part in spec.split('|') {
                     let t = part.trim().trim_matches(|c: char| c == '(' || c == ')' || c == '*');
@@ -352,17 +373,10 @@ impl<'a> DtdParser<'a> {
                 ElementDecl::Children(spec)
             }
         } else {
-            self.skip_decl()?;
-            return Ok(());
+            return Err(self.err("xmlParseElementDecl: 'EMPTY', 'ANY' or '(' expected"));
         };
         self.dtd.elements.insert(name, decl);
-        self.skip_ws_and_comments();
-        if self.rest().starts_with('>') {
-            self.bump(1);
-        } else {
-            self.skip_decl()?;
-        }
-        Ok(())
+        self.expect_decl_end("Element")
     }
     fn take_until_gt_paren(&mut self) -> String {
         let r = self.rest();
@@ -392,20 +406,34 @@ impl<'a> DtdParser<'a> {
     }
     fn parse_attlist(&mut self) -> Result<(), XmlError> {
         self.bump("<!ATTLIST".len());
+        if !self.require_ws() {
+            return Err(self.err("Space required after '<!ATTLIST'"));
+        }
         let elem = self.parse_name();
+        if elem.is_empty() {
+            return Err(self.err("Element name expected in ATTLIST"));
+        }
         loop {
+            // AttDef ::= S Name S AttType S DefaultDecl -- every one of those
+            // S is required, and none of them was checked.
+            let had_ws = self.require_ws();
             self.skip_ws_and_comments();
             if self.rest().starts_with('>') {
                 self.bump(1);
                 break;
             }
             if self.pos >= self.src.len() {
-                break;
+                return Err(self.err("xmlParseAttributeListDecl: not terminated"));
+            }
+            if !had_ws {
+                return Err(self.err("Space required after the attribute name"));
             }
             let aname = self.parse_name();
             if aname.is_empty() {
-                self.skip_decl()?;
-                break;
+                return Err(self.err("Attribute name expected"));
+            }
+            if !self.require_ws() {
+                return Err(self.err("Space required after the attribute name"));
             }
             self.skip_ws_and_comments();
             let mut enumerated = Vec::new();
@@ -438,7 +466,9 @@ impl<'a> DtdParser<'a> {
                     return Err(self.err("'(' required to start ATTLIST enumeration"));
                 }
                 if t == "NOTATION" {
-                    self.skip_ws();
+                    if !self.require_ws() {
+                        return Err(self.err("Space required after 'NOTATION'"));
+                    }
                     if !self.rest().starts_with('(') {
                         return Err(self.err("'(' required to start ATTLIST enumeration"));
                     }
@@ -452,6 +482,9 @@ impl<'a> DtdParser<'a> {
                 }
                 t
             };
+            if !self.require_ws() {
+                return Err(self.err("Space required after the attribute type"));
+            }
             self.skip_ws_and_comments();
             let (default, default_value) = if self.rest().starts_with("#REQUIRED") {
                 self.bump(9);
@@ -488,6 +521,59 @@ impl<'a> DtdParser<'a> {
         }
         Ok(())
     }
+    /// NotationDecl ::= '<!NOTATION' S Name S (ExternalID | PublicID) S? '>'
+    ///
+    /// This went to skip_decl, which took everything up to the next '>' and
+    /// asked no questions: a missing space, a missing name, a public
+    /// identifier holding characters the production forbids, all accepted.
+    fn parse_notation(&mut self) -> Result<(), XmlError> {
+        self.bump("<!NOTATION".len());
+        if !self.require_ws() {
+            return Err(self.err("Space required after '<!NOTATION'"));
+        }
+        let name = self.parse_name();
+        if name.is_empty() {
+            return Err(self.err("Notation name expected"));
+        }
+        if !self.require_ws() {
+            return Err(self.err("Space required after the notation name"));
+        }
+        let public = if self.rest().starts_with("PUBLIC") {
+            true
+        } else if self.rest().starts_with("SYSTEM") {
+            false
+        } else {
+            return Err(self.err("'PUBLIC' or 'SYSTEM' expected in NOTATION"));
+        };
+        self.bump(6);
+        if !self.require_ws() {
+            return Err(self.err("Space required after the external ID keyword"));
+        }
+        if !self.at_quote() {
+            return Err(self.err("Unfinished System or Public ID \" or ' expected"));
+        }
+        let first = self.parse_quoted()?;
+        if public {
+            if let Some(bad) = first.chars().find(|c| !is_pubid_char(*c)) {
+                return Err(self.err(&format!(
+                    "Invalid character 0x{:X} in public identifier",
+                    bad as u32
+                )));
+            }
+            // PublicID (notation only) may stop after the public identifier;
+            // ExternalID continues with a system literal.
+            let before = self.pos;
+            self.skip_ws();
+            if self.at_quote() {
+                if self.pos == before {
+                    return Err(self.err("Space required after the Public Identifier"));
+                }
+                self.parse_quoted()?;
+            }
+        }
+        self.expect_decl_end("Notation")
+    }
+
     fn parse_entity(&mut self) -> Result<(), XmlError> {
         self.bump("<!ENTITY".len());
         if !self.require_ws() {
@@ -519,7 +605,13 @@ impl<'a> DtdParser<'a> {
                 // ExternalID ::= 'PUBLIC' S PubidLiteral S SystemLiteral --
                 // two literals, with space between them. One was accepted, and
                 // so was `"whatever""e.ent"` with no space.
-                self.parse_quoted()?;
+                let pid = self.parse_quoted()?;
+                if let Some(bad) = pid.chars().find(|c| !is_pubid_char(*c)) {
+                    return Err(self.err(&format!(
+                        "Invalid character 0x{:X} in public identifier",
+                        bad as u32
+                    )));
+                }
                 if !self.require_ws() {
                     return Err(self.err("Space required after the Public Identifier"));
                 }
@@ -528,9 +620,19 @@ impl<'a> DtdParser<'a> {
                 }
             }
             self.parse_quoted()?;
+            // NDataDecl is the only thing allowed to follow, and it needs the
+            // space before it. Measure BEFORE skipping, or the skip eats the
+            // very thing being checked for.
+            let ws_before_ndata = {
+                let before = self.pos;
+                self.skip_ws();
+                self.pos > before
+            };
             self.skip_ws_and_comments();
-            // NDataDecl is the only thing allowed to follow.
             if self.rest().starts_with("NDATA") {
+                if !ws_before_ndata {
+                    return Err(self.err("Space required before 'NDATA'"));
+                }
                 self.bump(5);
                 if !self.require_ws() {
                     return Err(self.err("Space required after 'NDATA'"));
@@ -538,6 +640,9 @@ impl<'a> DtdParser<'a> {
                 if self.parse_name().is_empty() {
                     return Err(self.err("Notation name expected after 'NDATA'"));
                 }
+                // An NDATA entity is unparsed, and only an unparsed entity may
+                // be the value of an ENTITY attribute.
+                self.dtd.unparsed_entities.insert(name.clone());
                 self.skip_ws();
             }
             return self.expect_decl_end("entity");
@@ -604,6 +709,7 @@ impl<'a> DtdParser<'a> {
 /// Merge `src` into `dst` (external subset onto internal).
 pub fn merge_dtd(dst: &mut XmlDtd, src: XmlDtd) {
     dst.entities.extend(src.entities);
+    dst.unparsed_entities.extend(src.unparsed_entities);
     dst.parameter_entities.extend(src.parameter_entities);
     dst.elements.extend(src.elements);
     dst.attributes.extend(src.attributes);
@@ -613,4 +719,187 @@ pub fn merge_dtd(dst: &mut XmlDtd, src: XmlDtd) {
     if dst.system_id.is_none() {
         dst.system_id = src.system_id;
     }
+}
+
+/// Validate a content specification against XML 1.0 productions 46-51.
+///
+/// Returns `Ok(true)` for Mixed content, `Ok(false)` for a children model.
+///
+///     Mixed  ::= '(' S? '#PCDATA' (S? '|' S? Name)* S? ')*'
+///              | '(' S? '#PCDATA' S? ')'
+///     children ::= (choice | seq) ('?' | '*' | '+')?
+///     cp       ::= (Name | choice | seq) ('?' | '*' | '+')?
+///     choice   ::= '(' S? cp ( S? '|' S? cp )+ S? ')'
+///     seq      ::= '(' S? cp ( S? ',' S? cp )* S? ')'
+///
+/// The two rules that catch most malformed models: a group may not mix `,` and
+/// `|` at the same level, and Mixed content that names elements must close
+/// with `)*`.
+fn validate_contentspec(spec: &str) -> Result<bool, &'static str> {
+    let mut p = SpecParser {
+        b: spec.as_bytes(),
+        i: 0,
+        depth: 0,
+    };
+    p.ws();
+    if !p.eat(b'(') {
+        return Err("ContentDecl : '(' expected");
+    }
+    p.ws();
+    if p.b[p.i..].starts_with(b"#PCDATA") {
+        p.i += 7;
+        let mut named = false;
+        loop {
+            p.ws();
+            if p.eat(b')') {
+                break;
+            }
+            if !p.eat(b'|') {
+                return Err("ContentDecl : ',' '|' or ')' expected");
+            }
+            p.ws();
+            p.name()?;
+            named = true;
+        }
+        // `(#PCDATA|a)` without the star is not a legal Mixed model.
+        let star = p.eat(b'*');
+        if named && !star {
+            return Err("Element content model is not finished with ')*'");
+        }
+        p.ws();
+        return if p.i == p.b.len() {
+            Ok(true)
+        } else {
+            Err("trailing content after the content model")
+        };
+    }
+    // A children model: rewind to the '(' and read it as a group.
+    p.i = 0;
+    p.ws();
+    p.group()?;
+    p.quant();
+    p.ws();
+    if p.i != p.b.len() {
+        return Err("ContentDecl : garbage after the content model");
+    }
+    Ok(false)
+}
+
+struct SpecParser<'a> {
+    b: &'a [u8],
+    i: usize,
+    depth: u32,
+}
+
+impl SpecParser<'_> {
+    fn ws(&mut self) {
+        while matches!(self.b.get(self.i), Some(b' ' | b'\t' | b'\r' | b'\n')) {
+            self.i += 1;
+        }
+    }
+    fn peek(&self) -> Option<u8> {
+        self.b.get(self.i).copied()
+    }
+    fn eat(&mut self, c: u8) -> bool {
+        if self.peek() == Some(c) {
+            self.i += 1;
+            true
+        } else {
+            false
+        }
+    }
+    fn quant(&mut self) {
+        if matches!(self.peek(), Some(b'?' | b'*' | b'+')) {
+            self.i += 1;
+        }
+    }
+    fn name(&mut self) -> Result<(), &'static str> {
+        let start = self.i;
+        // Names here are ASCII in practice, but a UTF-8 name must not be cut
+        // mid-character, so decode properly.
+        let rest = match std::str::from_utf8(&self.b[self.i..]) {
+            Ok(r) => r,
+            Err(_) => return Err("invalid UTF-8 in the content model"),
+        };
+        let mut chars = rest.char_indices();
+        match chars.next() {
+            Some((_, c)) if crate::chvalid::xml_is_name_start_char(c as u32, false) => {
+                self.i += c.len_utf8();
+            }
+            _ => return Err("Name expected in the content model"),
+        }
+        for (off, c) in chars {
+            if !crate::chvalid::xml_is_name_char(c as u32, false) {
+                self.i = start + off;
+                return Ok(());
+            }
+            self.i = start + off + c.len_utf8();
+        }
+        Ok(())
+    }
+    /// choice or seq. Which one is decided by the first separator, and the
+    /// group must then use only that one.
+    fn group(&mut self) -> Result<(), &'static str> {
+        // `((((((...` must not recurse the stack away.
+        self.depth += 1;
+        if self.depth > 256 {
+            return Err("content model nested too deeply");
+        }
+        if !self.eat(b'(') {
+            return Err("ContentDecl : '(' expected");
+        }
+        self.ws();
+        self.cp()?;
+        self.ws();
+        let sep = match self.peek() {
+            Some(b')') => {
+                self.i += 1;
+                self.depth -= 1;
+                return Ok(());
+            }
+            Some(c @ (b'|' | b',')) => c,
+            _ => return Err("ContentDecl : ',' '|' or ')' expected"),
+        };
+        loop {
+            if !self.eat(sep) {
+                // A different connector at the same level: `(a|b,c)`.
+                return Err("ContentDecl : ',' '|' or ')' expected");
+            }
+            self.ws();
+            self.cp()?;
+            self.ws();
+            match self.peek() {
+                Some(b')') => {
+                    self.i += 1;
+                    self.depth -= 1;
+                    return Ok(());
+                }
+                Some(c) if c == sep => continue,
+                _ => return Err("ContentDecl : ',' '|' or ')' expected"),
+            }
+        }
+    }
+    fn cp(&mut self) -> Result<(), &'static str> {
+        if self.peek() == Some(b'(') {
+            self.group()?;
+        } else {
+            self.name()?;
+        }
+        self.quant();
+        Ok(())
+    }
+}
+
+/// PubidChar ::= #x20 | #xD | #xA | [a-zA-Z0-9] | [-'()+,./:=?;!*#@$_%]
+///
+/// A public identifier is a restricted character set, not free text. Nothing
+/// checked it, so `<!NOTATION n PUBLIC "a^b">` was accepted.
+pub fn is_pubid_char(c: char) -> bool {
+    matches!(c, ' ' | '\r' | '\n')
+        || c.is_ascii_alphanumeric()
+        || matches!(
+            c,
+            '-' | '\'' | '(' | ')' | '+' | ',' | '.' | '/' | ':'
+                | '=' | '?' | ';' | '!' | '*' | '#' | '@' | '$' | '_' | '%'
+        )
 }

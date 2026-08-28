@@ -910,6 +910,14 @@ impl<'a> Parser<'a> {
             self.expect_byte(b'=', XML_ERR_EQUAL_REQUIRED, "'=' required")?;
             self.skip_s()?;
             let enc = self.parse_quoted()?;
+            // EncName ::= [A-Za-z] ([A-Za-z0-9._] | '-')*
+            // Any string at all was accepted, including "_UTF-8" and "".
+            let mut cs = enc.chars();
+            let ok = cs.next().is_some_and(|c| c.is_ascii_alphabetic())
+                && cs.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+            if !ok {
+                return Err(self.err(XML_ERR_ENCODING_NAME, "Invalid XML encoding name"));
+            }
             self.doc.encoding = Some(enc);
             self.skip_s()?;
         }
@@ -1257,7 +1265,15 @@ impl<'a> Parser<'a> {
             self.pos += 6;
             self.col += 6;
             self.skip_s()?;
-            public_id = Some(self.parse_quoted()?);
+            let pid = self.parse_quoted()?;
+            // PubidLiteral is a restricted character set, not free text.
+            if let Some(bad) = pid.chars().find(|c| !crate::dtd::is_pubid_char(*c)) {
+                return Err(self.err(
+                    XML_ERR_INVALID_CHAR,
+                    format!("Invalid character 0x{:X} in public identifier", bad as u32),
+                ));
+            }
+            public_id = Some(pid);
             self.skip_s()?;
             system_id = Some(self.parse_quoted()?);
         }

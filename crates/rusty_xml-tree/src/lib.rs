@@ -42,6 +42,10 @@ pub struct XmlDtd {
     pub entities: HashMap<String, String>,
     /// Parameter entity name → replacement.
     pub parameter_entities: HashMap<String, String>,
+    /// Names of entities declared with an NDATA annotation. An attribute of
+    /// type ENTITY must name one of these, which needs them kept apart from
+    /// parsed entities rather than lumped in with them.
+    pub unparsed_entities: std::collections::HashSet<String>,
     /// Element name → content model.
     pub elements: HashMap<String, ElementDecl>,
     /// (element, attribute) → declaration.

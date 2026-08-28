@@ -46,6 +46,14 @@ pub struct XmlDtd {
     /// type ENTITY must name one of these, which needs them kept apart from
     /// parsed entities rather than lumped in with them.
     pub unparsed_entities: std::collections::HashSet<String>,
+    /// Notation names declared by `<!NOTATION>`. We parsed those declarations
+    /// and threw the name away, so nothing could check that an NDATA
+    /// annotation or a NOTATION attribute type names one that exists.
+    pub notations: std::collections::HashSet<String>,
+    /// Notation names referenced by an NDATA annotation, kept so the
+    /// "Notation Declared" constraint can be checked once the whole subset is
+    /// read rather than in declaration order.
+    pub ndata_notations: Vec<String>,
     /// Element name → content model.
     pub elements: HashMap<String, ElementDecl>,
     /// Element types declared more than once. A map cannot represent that, and

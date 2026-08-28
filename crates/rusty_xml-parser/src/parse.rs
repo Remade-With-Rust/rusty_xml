@@ -1152,6 +1152,14 @@ impl<'a> Parser<'a> {
         self.doc.dtd.as_ref()?.entities.get(name).cloned()
     }
 
+    /// Step over `&name;` without expanding it.
+    fn consume_reference(&mut self) -> Result<(), XmlError> {
+        self.expect_byte(b'&', XML_ERR_ENTITYREF_NO_NAME, "& expected")?;
+        let _ = self.parse_name()?;
+        self.expect_byte(b';', XML_ERR_ENTITYREF_SEMICOL_MISSING, "';' required")?;
+        Ok(())
+    }
+
     /// Parse an entity's replacement text as content and graft the result in.
     ///
     /// The replacement is parsed in isolation, wrapped in a synthetic root, so
@@ -1163,6 +1171,20 @@ impl<'a> Parser<'a> {
     /// isolated parse, so an undefined-prefix failure falls back to the old
     /// text behaviour rather than rejecting a document libxml2 accepts.
     fn splice_entity(&mut self, repl: &str, parent: NodeId) -> Result<(), XmlError> {
+        // The splice path bypasses expand_entity, which is where the
+        // amplification budget was charged -- so a bomb whose replacement
+        // contains '&' stopped being charged at all and expanded freely. It is
+        // charged here instead, and the sub-parser inherits and returns what
+        // is left so nesting draws on one pool.
+        self.entity_budget = match self.entity_budget.checked_sub(repl.len()) {
+            Some(n) => n,
+            None => {
+                return Err(self.err(
+                    XML_ERR_UNDECLARED_ENTITY,
+                    "Entity expansion budget exceeded",
+                ));
+            }
+        };
         let wrapped = format!("<rusty-xml-entity>{repl}</rusty-xml-entity>");
         let mut null = rusty_xml_sax::NullSax;
         let mut sub = Parser {
@@ -2088,7 +2110,21 @@ impl<'a> Parser<'a> {
                 } else {
                     self.flush_chars(Some(parent))?;
                     let raw = self.reference_raw_value();
-                    let repl = self.parse_reference()?;
+                    // When the replacement is going to be re-parsed anyway,
+                    // expanding it first is both wasted work and wrong: the
+                    // expander does not know about CDATA, so `<!ENTITY e
+                    // "<![CDATA[&foo;]]>">` had it chasing an entity that the
+                    // section makes literal text.
+                    let will_splice = raw
+                        .as_deref()
+                        .is_some_and(|r| r.contains('<') || r.contains('&'))
+                        && !self.no_tree;
+                    let repl = if will_splice {
+                        self.consume_reference()?;
+                        String::new()
+                    } else {
+                        self.parse_reference()?
+                    };
                     // Replacement text containing markup has to become NODES.
                     // It was inserted as text and escaped on the way out, so
                     // `<!ENTITY e "<b>x</b>">` put the literal string
@@ -2102,11 +2138,7 @@ impl<'a> Parser<'a> {
                     // '&' as well as '<': `<!ENTITY e "&#38;">` stores a bare
                     // ampersand, and a bare ampersand in content is an error,
                     // not text. Re-parsing the replacement is what says so.
-                    if raw
-                        .as_deref()
-                        .is_some_and(|r| r.contains('<') || r.contains('&'))
-                        && !self.no_tree
-                    {
+                    if will_splice {
                         self.splice_entity(raw.as_deref().unwrap(), parent)?;
                     } else {
                         self.char_buf.push_str(&repl);

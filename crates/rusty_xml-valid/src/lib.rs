@@ -37,6 +37,26 @@ pub fn xml_validate_dtd(doc: &XmlDoc, dtd: &XmlDtd) -> Result<(), String> {
     // Constraints on the DECLARATIONS themselves, before any instance of them
     // is looked at. None of these was checked, so a declaration could promise
     // something no document could satisfy.
+    // "Notation Declared": a notation named by an NDATA annotation or by a
+    // NOTATION attribute type has to have been declared. We were parsing
+    // <!NOTATION> and throwing the name away, so nothing could tell.
+    for n in &dtd.ndata_notations {
+        if !dtd.notations.contains(n) {
+            return Err(format!("Notation {n} is not declared"));
+        }
+    }
+    for ((elem, aname), ad) in &dtd.attributes {
+        if ad.att_type != "NOTATION" {
+            continue;
+        }
+        for n in &ad.enumerated {
+            if !dtd.notations.contains(n) {
+                return Err(format!(
+                    "Notation {n} in attribute {aname} of {elem} is not declared"
+                ));
+            }
+        }
+    }
     // "Unique Element Type Declaration": no element type may be declared more
     // than once. A HashMap cannot say so on its own, so the parser records it.
     if let Some(dup) = dtd.duplicate_elements.first() {
@@ -162,7 +182,10 @@ fn validate_element(
     if doc.kind(id) != NodeKind::Element {
         return Ok(());
     }
-    let name = doc.name(id).to_string();
+    // Declarations name QNames, so an element declared `<!ELEMENT xml:foo>` is
+    // looked up as `xml:foo`. Using the local part alone reported a declared
+    // element as undeclared.
+    let name = doc.qname(id);
     // "Element Valid": an element with no declaration is invalid, and nothing
     // said so. A DTD that declares nothing at all is not a validating DTD, so
     // only complain when there are declarations to be missing from.
@@ -183,8 +206,8 @@ fn validate_element(
                     match doc.kind(x) {
                         NodeKind::Element => {
                             if let ElementDecl::Mixed(allowed) = decl {
-                                if !allowed.is_empty() && !allowed.iter().any(|n| n == doc.name(x)) {
-                                    return Err(format!("element {} not allowed in mixed {name}", doc.name(x)));
+                                if !allowed.is_empty() && !allowed.iter().any(|n| *n == doc.qname(x)) {
+                                    return Err(format!("element {} not allowed in mixed {name}", doc.qname(x)));
                                 }
                             }
                         }
@@ -200,7 +223,7 @@ fn validate_element(
                     let mut c = doc.first_child(id);
                     while let Some(x) = c {
                         if doc.kind(x) == NodeKind::Element {
-                            v.push(doc.name(x).to_string());
+                            v.push(doc.qname(x));
                         } else if doc.kind(x) == NodeKind::Text && !doc.xml_is_blank_node(x) {
                             return Err(format!("character data not allowed in {name}"));
                         } else if doc.kind(x) == NodeKind::CData {

@@ -1886,3 +1886,67 @@ fn required_whitespace_is_required() {
         );
     }
 }
+
+/// A colon that does not form a QName is not a prefix marker.
+///
+/// The colon is an ordinary XML 1.0 name character. `:`, `:x`, `x:` and
+/// `a.-:x` are all legal Names, and we rejected every document that used one.
+/// libxml2 reports the namespace problem and carries on with the name
+/// unprefixed; anything else refuses input C accepts.
+#[test]
+fn a_colon_that_is_not_a_prefix_is_just_a_colon() {
+    let opts = default_parse_options();
+    for src in [
+        &b"<!DOCTYPE d [<!ELEMENT d (#PCDATA)><!ATTLIST d : CDATA #IMPLIED>]><d :=\"v\"></d>"[..],
+        &b"<:foo/>"[..],
+        &b"<foo:/>"[..],
+        &b"<a.-:x/>"[..],
+        &b"<foo a:b:c=\"1\"/>"[..],
+    ] {
+        assert!(
+            xml_read_memory(src, None, None, opts).is_ok(),
+            "rejected a legal Name: {}",
+            String::from_utf8_lossy(src)
+        );
+    }
+    // A real prefix still resolves.
+    let d = xml_read_memory(b"<r xmlns:p=\"urn:x\"><p:e/></r>", None, None, opts).unwrap();
+    let out = String::from_utf8(xml_save_doc(&d, 0)).unwrap();
+    assert!(out.contains("<p:e/>"), "prefix handling broke: {out}");
+}
+
+/// The notation constraints, which could not be checked at all before.
+///
+/// `<!NOTATION>` was parsed and its name thrown away, so nothing could tell
+/// whether an NDATA annotation or a NOTATION attribute type named one that
+/// exists.
+#[test]
+fn notations_must_be_declared() {
+    let opts = default_parse_options();
+    let invalid = |src: &str| {
+        let d = xml_read_memory(src.as_bytes(), None, None, opts)
+            .unwrap_or_else(|e| panic!("should parse: {src}\n{e}"));
+        assert!(rusty_xml::xml_validate_document(&d).is_err(), "should be invalid: {src}");
+    };
+    invalid("<!DOCTYPE p [<!ELEMENT p EMPTY><!ENTITY b SYSTEM \"u\" NDATA Missing>]><p/>");
+    invalid("<!DOCTYPE p [<!ELEMENT p EMPTY><!ATTLIST p a NOTATION (nope) #IMPLIED>]><p/>");
+
+    // Not an EMPTY element: a NOTATION attribute on one of those is its own
+    // violation, and would mask the thing under test.
+    let good = "<!DOCTYPE p [<!ELEMENT p (#PCDATA)><!NOTATION n SYSTEM \"u\">\
+                <!ENTITY b SYSTEM \"u\" NDATA n><!ATTLIST p a NOTATION (n) #IMPLIED>]>\
+                <p a=\"n\">x</p>";
+    let d = xml_read_memory(good.as_bytes(), None, None, opts).unwrap();
+    rusty_xml::xml_validate_document(&d).expect("should be valid");
+}
+
+/// Declarations name QNames, and so does the DOCTYPE.
+///
+/// The validator looked elements up by their local part, so an element
+/// declared `<!ELEMENT xml:foo>` was reported as having no declaration.
+#[test]
+fn declarations_are_matched_by_qname() {
+    let src = b"<!DOCTYPE xml:foo [<!ELEMENT xml:foo EMPTY>]><xml:foo/>";
+    let d = xml_read_memory(src, None, None, default_parse_options()).unwrap();
+    rusty_xml::xml_validate_document(&d).expect("declared element reported undeclared");
+}

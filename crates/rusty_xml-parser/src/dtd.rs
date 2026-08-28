@@ -778,6 +778,7 @@ impl<'a> DtdParser<'a> {
         if !self.require_ws() {
             return Err(self.err("Space required after the notation name"));
         }
+        self.dtd.notations.insert(name.clone());
         let public = if self.rest().starts_with("PUBLIC") {
             true
         } else if self.rest().starts_with("SYSTEM") {
@@ -882,9 +883,11 @@ impl<'a> DtdParser<'a> {
                 if !self.require_ws() {
                     return Err(self.err("Space required after 'NDATA'"));
                 }
-                if self.parse_name().is_empty() {
+                let notation = self.parse_name();
+                if notation.is_empty() {
                     return Err(self.err("Notation name expected after 'NDATA'"));
                 }
+                self.dtd.ndata_notations.push(notation);
                 // An NDATA entity is unparsed, and only an unparsed entity may
                 // be the value of an ENTITY attribute.
                 self.dtd.unparsed_entities.insert(name.clone());
@@ -960,6 +963,8 @@ pub fn merge_dtd(dst: &mut XmlDtd, src: XmlDtd) {
     dst.entities.extend(src.entities);
     dst.unparsed_entities.extend(src.unparsed_entities);
     dst.duplicate_elements.extend(src.duplicate_elements);
+    dst.notations.extend(src.notations);
+    dst.ndata_notations.extend(src.ndata_notations);
     dst.parameter_entities.extend(src.parameter_entities);
     dst.elements.extend(src.elements);
     dst.attributes.extend(src.attributes);

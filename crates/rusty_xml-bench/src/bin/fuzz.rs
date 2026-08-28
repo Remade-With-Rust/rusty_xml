@@ -191,7 +191,7 @@ fn main() {
 
     let opts = default_parse_options();
     let recover = opts | rusty_xml::XML_PARSE_RECOVER;
-    let (mut parsed, mut stream_bad, mut idem_bad) = (0u64, 0u64, 0u64);
+    let (mut parsed, mut stream_bad, mut idem_bad, mut html_bad) = (0u64, 0u64, 0u64, 0u64);
 
     for i in 0..iters {
         let d = generate(&mut r);
@@ -199,7 +199,30 @@ fn main() {
         let whole = save(&d, opts, 0);
         let _ = save(&d, recover, 0);
         let _ = save(&d, opts, rusty_xml::XML_SAVE_FORMAT);
-        let _ = html_read_memory(&d, None, None, 0).map(|x| xml_save_doc(&x, 0));
+        // HTML has no well-formedness to fail, so it always produces a tree
+        // -- which makes the round trip the only check with any teeth on it.
+        // The nesting fix is exactly the kind of change that can make one
+        // unstable, since a misparented node moves again on every pass.
+        if let Ok(h1) = html_read_memory(&d, None, None, 0) {
+            let once = xml_save_doc(&h1, 0);
+            if let Ok(h2) = html_read_memory(&once, None, None, 0) {
+                let twice = xml_save_doc(&h2, 0);
+                if once != twice {
+                    html_bad += 1;
+                    if html_bad <= 3 {
+                        eprintln!(
+                            "HTML NOT IDEMPOTENT seed={seed} iter={i}
+  in:  {:?}
+  1st: {:?}
+  2nd: {:?}",
+                            String::from_utf8_lossy(&d),
+                            String::from_utf8_lossy(&once),
+                            String::from_utf8_lossy(&twice),
+                        );
+                    }
+                }
+            }
+        }
 
         if let Ok(doc) = xml_read_memory(&d, None, None, opts) {
             parsed += 1;
@@ -241,9 +264,9 @@ fn main() {
 
     println!(
         "{iters} inputs, seed {seed}: {parsed} parsed clean, \
-         {stream_bad} stream divergences, {idem_bad} non-idempotent round trips"
+         {stream_bad} stream divergences, {idem_bad} non-idempotent round trips, \n         {html_bad} non-idempotent HTML round trips"
     );
-    if stream_bad != 0 || idem_bad != 0 {
+    if stream_bad != 0 || idem_bad != 0 || html_bad != 0 {
         std::process::exit(1);
     }
 }

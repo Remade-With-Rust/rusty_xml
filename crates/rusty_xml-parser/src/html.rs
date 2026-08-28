@@ -61,6 +61,11 @@ fn html_parse_utf8(bytes: &[u8], _url: Option<&str>, options: i32) -> Result<Xml
         body: None,
     };
     p.doc.encoding = Some("HTML".into());
+    // Mark it as an HTML document so the serializer can tell. Without this the
+    // writer had no way to know, and emitted an XML declaration where C emits
+    // the doctype -- which, re-parsed as HTML, became a text node. An HTML
+    // round trip was not stable.
+    p.doc.node_mut(rusty_xml_tree::NodeId::DOCUMENT).kind = NodeKind::HtmlDocument;
     p.parse()?;
     while p.stack.len() > 1 {
         p.stack.pop();
@@ -157,11 +162,29 @@ impl<'a> HtmlParser<'a> {
         }
         Ok(())
     }
+    /// Markup declaration. Only DOCTYPE carries anything we keep.
+    ///
+    /// This used to discard the lot, so an HTML document's doctype was lost and
+    /// the serializer had nothing to write. C round-trips it: `<!DOCTYPE html>`
+    /// in, `<!DOCTYPE html>` out.
     fn skip_decl(&mut self) {
-        if let Some(i) = self.rest().find('>') {
-            self.bump(i + 1);
-        } else {
-            self.pos = self.src.len();
+        let decl_is_doctype = self
+            .rest()
+            .get(2..9)
+            .is_some_and(|k| k.eq_ignore_ascii_case("DOCTYPE"));
+        let end = self.rest().find('>');
+        let body = match end {
+            Some(i) => self.rest()[..i].to_string(),
+            None => self.rest().to_string(),
+        };
+        match end {
+            Some(i) => self.bump(i + 1),
+            None => self.pos = self.src.len(),
+        }
+        if decl_is_doctype && self.doc.dtd.is_none() {
+            if let Some(tail) = body.get(9..) {
+                self.doc.dtd = Some(parse_html_doctype(tail));
+            }
         }
     }
     fn parse_text(&mut self) {
@@ -343,4 +366,42 @@ impl<'a> HtmlParser<'a> {
         self.bump(n);
         v
     }
+}
+
+/// Split the body of an HTML `<!DOCTYPE ...>` into name, public id, system id.
+///
+/// `<!DOCTYPE html>` and the HTML 4.01 form with PUBLIC/SYSTEM identifiers are
+/// the two that occur; anything else degrades to a bare name, which is what C
+/// does too.
+fn parse_html_doctype(body: &str) -> rusty_xml_tree::XmlDtd {
+    let mut dtd = rusty_xml_tree::XmlDtd::default();
+    let mut rest = body.trim_start();
+    let name_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    if name_end > 0 {
+        dtd.name = Some(rest[..name_end].to_string());
+    }
+    rest = rest[name_end..].trim_start();
+
+    // A quoted literal, either quoting style, as HTML permits both.
+    fn literal(r: &mut &str) -> Option<String> {
+        *r = r.trim_start();
+        let q = r.chars().next().filter(|c| *c == '"' || *c == '\'')?;
+        let after = &r[1..];
+        let end = after.find(q)?;
+        let v = after[..end].to_string();
+        *r = &after[end + 1..];
+        Some(v)
+    }
+
+    // .get(..6) rather than [..6]: a byte index that lands mid-character
+    // panics, and a doctype is attacker-controlled text like anything else.
+    if rest.get(..6).is_some_and(|k| k.eq_ignore_ascii_case("PUBLIC")) {
+        rest = &rest[6..];
+        dtd.public_id = literal(&mut rest);
+        dtd.system_id = literal(&mut rest);
+    } else if rest.get(..6).is_some_and(|k| k.eq_ignore_ascii_case("SYSTEM")) {
+        rest = &rest[6..];
+        dtd.system_id = literal(&mut rest);
+    }
+    dtd
 }

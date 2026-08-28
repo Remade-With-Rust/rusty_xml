@@ -22,6 +22,17 @@ fn hex_ref(c: u32) -> String {
 }
 
 fn escape_text(s: &str, attr: bool, non_ascii: bool) -> String {
+    escape_as(s, attr, non_ascii, false)
+}
+
+/// `html` passes C0 control characters through untouched.
+///
+/// XML forbids them, so in an XML document they can no longer reach the writer
+/// at all -- the parser rejects them now. HTML permits them and C writes them
+/// out verbatim. Substituting U+FFFD here meant an HTML document came back
+/// holding a character it never contained, and the substitution was not even
+/// idempotent: the first save escaped it, the second emitted it raw.
+fn escape_as(s: &str, attr: bool, non_ascii: bool, html: bool) -> String {
     let mut out = String::new();
     for c in s.chars() {
         let u = c as u32;
@@ -37,11 +48,32 @@ fn escape_text(s: &str, attr: bool, non_ascii: bool) -> String {
             '\r' => out.push_str("&#13;"),
             '\t' if attr => out.push_str("&#9;"),
             '\n' if attr => out.push_str("&#10;"),
-            c if u < 0x20 && c != '\t' && c != '\n' => out.push_str(&hex_ref(0xfffd)),
+            c if u < 0x20 && c != '\t' && c != '\n' => {
+                if html {
+                    out.push(c);
+                } else {
+                    out.push_str(&hex_ref(0xfffd));
+                }
+            }
             c => out.push(c),
         }
     }
     out
+}
+
+/// Serialize with HTML rules. Private: set by `xml_save_doc` from the document
+/// kind, never by a caller, and deliberately above the public XML_SAVE_* bits.
+const SAVE_AS_HTML: i32 = 1 << 29;
+
+/// Elements that never take an end tag in HTML. C writes `<br>`, not `<br/>`
+/// and not `<br></br>`.
+const VOID_ELEMENTS: &[&str] = &[
+    "area", "base", "basefont", "br", "col", "embed", "frame", "hr", "img",
+    "input", "isindex", "link", "meta", "param", "source", "track", "wbr",
+];
+
+fn is_void(name: &str) -> bool {
+    VOID_ELEMENTS.iter().any(|v| name.eq_ignore_ascii_case(v))
 }
 
 fn qname(prefix: Option<&str>, local: &str) -> String {
@@ -128,16 +160,28 @@ fn write_one(
                 out.push(' ');
                 out.push_str(&qname(doc.prefix(a), doc.name(a)));
                 out.push_str("=\"");
-                out.push_str(&escape_text(
+                out.push_str(&escape_as(
                     doc.content(a),
                     true,
                     doc.encoding.is_none(),
+                    (opts & SAVE_AS_HTML) != 0,
                 ));
                 out.push('"');
             }
+            let html = (opts & SAVE_AS_HTML) != 0;
+            if html && is_void(doc.name(id)) {
+                // <br>, not <br/>: a stray slash is not an HTML end tag, and
+                // re-parsing "<br/>" made every following node a CHILD of the
+                // br rather than a sibling. That is what broke the HTML round
+                // trip -- content moved on every pass.
+                out.push('>');
+                return;
+            }
             let has_kids = doc.first_child(id).is_some();
             if !has_kids {
-                if (opts & XML_SAVE_NO_EMPTY) == 0 {
+                // HTML has no empty-element syntax: a non-void element always
+                // gets its end tag, exactly as XML_SAVE_NO_EMPTY does.
+                if (opts & XML_SAVE_NO_EMPTY) == 0 && !html {
                     out.push_str("/>");
                 } else {
                     out.push_str("></");
@@ -179,10 +223,11 @@ fn write_one(
             }
         }
         NodeKind::Text => {
-            out.push_str(&escape_text(
+            out.push_str(&escape_as(
                 doc.content(id),
                 false,
                 doc.encoding.is_none(),
+                (opts & SAVE_AS_HTML) != 0,
             ));
         }
         NodeKind::CData => {
@@ -235,6 +280,13 @@ fn write_one(
 #[doc(alias = "xmlSaveDoc")]
 pub fn xml_save_doc(doc: &XmlDoc, options: i32) -> Vec<u8> {
     let mut out = String::new();
+    // An HTML document is serialized by HTML rules. It used to go out through
+    // the XML writer, which emitted <?xml version="1.0" encoding="HTML"?> --
+    // and re-parsing that as HTML turned the declaration into a text node, so
+    // the round trip was not stable. C emits the doctype.
+    if doc.kind(rusty_xml_tree::NodeId::DOCUMENT) == NodeKind::HtmlDocument {
+        return save_html_doc(doc, options | SAVE_AS_HTML);
+    }
     if (options & XML_SAVE_NO_DECL) == 0 {
         out.push_str("<?xml version=\"");
         out.push_str(if doc.version.is_empty() {
@@ -549,4 +601,54 @@ impl XmlTextWriter {
 #[doc(alias = "xmlNewTextWriterMemory")]
 pub fn xml_new_text_writer_memory() -> XmlTextWriter {
     XmlTextWriter::xml_new_text_writer_memory()
+}
+
+/// Serialize an HTML document: doctype, then the children, no XML declaration.
+///
+/// C synthesizes the HTML 4.0 Transitional doctype when the source had none,
+/// and round-trips whatever doctype the source did carry.
+fn save_html_doc(doc: &XmlDoc, options: i32) -> Vec<u8> {
+    let mut out = String::new();
+    if (options & XML_SAVE_NO_DECL) == 0 {
+        out.push_str("<!DOCTYPE ");
+        let dtd = doc.dtd.as_ref();
+        out.push_str(dtd.and_then(|d| d.name.as_deref()).unwrap_or("html"));
+        match (
+            dtd.and_then(|d| d.public_id.as_deref()),
+            dtd.and_then(|d| d.system_id.as_deref()),
+        ) {
+            (Some(p), sys) => {
+                out.push_str(" PUBLIC \"");
+                out.push_str(p);
+                out.push('"');
+                if let Some(s) = sys {
+                    out.push_str(" \"");
+                    out.push_str(s);
+                    out.push('"');
+                }
+            }
+            (None, Some(s)) => {
+                out.push_str(" SYSTEM \"");
+                out.push_str(s);
+                out.push('"');
+            }
+            (None, None) if dtd.is_none() => {
+                // No doctype in the source: C supplies this one.
+                out.push_str(
+                    " PUBLIC \"-//W3C//DTD HTML 4.0 Transitional//EN\" \
+                     \"http://www.w3.org/TR/REC-html40/loose.dtd\"",
+                );
+            }
+            (None, None) => {}
+        }
+        out.push_str(">\n");
+    }
+    let format = (options & XML_SAVE_FORMAT) != 0;
+    let mut child = doc.first_child(rusty_xml_tree::NodeId::DOCUMENT);
+    while let Some(id) = child {
+        write_node(doc, id, &mut out, options, 0, format);
+        out.push('\n');
+        child = doc.next_sibling(id);
+    }
+    out.into_bytes()
 }

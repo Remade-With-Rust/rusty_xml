@@ -1371,3 +1371,90 @@ fn a_broken_internal_subset_is_reported_not_discarded() {
         "recover mode should still produce a tree"
     );
 }
+
+/// An HTML document must serialize by HTML rules, not XML ones.
+///
+/// There was no HTML serializer: html_read_memory produced a plain Document
+/// and xml_save_doc wrote it as XML. That produced three defects at once --
+/// an `<?xml ... encoding="HTML"?>` declaration where C writes the doctype,
+/// `<br/>` where C writes `<br>`, and `&#xFFFD;` for control characters C
+/// passes through.
+///
+/// The `<br/>` one was not cosmetic. Re-parsed as HTML, a trailing slash is
+/// not an end tag, so every following node became a CHILD of the br instead of
+/// a sibling -- the tree moved on every save/parse cycle. The fuzzer found
+/// 3084 unstable HTML round trips in 30,000 inputs; there are none now.
+#[test]
+fn html_serializes_as_html() {
+    let save = |src: &str| -> String {
+        let d = rusty_xml::html_read_memory(src.as_bytes(), None, None, 0).expect("parses");
+        String::from_utf8(xml_save_doc(&d, 0)).unwrap()
+    };
+
+    // No doctype in the source: C supplies HTML 4.0 Transitional.
+    let out = save("<html><body><p>x</p></body></html>");
+    assert!(out.starts_with("<!DOCTYPE html PUBLIC \"-//W3C//DTD HTML 4.0 Transitional//EN\""));
+    assert!(!out.contains("<?xml"), "XML declaration in HTML output:\n{out}");
+
+    // A doctype that was there is kept.
+    assert!(save("<!DOCTYPE html><html><body>x</body></html>").starts_with("<!DOCTYPE html>"));
+
+    // Void elements take no end tag and no slash; everything else takes one.
+    let out = save("<html><body><br><img src=x><el k=v></el></body></html>");
+    assert!(out.contains("<br>"), "void element not minimized:\n{out}");
+    assert!(!out.contains("<br/>") && !out.contains("</br>"), "br closed:\n{out}");
+    assert!(out.contains("<img src=\"x\">"), "img not minimized:\n{out}");
+    assert!(out.contains("<el k=\"v\"></el>"), "empty element self-closed:\n{out}");
+
+    // Control characters are legal in HTML and C writes them verbatim.
+    assert!(save("<html><body>a\u{8}b</body></html>").contains("a\u{8}b"));
+}
+
+/// Saving HTML and re-parsing it must be a fixed point.
+///
+/// This is the invariant that catches a serializer the parser disagrees with,
+/// and it is the one rag-converter depends on: read HTML, write it, read it
+/// back, and the tree must not have moved.
+#[test]
+fn html_round_trip_is_stable() {
+    let cases = [
+        "<html><body><br>after<p>x</p></body></html>",
+        "<html><body><div><span>a</span>b<img src=i>c</div></body></html>",
+        "<!DOCTYPE html><html><body><ul><li>1<li>2</ul></body></html>",
+        "<html><body><table><tr><td><div>x</div></td></tr></table></body></html>",
+        "<html><body>a\u{8}b\u{1}c</body></html>",
+        "<html><body><hr><meta charset=utf-8><input value=v></body></html>",
+    ];
+    for src in cases {
+        let d1 = rusty_xml::html_read_memory(src.as_bytes(), None, None, 0).expect("parses");
+        let once = xml_save_doc(&d1, 0);
+        let d2 = rusty_xml::html_read_memory(&once, None, None, 0).expect("reparses");
+        let twice = xml_save_doc(&d2, 0);
+        assert_eq!(
+            String::from_utf8_lossy(&once),
+            String::from_utf8_lossy(&twice),
+            "round trip moved the tree for {src}"
+        );
+    }
+}
+
+/// A doctype is attacker-controlled text like everything else.
+///
+/// The first cut of the doctype reader sliced it by byte index -- `[2..9]` for
+/// the keyword and `[9..]` for the body -- which panics when the index lands
+/// inside a multi-byte character. The fuzzer hit it on the first run.
+#[test]
+fn a_malformed_doctype_does_not_panic() {
+    for src in [
+        "<!\u{1F600}",
+        "<!DOCTYP\u{e9}",
+        "<!DOCTYPE\u{1F600}>",
+        "<!DOCTYPE html PUBLIC \"\u{1F600}",
+        "<!DOCTYPE html SYSTEM '",
+        "<!D",
+        "<!",
+        "<!DOCTYPE",
+    ] {
+        let _ = rusty_xml::html_read_memory(src.as_bytes(), None, None, 0);
+    }
+}

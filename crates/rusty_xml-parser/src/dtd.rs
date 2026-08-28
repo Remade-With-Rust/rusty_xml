@@ -521,7 +521,7 @@ impl<'a> DtdParser<'a> {
         }
         Ok(())
     }
-    /// NotationDecl ::= '<!NOTATION' S Name S (ExternalID | PublicID) S? '>'
+    /// `NotationDecl ::= '<!NOTATION' S Name S (ExternalID | PublicID) S? '>'`
     ///
     /// This went to skip_decl, which took everything up to the next '>' and
     /// asked no questions: a missing space, a missing name, a public
@@ -725,12 +725,14 @@ pub fn merge_dtd(dst: &mut XmlDtd, src: XmlDtd) {
 ///
 /// Returns `Ok(true)` for Mixed content, `Ok(false)` for a children model.
 ///
-///     Mixed  ::= '(' S? '#PCDATA' (S? '|' S? Name)* S? ')*'
-///              | '(' S? '#PCDATA' S? ')'
-///     children ::= (choice | seq) ('?' | '*' | '+')?
-///     cp       ::= (Name | choice | seq) ('?' | '*' | '+')?
-///     choice   ::= '(' S? cp ( S? '|' S? cp )+ S? ')'
-///     seq      ::= '(' S? cp ( S? ',' S? cp )* S? ')'
+/// ```text
+/// Mixed    ::= '(' S? '#PCDATA' (S? '|' S? Name)* S? ')*'
+///            | '(' S? '#PCDATA' S? ')'
+/// children ::= (choice | seq) ('?' | '*' | '+')?
+/// cp       ::= (Name | choice | seq) ('?' | '*' | '+')?
+/// choice   ::= '(' S? cp ( S? '|' S? cp )+ S? ')'
+/// seq      ::= '(' S? cp ( S? ',' S? cp )* S? ')'
+/// ```
 ///
 /// The two rules that catch most malformed models: a group may not mix `,` and
 /// `|` at the same level, and Mixed content that names elements must close

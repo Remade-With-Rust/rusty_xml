@@ -1370,7 +1370,13 @@ impl<'a> Parser<'a> {
                 // "No < in Attribute Values": the constraint is about the
                 // replacement TEXT, not just what is written in the document,
                 // so an entity carrying one is caught here and nowhere else.
-                if raw.as_deref().is_some_and(|r| r.contains('<')) {
+                // The EXPANDED text, not just the stored one: `<!ENTITY a
+                // "&b;">` where b holds a '<' carries it in just the same way,
+                // and only the expansion shows that.
+                // Only for a DECLARED entity: `&lt;` is the sanctioned way
+                // to put a '<' in an attribute value, and rejecting that broke
+                // a valid document.
+                if raw.is_some() && (raw.as_deref().unwrap().contains('<') || repl.contains('<')) {
                     return Err(self.err(
                         XML_ERR_LT_IN_ATTRIBUTE,
                         "'<' in entity is not allowed in attribute values",

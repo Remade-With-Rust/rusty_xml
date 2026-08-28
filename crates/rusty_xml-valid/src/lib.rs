@@ -189,7 +189,11 @@ fn validate_element(
     // "Element Valid": an element with no declaration is invalid, and nothing
     // said so. A DTD that declares nothing at all is not a validating DTD, so
     // only complain when there are declarations to be missing from.
-    if !dtd.elements.is_empty() && !dtd.elements.contains_key(&name) {
+    // Not gated on the DTD declaring anything: validating against a subset
+    // that declares no elements should fail for every element, which is what C
+    // reports. Requiring a non-empty map let a DTD of pure entity declarations
+    // validate any document at all.
+    if !dtd.elements.contains_key(&name) {
         return Err(format!("No declaration for element {name}"));
     }
     if let Some(decl) = dtd.elements.get(&name) {
@@ -354,7 +358,7 @@ fn validate_element(
     // "Attribute Value Type": every attribute an element carries must be
     // declared for that element type. Nothing checked, so `xml:space` on an
     // element whose ATTLIST never mentions it was fine by us.
-    if !dtd.elements.is_empty() {
+    {
         let mut a = doc.first_attr(id);
         while let Some(x) = a {
             let q = doc.qname(x);

@@ -860,6 +860,12 @@ impl<'a> DtdParser<'a> {
                     return Err(self.err("SystemLiteral expected"));
                 }
             }
+            // parse_quoted returns an empty string rather than an error when
+            // it is not looking at a quote, so `<!ENTITY p SYSTEM >` with no
+            // literal at all went through as an entity with no system id.
+            if !self.at_quote() {
+                return Err(self.err("SystemLiteral \" or ' expected"));
+            }
             self.parse_quoted()?;
             // NDataDecl is the only thing allowed to follow, and it needs the
             // space before it. Measure BEFORE skipping, or the skip eats the

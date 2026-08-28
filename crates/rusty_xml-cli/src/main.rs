@@ -20,7 +20,7 @@ use std::process;
 
 fn usage() -> ! {
     eprintln!(
-        "Usage: rxmlint [--noout] [--recover] [--sax] [--stream] [--format] [--xpath EXPR] [--c14n] [--exc-c14n] [--html] [--push] [--dtdvalid] [--relaxng FILE] [--schema FILE] [--schematron FILE] [--repeat] [file|-]\n  --repeat : first sets 100 inner parses, each extra --repeat multiplies by 10 (xmllint; rxmlint-repeat-flag-v1)"
+        "Usage: rxmlint [--noout] [--recover] [--oldxml10] [--sax] [--stream] [--format] [--xpath EXPR] [--c14n] [--exc-c14n] [--html] [--push] [--dtdvalid] [--relaxng FILE] [--schema FILE] [--schematron FILE] [--repeat] [file|-]\n  --repeat : first sets 100 inner parses, each extra --repeat multiplies by 10 (xmllint; rxmlint-repeat-flag-v1)"
     );
     process::exit(1);
 }
@@ -38,6 +38,7 @@ fn main() {
     let mut push = false;
     let mut recover = false;
     let mut c14n = false;
+    let mut oldxml10 = false;
     let mut exc_c14n = false;
     let mut dtdvalid = false;
     let mut xpath: Option<String> = None;
@@ -60,6 +61,7 @@ fn main() {
             "--bench-counts" => bench_counts = true,
             "--html" => html = true,
             "--push" => push = true,
+            "--oldxml10" => oldxml10 = true,
             "--c14n" => c14n = true,
             "--exc-c14n" => exc_c14n = true,
             "--dtdvalid" => dtdvalid = true,
@@ -116,6 +118,9 @@ fn main() {
         } else {
             0
         }
+        // XML 1.0 before the 5th edition: the older, narrower name character
+        // classes. xmllint spells it the same way.
+        | if oldxml10 { rusty_xml::XML_PARSE_OLD10 } else { 0 }
         // Canonicalization is defined over the document AFTER attribute
         // defaulting, so the c14n path needs the DTD defaults completed even
         // though a plain parse does not. xmllint does the same.

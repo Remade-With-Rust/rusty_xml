@@ -27,6 +27,12 @@ struct Case {
     uri: PathBuf,
     version: String,
     entities: String,
+    /// Which editions of XML 1.0 the case applies to. A case not marked for
+    /// the 5th is testing the OLD character rules, and libxml2's own runner
+    /// parses those with XML_PARSE_OLD10 rather than scoring a 5th-edition
+    /// parser against 4th-edition expectations. Not doing that counted 313
+    /// inapplicable cases as failures -- for us AND for the oracle.
+    edition: String,
 }
 
 /// Collect every TEST element in a catalog, including nested TESTCASES.
@@ -84,6 +90,7 @@ fn collect(catalog: &Path, out: &mut Vec<Case>) {
                             uri: p,
                             version: attr("VERSION"),
                             entities: attr("ENTITIES"),
+                            edition: attr("EDITION"),
                         });
                     }
                 }
@@ -121,10 +128,13 @@ impl Tally {
 }
 
 /// Our verdict on one case: (parsed, validated).
-fn ours(bytes: &[u8], want_validation: bool) -> (bool, bool) {
+fn ours(bytes: &[u8], want_validation: bool, old10: bool) -> (bool, bool) {
     let mut opts = default_parse_options();
     if want_validation {
         opts |= rusty_xml::XML_PARSE_DTDVALID | rusty_xml::XML_PARSE_DTDLOAD;
+    }
+    if old10 {
+        opts |= rusty_xml::XML_PARSE_OLD10;
     }
     match xml_read_memory(bytes, None, None, opts) {
         Err(_) => (false, false),
@@ -133,10 +143,14 @@ fn ours(bytes: &[u8], want_validation: bool) -> (bool, bool) {
 }
 
 /// libxml2's verdict on the same file, so the score has something to mean.
-fn oracle(path: &Path, want_validation: bool) -> (bool, bool) {
+fn oracle(path: &Path, want_validation: bool, old10: bool) -> (bool, bool) {
     let run = |extra: &[&str]| -> bool {
+        let mut base: Vec<&str> = vec!["--noout"];
+        if old10 {
+            base.push("--oldxml10");
+        }
         std::process::Command::new("oracle/bin/xmllint.exe")
-            .arg("--noout")
+            .args(base)
             .args(extra)
             .arg(path)
             .stdout(std::process::Stdio::null())
@@ -234,7 +248,9 @@ fn main() {
             eprintln!("{} {}", c.id, c.uri.display());
         }
         let validating = c.ty == "valid" || c.ty == "invalid";
-        let (p, v) = ours(&bytes, validating);
+        // Exactly what libxml2's runxmlconf.c does at the same point.
+        let old10 = !c.edition.is_empty() && !c.edition.contains('5');
+        let (p, v) = ours(&bytes, validating, old10);
         let ok = expected(&c.ty, p, v);
         mine.entry(c.ty.clone()).or_default().add(ok);
         if !ok {
@@ -248,7 +264,7 @@ fn main() {
             ));
         }
         if use_oracle {
-            let (cp, cv) = oracle(&c.uri, validating);
+            let (cp, cv) = oracle(&c.uri, validating, old10);
             let c_ok = expected(&c.ty, cp, cv);
             theirs.entry(c.ty.clone()).or_default().add(c_ok);
             if ok != c_ok {

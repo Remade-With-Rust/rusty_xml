@@ -11,24 +11,24 @@ pub fn xml_parse_dtd(
     system_id: Option<&str>,
 ) -> Result<XmlDtd, XmlError> {
     let text = String::from_utf8_lossy(buffer);
-    let mut dtd = parse_external_subset(&text)?;
+    let mut dtd = parse_external_subset(&text, false)?;
     dtd.public_id = public_id.map(str::to_string);
     dtd.system_id = system_id.map(str::to_string);
     Ok(dtd)
 }
 
 /// Parse a DTD internal/external subset into declarations.
-pub fn parse_dtd_subset(src: &str) -> Result<XmlDtd, XmlError> {
-    parse_subset(src, true)
+pub fn parse_dtd_subset(src: &str, old10: bool) -> Result<XmlDtd, XmlError> {
+    parse_subset(src, true, old10)
 }
 
 /// Parse an external subset, where conditional sections are legal and a
 /// parameter entity may supply part of a declaration.
-pub fn parse_external_subset(src: &str) -> Result<XmlDtd, XmlError> {
-    parse_subset(src, false)
+pub fn parse_external_subset(src: &str, old10: bool) -> Result<XmlDtd, XmlError> {
+    parse_subset(src, false, old10)
 }
 
-fn parse_subset(src: &str, internal: bool) -> Result<XmlDtd, XmlError> {
+fn parse_subset(src: &str, internal: bool, old10: bool) -> Result<XmlDtd, XmlError> {
     let expanded = expand_pe(src, internal)?;
     let mut dtd = XmlDtd::default();
     dtd.int_subset = Some(src.to_string());
@@ -37,6 +37,7 @@ fn parse_subset(src: &str, internal: bool) -> Result<XmlDtd, XmlError> {
         pos: 0,
         dtd: &mut dtd,
         internal,
+        old10,
     };
     p.parse_markup()?;
     check_entity_graph(&dtd)?;
@@ -311,6 +312,11 @@ struct DtdParser<'a> {
     /// conditional sections, and a parameter entity may not supply part of a
     /// declaration.
     internal: bool,
+    /// XML 1.0 before the 5th edition: the narrower name character classes.
+    /// The DTD parser had no idea this option existed, so a name illegal
+    /// under the old rules sailed through in a declaration -- and a PI
+    /// target inside the subset was never checked at all.
+    old10: bool,
 }
 
 impl<'a> DtdParser<'a> {
@@ -358,6 +364,25 @@ impl<'a> DtdParser<'a> {
                     return Err(self.err(
                         "XML declaration allowed only at the start of the document",
                     ));
+                }
+                // A PI inside the subset was skipped without a glance at its
+                // target. That is where the suite puts its illegal-name cases
+                // -- roughly three hundred of them.
+                let after = &self.rest()[2..];
+                let mut target_len = 0usize;
+                for (i, ch) in after.char_indices() {
+                    let ok = if i == 0 {
+                        crate::chvalid::xml_is_name_start_char(ch as u32, self.old10)
+                    } else {
+                        crate::chvalid::xml_is_name_char(ch as u32, self.old10)
+                    };
+                    if !ok {
+                        break;
+                    }
+                    target_len = i + ch.len_utf8();
+                }
+                if target_len == 0 {
+                    return Err(self.err("xmlParsePI : no target name"));
                 }
                 if let Some(e) = self.rest().find("?>") {
                     self.pos += e + 2;
@@ -444,9 +469,9 @@ impl<'a> DtdParser<'a> {
         // DTD disagreed.
         for (i, c) in r.char_indices() {
             let ok = if i == 0 {
-                crate::chvalid::xml_is_name_start_char(c as u32, false)
+                crate::chvalid::xml_is_name_start_char(c as u32, self.old10)
             } else {
-                crate::chvalid::xml_is_name_char(c as u32, false)
+                crate::chvalid::xml_is_name_char(c as u32, self.old10)
             };
             if !ok {
                 break;

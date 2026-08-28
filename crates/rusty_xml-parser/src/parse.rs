@@ -1428,7 +1428,7 @@ impl<'a> Parser<'a> {
             // entities and ATTLIST defaults it declared just vanished and the
             // failure surfaced later as a bogus "entity not defined". Recovery
             // mode still tolerates it, because that is what recovery is for.
-            match crate::dtd::parse_dtd_subset(subset) {
+            match crate::dtd::parse_dtd_subset(subset, self.old10) {
                 Ok(d) => d,
                 Err(_) if self.recover => rusty_xml_tree::XmlDtd::default(),
                 Err(e) => return Err(e),

@@ -656,6 +656,13 @@ impl<'a> Parser<'a> {
         Ok(Some(c))
     }
 
+    /// Consume required whitespace, reporting whether any was there.
+    fn require_s(&mut self) -> bool {
+        let before = self.pos;
+        let _ = self.skip_s();
+        self.pos > before
+    }
+
     fn skip_s(&mut self) -> Result<(), XmlError> {
         // Every XML whitespace character is ASCII, so this never needs a decode.
         // The previous form decoded each one twice (peek, then bump).
@@ -916,6 +923,15 @@ impl<'a> Parser<'a> {
         self.expect_byte(b'=', XML_ERR_EQUAL_REQUIRED, "'=' required")?;
         self.skip_s()?;
         let ver = self.parse_quoted()?;
+        // VersionNum ::= '1.' [0-9]+ in 1.0 5th ed; libxml2 accepts the older
+        // [a-zA-Z0-9_.:-]+ form. Either way `1.0?` is not one.
+        if ver.is_empty()
+            || !ver
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '-'))
+        {
+            return Err(self.err(XML_ERR_XMLDECL_NOT_FINISHED, "Invalid XML version value"));
+        }
         self.doc.version = ver;
         self.skip_s()?;
         if self.starts_with(b"encoding") {
@@ -1352,12 +1368,22 @@ impl<'a> Parser<'a> {
         if self.starts_with(b"SYSTEM") {
             self.pos += 6;
             self.col += 6;
-            self.skip_s()?;
+            if !self.require_s() {
+                return Err(self.err(XML_ERR_SPACE_REQUIRED, "Space required after 'SYSTEM'"));
+            }
+            if !matches!(self.peek_byte(), Some(b'"') | Some(b'\'')) {
+                return Err(self.err(
+                    XML_ERR_LITERAL_NOT_FINISHED,
+                    "SystemLiteral \" or ' expected",
+                ));
+            }
             system_id = Some(self.parse_quoted()?);
         } else if self.starts_with(b"PUBLIC") {
             self.pos += 6;
             self.col += 6;
-            self.skip_s()?;
+            if !self.require_s() {
+                return Err(self.err(XML_ERR_SPACE_REQUIRED, "Space required after 'PUBLIC'"));
+            }
             let pid = self.parse_quoted()?;
             // PubidLiteral is a restricted character set, not free text.
             if let Some(bad) = pid.chars().find(|c| !crate::dtd::is_pubid_char(*c)) {
@@ -1367,7 +1393,21 @@ impl<'a> Parser<'a> {
                 ));
             }
             public_id = Some(pid);
-            self.skip_s()?;
+            // ExternalID ::= 'PUBLIC' S PubidLiteral S SystemLiteral -- the
+            // space between the two literals is required, and `"a""b"` was
+            // taken happily.
+            if !self.require_s() {
+                return Err(self.err(
+                    XML_ERR_SPACE_REQUIRED,
+                    "Space required after the Public Identifier",
+                ));
+            }
+            if !matches!(self.peek_byte(), Some(b'"') | Some(b'\'')) {
+                return Err(self.err(
+                    XML_ERR_LITERAL_NOT_FINISHED,
+                    "SystemLiteral \" or ' expected",
+                ));
+            }
             system_id = Some(self.parse_quoted()?);
         }
         self.skip_s()?;
@@ -1473,9 +1513,20 @@ impl<'a> Parser<'a> {
         let mut raw_attrs: Vec<RawAttr> = std::mem::take(&mut self.scratch_raw);
         raw_attrs.clear();
         loop {
+            let before_ws = self.pos;
             self.skip_s()?;
+            let had_ws = self.pos > before_ws;
             if self.starts_with(b"/>") || self.peek_byte() == Some(b'>') {
                 break;
+            }
+            // `att1="a"att2="b"` was accepted; the grammar requires S
+            // between attributes, and C calls it an attributes construct
+            // error.
+            if !had_ws {
+                return Err(self.err(
+                    XML_ERR_SPACE_REQUIRED,
+                    "attributes construct error",
+                ));
             }
             let an = self.parse_name()?;
             self.skip_s()?;

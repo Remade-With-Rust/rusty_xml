@@ -19,7 +19,7 @@ pub fn xml_parse_dtd(
 
 /// Parse a DTD internal/external subset into declarations.
 pub fn parse_dtd_subset(src: &str) -> Result<XmlDtd, XmlError> {
-    let expanded = expand_pe(src);
+    let expanded = expand_pe(src)?;
     let mut dtd = XmlDtd::default();
     dtd.int_subset = Some(src.to_string());
     let mut p = DtdParser {
@@ -31,19 +31,19 @@ pub fn parse_dtd_subset(src: &str) -> Result<XmlDtd, XmlError> {
     Ok(dtd)
 }
 
-fn expand_pe(src: &str) -> String {
+fn expand_pe(src: &str) -> Result<String, XmlError> {
     // Multi-pass PE expansion so `%percent;` can invent new PE names.
     let mut cur = src.to_string();
     for _ in 0..16 {
         let mut pes: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         harvest_pe(&cur, &mut pes);
-        let next = subst_pe(&cur, &pes);
+        let next = subst_pe(&cur, &pes)?;
         if next == cur {
-            return cur;
+            return Ok(cur);
         }
         cur = next;
     }
-    cur
+    Ok(cur)
 }
 
 fn harvest_pe(src: &str, pes: &mut std::collections::HashMap<String, String>) {
@@ -75,7 +75,11 @@ fn harvest_pe(src: &str, pes: &mut std::collections::HashMap<String, String>) {
                     while i < bytes.len() && bytes[i] != q {
                         i += 1;
                     }
-                    let val = decode_charrefs(&src[vs..i]);
+                    // The harvest pass is a pre-scan; a malformed value is
+                    // reported later, by the declaration parser proper.
+                    let Ok(val) = decode_charrefs(&src[vs..i]) else {
+                        continue;
+                    };
                     pes.insert(name, val);
                 }
             }
@@ -85,7 +89,10 @@ fn harvest_pe(src: &str, pes: &mut std::collections::HashMap<String, String>) {
     }
 }
 
-fn subst_pe(src: &str, pes: &std::collections::HashMap<String, String>) -> String {
+fn subst_pe(
+    src: &str,
+    pes: &std::collections::HashMap<String, String>,
+) -> Result<String, XmlError> {
     let mut out = String::new();
     let mut chars = src.chars().peekable();
     let mut in_comment = false;
@@ -114,64 +121,130 @@ fn subst_pe(src: &str, pes: &std::collections::HashMap<String, String>) -> Strin
             continue;
         }
         if c == '%' {
+            // `%` followed by anything that cannot start a Name is the PE
+            // marker of an `<!ENTITY % name ...>` declaration, not a reference.
+            let is_ref = chars
+                .peek()
+                .is_some_and(|n| crate::chvalid::xml_is_name_start_char(*n as u32, false));
+            if !is_ref {
+                // PEReference ::= '%' Name ';' -- `%;` has no name at all.
+                if chars.peek() == Some(&';') {
+                    return Err(XmlError::new(
+                        crate::error::XML_ERR_ENTITYREF_NO_NAME,
+                        "PEReference: no name",
+                        0,
+                        0,
+                    ));
+                }
+                out.push('%');
+                continue;
+            }
             let mut name = String::new();
+            let mut terminated = false;
             while let Some(&n) = chars.peek() {
                 if n == ';' {
                     chars.next();
+                    terminated = true;
                     break;
                 }
-                if n.is_ascii_whitespace() || n == '"' || n == '\'' {
+                if !crate::chvalid::xml_is_name_char(n as u32, false) {
                     break;
                 }
                 name.push(n);
                 chars.next();
+            }
+            // `%paaa` and `%paaa ;` were both accepted. The semicolon is not
+            // optional, and no whitespace may come before it.
+            if !terminated {
+                return Err(XmlError::new(
+                    crate::error::XML_ERR_ENTITYREF_SEMICOL_MISSING,
+                    "PEReference: expecting ';'",
+                    0,
+                    0,
+                ));
             }
             if let Some(v) = pes.get(&name) {
                 out.push_str(v);
             } else {
                 out.push('%');
                 out.push_str(&name);
-                if !name.is_empty() {
-                    out.push(';');
-                }
+                out.push(';');
             }
             continue;
         }
         out.push(c);
     }
-    out
+    Ok(out)
 }
 
-fn decode_charrefs(s: &str) -> String {
+/// Decode character references in an entity value or attribute default.
+///
+/// EntityValue forbids a bare `&`: it must begin a character or entity
+/// reference. Nothing checked that, so `&49;` was kept as literal text and
+/// `&#002f;` -- digits followed by a non-digit -- was silently left alone
+/// instead of being reported as an invalid decimal value.
+///
+/// General entity references are kept verbatim; they are expanded at the point
+/// of use, not here.
+fn decode_charrefs(s: &str) -> Result<String, &'static str> {
     let mut out = String::new();
-    let mut rest = s;
-    while let Some(i) = rest.find("&#") {
-        out.push_str(&rest[..i]);
-        let after = &rest[i + 2..];
-        if let Some(hex) = after.strip_prefix('x').or_else(|| after.strip_prefix('X')) {
-            if let Some(end) = hex.find(';') {
-                if let Ok(v) = u32::from_str_radix(&hex[..end], 16) {
-                    if let Some(ch) = char::from_u32(v) {
-                        out.push(ch);
-                        rest = &hex[end + 1..];
-                        continue;
-                    }
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        if c != '&' {
+            out.push(c);
+            continue;
+        }
+        if it.peek() == Some(&'#') {
+            it.next();
+            let hex = matches!(it.peek(), Some('x') | Some('X'));
+            let upper_x = it.peek() == Some(&'X');
+            if hex {
+                it.next();
+            }
+            let mut digits = String::new();
+            while let Some(&d) = it.peek() {
+                if hex && d.is_ascii_hexdigit() || !hex && d.is_ascii_digit() {
+                    digits.push(d);
+                    it.next();
+                } else {
+                    break;
                 }
             }
-        } else if let Some(end) = after.find(';') {
-            if let Ok(v) = after[..end].parse::<u32>() {
-                if let Some(ch) = char::from_u32(v) {
-                    out.push(ch);
-                    rest = &after[end + 1..];
-                    continue;
-                }
+            // `&#X41;` -- the production spells the marker lowercase only.
+            if upper_x || digits.is_empty() || it.next() != Some(';') {
+                return Err(if hex {
+                    "CharRef: invalid hexadecimal value"
+                } else {
+                    "CharRef: invalid decimal value"
+                });
+            }
+            let radix = if hex { 16 } else { 10 };
+            let v = u32::from_str_radix(&digits, radix)
+                .map_err(|_| "CharRef: value out of range")?;
+            match char::from_u32(v).filter(|ch| crate::chvalid::xml_is_char(*ch as u32)) {
+                Some(ch) => out.push(ch),
+                None => return Err("CharRef: invalid XML character"),
+            }
+            continue;
+        }
+        // A general entity reference: keep it, but it must be well formed.
+        let mut name = String::new();
+        while let Some(&d) = it.peek() {
+            if crate::chvalid::xml_is_name_char(d as u32, false) {
+                name.push(d);
+                it.next();
+            } else {
+                break;
             }
         }
-        out.push_str("&#");
-        rest = after;
+        if name.is_empty() || it.next() != Some(';') {
+            return Err("EntityValue: '&' forbidden except for entities references");
+        }
+        out.push('&');
+        out.push_str(&name);
+        out.push(';');
     }
-    out.push_str(rest);
-    out
+    Ok(out)
 }
 
 struct DtdParser<'a> {
@@ -194,7 +267,7 @@ impl<'a> DtdParser<'a> {
         self.pos += r.len() - trimmed.len();
     }
 
-    fn skip_ws_and_comments(&mut self) {
+    fn skip_ws_and_comments(&mut self) -> Result<(), XmlError> {
         loop {
             let r = self.rest();
             let trimmed = r.trim_start();
@@ -207,6 +280,25 @@ impl<'a> DtdParser<'a> {
                 }
             }
             if self.rest().starts_with("<?") {
+                // An XML declaration is only legal at the very start of the
+                // document. Inside the internal subset it is a PI whose target
+                // is reserved, and this loop skipped every PI without looking.
+                let after = &self.rest()[2..];
+                // .get(..3), not [..3]: a byte index that lands inside a
+                // multi-byte character panics, and a PI target is arbitrary
+                // text. The suite hit this on the first run.
+                let is_xml_decl = after
+                    .get(..3)
+                    .is_some_and(|k| k.eq_ignore_ascii_case("xml"))
+                    && after[3..]
+                        .chars()
+                        .next()
+                        .is_none_or(|c| c.is_whitespace() || c == '?');
+                if is_xml_decl {
+                    return Err(self.err(
+                        "XML declaration allowed only at the start of the document",
+                    ));
+                }
                 if let Some(e) = self.rest().find("?>") {
                     self.pos += e + 2;
                     continue;
@@ -214,10 +306,11 @@ impl<'a> DtdParser<'a> {
             }
             break;
         }
+        Ok(())
     }
     fn parse_markup(&mut self) -> Result<(), XmlError> {
         loop {
-            self.skip_ws_and_comments();
+            self.skip_ws_and_comments()?;
             if self.pos >= self.src.len() {
                 break;
             }
@@ -276,7 +369,9 @@ impl<'a> DtdParser<'a> {
         self.pos += n;
     }
     fn parse_name(&mut self) -> String {
-        self.skip_ws_and_comments();
+        // A misplaced XML declaration is reported by the markup loop; here we
+        // only need the position advanced.
+        let _ = self.skip_ws_and_comments();
         let r = self.rest();
         let mut n = 0;
         for (i, c) in r.char_indices() {
@@ -304,13 +399,13 @@ impl<'a> DtdParser<'a> {
     /// entity value". Found by the fuzz round-trip check, which saw the
     /// first save escape the character and the second not.
     fn parse_quoted(&mut self) -> Result<String, XmlError> {
-        self.skip_ws_and_comments();
+        self.skip_ws_and_comments()?;
         let r = self.rest();
         if r.starts_with('"') || r.starts_with('\'') {
             let q = r.as_bytes()[0] as char;
             self.bump(1);
             if let Some(e) = self.rest().find(q) {
-                let s = decode_charrefs(&self.rest()[..e]);
+                let s = decode_charrefs(&self.rest()[..e]).map_err(|m| self.err(m))?;
                 self.bump(e + 1);
                 if let Some(bad) =
                     s.chars().find(|c| !crate::chvalid::xml_is_char(*c as u32))
@@ -417,7 +512,7 @@ impl<'a> DtdParser<'a> {
             // AttDef ::= S Name S AttType S DefaultDecl -- every one of those
             // S is required, and none of them was checked.
             let had_ws = self.require_ws();
-            self.skip_ws_and_comments();
+            self.skip_ws_and_comments()?;
             if self.rest().starts_with('>') {
                 self.bump(1);
                 break;
@@ -435,7 +530,7 @@ impl<'a> DtdParser<'a> {
             if !self.require_ws() {
                 return Err(self.err("Space required after the attribute name"));
             }
-            self.skip_ws_and_comments();
+            self.skip_ws_and_comments()?;
             let mut enumerated = Vec::new();
             let att_type = if self.rest().starts_with('(') {
                 let spec = self.take_until_gt_paren();
@@ -485,7 +580,7 @@ impl<'a> DtdParser<'a> {
             if !self.require_ws() {
                 return Err(self.err("Space required after the attribute type"));
             }
-            self.skip_ws_and_comments();
+            self.skip_ws_and_comments()?;
             let (default, default_value) = if self.rest().starts_with("#REQUIRED") {
                 self.bump(9);
                 (AttrDefault::Required, None)
@@ -628,7 +723,7 @@ impl<'a> DtdParser<'a> {
                 self.skip_ws();
                 self.pos > before
             };
-            self.skip_ws_and_comments();
+            self.skip_ws_and_comments()?;
             if self.rest().starts_with("NDATA") {
                 if !ws_before_ndata {
                     return Err(self.err("Space required before 'NDATA'"));

@@ -857,6 +857,15 @@ impl<'a> Parser<'a> {
             }
             return Err(self.err(XML_ERR_RESERVED_XML_NAME, "Reserved PI target xml"));
         }
+        // Namespaces in XML reserves the colon for QNames, so a PI target
+        // should be an NCName -- but C reports this and carries on, and
+        // rejecting a document libxml2 accepts is a worse trade than the three
+        // conformance cases it would win.
+        if target.contains(':') {
+            self.sax
+                .warning(&format!("colons are forbidden from PI names '{target}'
+"));
+        }
         let data = if matches!(self.peek_byte(), Some(b) if b < 0x80 && crate::chvalid::xml_is_blank(b as u32)) {
             self.skip_s()?;
             let mut d = String::new();
@@ -1011,9 +1020,17 @@ impl<'a> Parser<'a> {
         self.expect_byte(b'&', XML_ERR_ENTITYREF_NO_NAME, "& expected")?;
         if self.peek_byte() == Some(b'#') {
             self.bump_byte();
-            let hex = self.peek_byte() == Some(b'x') || self.peek_byte() == Some(b'X');
+            // CharRef ::= '&#' [0-9]+ ';' | '&#x' [0-9a-fA-F]+ ';'
+            // The marker is lowercase only; `&#X58;` is not a character
+            // reference, and we were accepting it.
+            let hex = self.peek_byte() == Some(b'x');
             if hex {
                 self.bump_byte();
+            } else if self.peek_byte() == Some(b'X') {
+                return Err(self.err(
+                    XML_ERR_INVALID_DEC_CHARREF,
+                    "CharRef: invalid decimal value",
+                ));
             }
             let mut digits = String::new();
             while let Some(b) = self.peek_byte() {
@@ -1406,6 +1423,40 @@ impl<'a> Parser<'a> {
                 {
                     let msg = format!("xmlns:{}: URI {} is not absolute\n", al, a.value);
                     self.sax.warning(&msg);
+                }
+                // Namespaces in XML 1.0 reserves `xml` and `xmlns` and forbids
+                // undeclaring a prefix. None of this was checked.
+                if al == "xml" {
+                    if a.value != XML_NS {
+                        return Err(self.err(
+                            XML_NS_ERR_UNDEFINED_NAMESPACE,
+                            "xml namespace prefix mapped to wrong URI",
+                        ));
+                    }
+                } else if a.value == XML_NS {
+                    return Err(self.err(
+                        XML_NS_ERR_UNDEFINED_NAMESPACE,
+                        "xml namespace URI mapped to wrong prefix",
+                    ));
+                }
+                if al == "xmlns" {
+                    return Err(self.err(
+                        XML_NS_ERR_UNDEFINED_NAMESPACE,
+                        "redefinition of the xmlns prefix is forbidden",
+                    ));
+                }
+                if a.value == XMLNS_NS {
+                    return Err(self.err(
+                        XML_NS_ERR_UNDEFINED_NAMESPACE,
+                        "reuse of the xmlns namespace name is forbidden",
+                    ));
+                }
+                // Prefix undeclaring (`xmlns:p=""`) is XML 1.1 only.
+                if a.value.is_empty() {
+                    return Err(self.err(
+                        XML_NS_ERR_UNDEFINED_NAMESPACE,
+                        "Empty XML namespace is not allowed",
+                    ));
                 }
                 ns_frame.push((Some(al.to_string()), a.value.clone()));
             }

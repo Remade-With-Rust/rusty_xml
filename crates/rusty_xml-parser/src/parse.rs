@@ -749,13 +749,16 @@ impl<'a> Parser<'a> {
         match parts.next() {
             None => Ok((None, a)),
             Some(b) => {
+                // A colon that does not form a QName is not a prefix marker --
+                // it is just a colon, and the colon is a perfectly ordinary
+                // XML 1.0 name character. `:`, `:x`, `x:` and `a.-:x` are all
+                // legal Names; we were rejecting the documents that use them,
+                // and the suite has whole tests of exactly that shape.
+                //
+                // libxml2 does the same: it reports the namespace problem and
+                // treats the whole thing as an unprefixed name.
                 if parts.next().is_some() || a.is_empty() || b.is_empty() {
-                    return Err(XmlError::new(
-                        XML_NS_ERR_QNAME,
-                        format!("Invalid QName {name}"),
-                        0,
-                        0,
-                    ));
+                    return Ok((None, name));
                 }
                 Ok((Some(a), b))
             }
@@ -1349,6 +1352,15 @@ impl<'a> Parser<'a> {
                     return Err(self.err(
                         XML_ERR_LT_IN_ATTRIBUTE,
                         "'<' in entity is not allowed in attribute values",
+                    ));
+                }
+                // `<!ENTITY e "&#38;">` stores a bare ampersand, and a bare
+                // ampersand is no more legal in an attribute value than in
+                // content -- it has to begin a reference.
+                if raw.as_deref().is_some_and(|r| has_bare_ampersand(r)) {
+                    return Err(self.err(
+                        XML_ERR_ENTITYREF_NO_NAME,
+                        "entity reference in attribute value is not well formed",
                     ));
                 }
                 val.push_str(&repl);
@@ -2407,4 +2419,50 @@ mod chvalid_tests {
             assert_eq!(got, want, "xml_is_char({i:#x}) = {got}, C dump = {want}");
         }
     }
+}
+
+/// Does this text hold an ampersand that does not begin a reference?
+///
+/// Entity replacement text is inserted into an attribute value verbatim, so a
+/// bare ampersand in it is exactly as illegal there as it is in content.
+fn has_bare_ampersand(s: &str) -> bool {
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        if c != '&' {
+            continue;
+        }
+        if it.peek() == Some(&'#') {
+            it.next();
+            let hex = it.peek() == Some(&'x');
+            if hex {
+                it.next();
+            }
+            let mut any = false;
+            while let Some(&d) = it.peek() {
+                if (hex && d.is_ascii_hexdigit()) || (!hex && d.is_ascii_digit()) {
+                    any = true;
+                    it.next();
+                } else {
+                    break;
+                }
+            }
+            if !any || it.next() != Some(';') {
+                return true;
+            }
+            continue;
+        }
+        let mut any = false;
+        while let Some(&d) = it.peek() {
+            if crate::chvalid::xml_is_name_char(d as u32, false) {
+                any = true;
+                it.next();
+            } else {
+                break;
+            }
+        }
+        if !any || it.next() != Some(';') {
+            return true;
+        }
+    }
+    false
 }

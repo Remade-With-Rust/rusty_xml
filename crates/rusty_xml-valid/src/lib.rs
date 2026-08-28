@@ -28,8 +28,10 @@ pub fn xml_validate_dtd(doc: &XmlDoc, dtd: &XmlDtd) -> Result<(), String> {
         .xml_doc_get_root_element()
         .ok_or("document has no root")?;
     if let Some(n) = &dtd.name {
-        if doc.name(root) != n.as_str() {
-            return Err(format!("root element {} does not match DOCTYPE {n}", doc.name(root)));
+        // The DOCTYPE names a QName, so `<!DOCTYPE xml:foo>` must be compared
+        // against `xml:foo` and not against the local part alone.
+        if doc.qname(root) != *n {
+            return Err(format!("root element {} does not match DOCTYPE {n}", doc.qname(root)));
         }
     }
     // Constraints on the DECLARATIONS themselves, before any instance of them

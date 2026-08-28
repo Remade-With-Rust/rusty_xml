@@ -430,6 +430,11 @@ impl<'a> DtdParser<'a> {
                 // the bang missing, `<!Attlist ...>` and `<!notation ...>`
                 // with the keyword miscased, and every other near-miss.
                 return Err(self.err("Content error in the internal subset"));
+            } else if self.rest().starts_with('%') {
+                // A well-formed PE reference was already substituted, so a '%'
+                // still sitting at markup level is not one -- `% foo;` with a
+                // space is not a reference, it is garbage between declarations.
+                return Err(self.err("PEReference: expecting ';'"));
             } else {
                 self.pos += self.rest().chars().next().unwrap().len_utf8();
             }
@@ -732,6 +737,19 @@ impl<'a> DtdParser<'a> {
             // binding and later declarations are ignored." We were inserting
             // into a map, so the last one won and a later #REQUIRED overrode
             // an earlier default.
+            // In an attribute default the references ARE expanded, so the
+            // entity has to be declared already -- unlike an EntityValue,
+            // where they are bypassed and a forward reference is legal. The
+            // graph check runs after the whole subset and so could not tell
+            // the two apart; this runs in declaration order and can.
+            if let Some(v) = default_value.as_deref() {
+                const PREDEFINED: &[&str] = &["lt", "gt", "amp", "apos", "quot"];
+                for r in entity_refs_in(v) {
+                    if !PREDEFINED.contains(&r.as_str()) && !self.dtd.entities.contains_key(&r) {
+                        return Err(self.err(&format!("Entity '{r}' not defined")));
+                    }
+                }
+            }
             self.dtd.attributes.entry((elem.clone(), aname)).or_insert(
                 AttrDecl {
                     att_type,
@@ -878,10 +896,14 @@ impl<'a> DtdParser<'a> {
             return Err(self.err("Entity value expected"));
         }
         let val = self.parse_quoted()?;
+        // "If the same entity is declared more than once, the first
+        // declaration encountered is binding." We inserted into a map, so the
+        // last won -- and a document whose second declaration is deliberately
+        // junk was rejected on the strength of a declaration it never uses.
         if pe {
-            self.dtd.parameter_entities.insert(name, val);
+            self.dtd.parameter_entities.entry(name).or_insert(val);
         } else {
-            self.dtd.entities.insert(name, val);
+            self.dtd.entities.entry(name).or_insert(val);
         }
         self.skip_ws();
         self.expect_decl_end("entity")
@@ -1196,6 +1218,24 @@ fn check_entity_graph(dtd: &XmlDtd) -> Result<(), XmlError> {
 /// The general entity references in a literal, as `&name;` occurrences.
 fn entity_refs_in(text: &str) -> Vec<String> {
     let mut out = Vec::new();
+    // Inside a CDATA section an ampersand is an ampersand. Scanning straight
+    // through one reported `<!ENTITY e "<![CDATA[&foo;]]>">` as referencing an
+    // undeclared entity that it does not reference at all.
+    let mut rest = text;
+    let mut scan = String::new();
+    while let Some(i) = rest.find("<![CDATA[") {
+        scan.push_str(&rest[..i]);
+        rest = &rest[i + 9..];
+        match rest.find("]]>") {
+            Some(e) => rest = &rest[e + 3..],
+            None => {
+                rest = "";
+                break;
+            }
+        }
+    }
+    scan.push_str(rest);
+    let text = scan.as_str();
     let mut it = text.chars().peekable();
     while let Some(c) = it.next() {
         if c != '&' || it.peek() == Some(&'#') {

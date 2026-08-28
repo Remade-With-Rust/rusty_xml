@@ -4,6 +4,92 @@ All notable changes to this project are documented here. The format is loosely
 based on [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.0]
+
+Conformance closed. **79.9% of the W3C XML Conformance Test Suite, against
+pinned libxml2's 79.9%** on the same 2039 scored cases -- 1630 to its 1629.
+0.3.0 published 65.0% and called the gap the honest statement of where the
+parser stood; this is the rest of that work.
+
+| | 0.3.0 | 0.4.0 | libxml2 2.15.3 |
+|---|---|---|---|
+| Total | 65.0% | **79.9%** | 79.9% |
+| valid accepted | 93.8% | 98.7% | 100.0% |
+| invalid rejected | 50.9% | **80.6%** | 53.7% |
+| not-well-formed rejected | 53.3% | 70.9% | 74.0% |
+
+Disagreements with C fell from 591 to 179.
+
+### Changed
+
+- **ATTLIST defaults are opt-in.** We completed attributes from DTD defaults on
+  every parse; libxml2 does it for `XML_PARSE_DTDATTR` and not otherwise, not
+  even for `--valid`. Every document with an ATTLIST default came back from us
+  carrying attributes C would not have added. Canonicalization *is* defined
+  over the document after defaulting, so the c14n path sets the flag -- if you
+  canonicalize, pass it, or you will sign the wrong document.
+- **An entity whose replacement text is markup now becomes nodes.** It was
+  inserted as text and escaped, so `<!ENTITY e "<b>x</b>">` put the literal
+  string `&lt;b&gt;x&lt;/b&gt;` in the tree. The decision is made on the stored
+  replacement, which is what distinguishes `&#60;foo/>` (expanded at
+  declaration time, so really markup) from `&lt;` (bypassed, so really a
+  character).
+- More documents that used to parse are now rejected -- malformed content
+  models, declarations missing required whitespace, invalid public identifiers
+  and encoding names. `XML_PARSE_RECOVER` still tolerates them.
+
+### Fixed
+
+- **Content models were never checked.** The spec was scanned for `#PCDATA` and
+  split on `|`; `(a & b)`, `(a b)`, `(a|b,c)` mixing connectors, `(doc*?)` and
+  `()` were all accepted. There is a real parser for productions 45-51 now.
+- **Validity constraints were absent.** The ID branch said "uniqueness checked
+  loosely" and meant not at all. ID and IDREF values must be Names and IDs must
+  be unique; IDREF/IDREFS must resolve; NMTOKEN/NMTOKENS must be Nmtokens;
+  ENTITY must name an entity declared NDATA. An undeclared element is invalid,
+  an element type may carry at most one ID attribute, a NOTATION attribute
+  cannot be declared for an EMPTY element, and a default value must satisfy its
+  own declared type.
+- **Three ways a valid document was refused.** The DTD's name parser was
+  ASCII-only, so `<!ELEMENT เจมส์ (#PCDATA)>` came back empty. An apostrophe
+  inside a DTD comment was read as an opening quote, so `<!--XML doesn't
+  say-->` swallowed the rest of the file. And the validator looked declared
+  attributes up with `xmlGetProp` semantics, which match unprefixed attributes
+  only, so a `#REQUIRED` `xml:lang` was reported missing from a document that
+  had it.
+- Declaration syntax: NOTATION had no parser at all, `EncName` was never
+  checked (`encoding="_UTF-8"` was fine), `PubidLiteral` was free text rather
+  than its restricted character set, and ATTLIST and ENTITY needed their
+  required whitespace.
+- Entity graph well-formedness: a literal could reference an entity never
+  declared, or one declared NDATA, or itself through a cycle.
+- `PEReference ::= '%' Name ';'` -- `%;`, `%paaa` and `%paaa ;` were all
+  accepted. In the internal subset a PE reference may not occur inside a markup
+  declaration, though `%` inside an *attribute default* is an ordinary
+  character and must stay one.
+- `&#X58;` is not a character reference; the marker is lowercase only. An XML
+  declaration inside the internal subset was skipped as an ordinary PI.
+  Conditional sections are external-subset only. NDATA on a parameter entity is
+  meaningless. The character rule applies inside a PI.
+- Namespaces in XML reserves `xml` and `xmlns`, and XML 1.0 has no prefix
+  undeclaring: binding `xml` to the wrong URI, binding that URI to another
+  prefix, redefining `xmlns`, reusing the xmlns namespace name, and
+  `xmlns:p=""` were all accepted.
+- When an attribute is declared twice for an element type the FIRST declaration
+  binds; we kept the last.
+- DTD validation walked the tree recursively -- the last per-level recursion in
+  the codebase after the parser, the writer and C14N.
+
+### Known gaps
+
+- No XML 1.1, no external entity loading, no gzip, no CJK multi-byte encodings.
+- The remaining not-well-formed failures are concentrated in name-character
+  classification, where libxml2 and the suite disagree about which edition of
+  XML 1.0 is under test; libxml2 fails most of those cases too.
+- We serialize the internal DTD subset verbatim where C re-serializes and
+  reorders it, and we expand entity references where C keeps them as reference
+  nodes. Both are deliberate; they are the two byte-identity divergences.
+
 ## [0.3.0]
 
 A correctness release. 0.2.0 was fast; this one measures how right it is, for

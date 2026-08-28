@@ -933,8 +933,13 @@ impl<'a> Parser<'a> {
             return Err(self.err(XML_ERR_XMLDECL_NOT_FINISHED, "Invalid XML version value"));
         }
         self.doc.version = ver;
-        self.skip_s()?;
+        // S is required between the version info and whatever follows it;
+        // `version="1.0"encoding="UTF-8"` was accepted.
+        let had_s = self.require_s();
         if self.starts_with(b"encoding") {
+            if !had_s {
+                return Err(self.err(XML_ERR_SPACE_REQUIRED, "Blank needed here"));
+            }
             self.pos += 8;
             self.col += 8;
             self.skip_s()?;
@@ -953,6 +958,9 @@ impl<'a> Parser<'a> {
             self.skip_s()?;
         }
         if self.starts_with(b"standalone") {
+            if !had_s {
+                return Err(self.err(XML_ERR_SPACE_REQUIRED, "Blank needed here"));
+            }
             self.pos += 10;
             self.col += 10;
             self.skip_s()?;

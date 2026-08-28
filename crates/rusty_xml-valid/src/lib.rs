@@ -326,6 +326,19 @@ fn validate_element(
             }
         }
     }
+    // "Attribute Value Type": every attribute an element carries must be
+    // declared for that element type. Nothing checked, so `xml:space` on an
+    // element whose ATTLIST never mentions it was fine by us.
+    if !dtd.elements.is_empty() {
+        let mut a = doc.first_attr(id);
+        while let Some(x) = a {
+            let q = doc.qname(x);
+            if !dtd.attributes.contains_key(&(name.clone(), q.clone())) {
+                return Err(format!("No declaration for attribute {q} of element {name}"));
+            }
+            a = doc.next_sibling(x);
+        }
+    }
     // "One ID per Element Type": an element type may carry at most one ID
     // attribute, however the declarations are spread across ATTLISTs.
     let id_attrs = dtd

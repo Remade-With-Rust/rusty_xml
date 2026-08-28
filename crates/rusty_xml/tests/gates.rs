@@ -1815,3 +1815,74 @@ fn entity_replacement_that_is_markup_becomes_markup() {
         );
     }
 }
+
+/// Validity constraints on the declarations and on what elements carry.
+///
+/// Every one of these was found by the conformance suite, and every one was
+/// silently accepted before.
+#[test]
+fn validity_constraints_on_declarations() {
+    let opts = default_parse_options();
+    let invalid = |src: &str| {
+        let d = xml_read_memory(src.as_bytes(), None, None, opts)
+            .unwrap_or_else(|e| panic!("should parse: {src}\n{e}"));
+        assert!(
+            rusty_xml::xml_validate_document(&d).is_err(),
+            "should be invalid: {src}"
+        );
+    };
+    // Unique Element Type Declaration.
+    invalid("<!DOCTYPE r [<!ELEMENT r ANY><!ELEMENT e EMPTY><!ELEMENT e EMPTY>]><r/>");
+    // ID Attribute Default: an ID cannot carry a default value.
+    invalid("<!DOCTYPE r [<!ELEMENT r ANY><!ATTLIST r id ID \"x23\">]><r/>");
+    // No Duplicate Types in a mixed content model.
+    invalid("<!DOCTYPE r [<!ELEMENT r (#PCDATA|a|a)*><!ELEMENT a EMPTY>]><r/>");
+    // No Duplicate Tokens in an enumeration.
+    invalid("<!DOCTYPE r [<!ELEMENT r ANY><!ATTLIST r b (one|one) #IMPLIED>]><r/>");
+    // Attribute Value Type: the attribute has to be declared.
+    invalid("<!DOCTYPE r [<!ELEMENT r EMPTY>]><r xml:space='preserve'/>");
+    // A CDATA section is character data even when it is empty, so it breaks an
+    // element-only content model.
+    invalid("<!DOCTYPE r [<!ELEMENT r (a+)><!ELEMENT a EMPTY>]><r><a/><![CDATA[]]></r>");
+
+    // And the well-formed equivalents must still validate.
+    let good = "<!DOCTYPE r [<!ELEMENT r (a+)><!ELEMENT a EMPTY>\
+                <!ATTLIST r id ID #IMPLIED><!ATTLIST a k (one|two) \"one\">]>\
+                <r id=\"x\"><a/><a k=\"two\"/></r>";
+    let d = xml_read_memory(good.as_bytes(), None, None, opts).unwrap();
+    rusty_xml::xml_validate_document(&d).expect("should be valid");
+}
+
+/// Whitespace the grammar requires and we were not asking for.
+#[test]
+fn required_whitespace_is_required() {
+    let opts = default_parse_options();
+    for src in [
+        // S between attributes.
+        &b"<r a=\"1\"b=\"2\"/>"[..],
+        // S in the XML declaration.
+        &b"<?xml version=\"1.0\"encoding=\"UTF-8\"?><r/>"[..],
+        // S between the two literals of an ExternalID.
+        &b"<!DOCTYPE r PUBLIC \"-//X//DTD//EN\"\"x.dtd\"><r/>"[..],
+        // A version number is a restricted character set.
+        &b"<?xml version=\"1.0?\"?><r/>"[..],
+    ] {
+        assert!(
+            xml_read_memory(src, None, None, opts).is_err(),
+            "accepted: {}",
+            String::from_utf8_lossy(src)
+        );
+    }
+    // The legal forms still parse.
+    for src in [
+        &b"<r a=\"1\" b=\"2\"/>"[..],
+        &b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><r/>"[..],
+        &b"<!DOCTYPE r PUBLIC \"-//X//DTD//EN\" \"x.dtd\"><r/>"[..],
+    ] {
+        assert!(
+            xml_read_memory(src, None, None, opts).is_ok(),
+            "rejected: {}",
+            String::from_utf8_lossy(src)
+        );
+    }
+}

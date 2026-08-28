@@ -93,27 +93,33 @@ Speed is the easy half. Here is the hard half, measured against the **W3C XML
 Conformance Test Suite** rather than against our own corpus, with the pinned C
 build scored on the identical cases:
 
-| | rusty_xml 0.4.0 | libxml2 2.15.3 |
+| | rusty_xml 0.5.0 | libxml2 2.15.3 |
 |---|---|---|
-| **Total** (2039 scored cases) | **79.9%** (1630) | **79.9%** (1629) |
+| **Total** (2039 scored cases) | **97.8%** | 94.8% |
+| well-formedness (`not-wf`, 1263) | **98.6%** | 98.0% |
+| invalid documents rejected (175) | **89.7%** | 53.7% |
 | valid documents accepted (601) | 98.7% | 100.0% |
-| invalid documents rejected (175) | **80.6%** | 53.7% |
-| well-formedness (`not-wf`, 1263) | 70.9% | 74.0% |
 
-**Level with the thing we are replacing**, by one case. We are meaningfully
-ahead on rejecting *invalid* documents and still behind on rejecting
-*malformed* ones; the remaining not-well-formed failures are concentrated in
-name-character classification, where libxml2 and the suite disagree about which
-edition of XML 1.0 is being tested.
+Ahead of the thing we are replacing on every category but one: C still accepts
+every valid document and we refuse eight of six hundred.
 
-0.2.0 never ran the suite at all. The first run, in 0.3.0, crashed before it
-scored a single case -- a 32 GB allocation reachable from thirty-two bytes of
-DTD -- and then scored 59.1%. Everything between there and here came from
-reading failures rather than guessing: an internal subset parser that was a
-scanner rather than a parser, four literals that were never character-validated,
-a validator whose ID branch said "uniqueness checked loosely" and meant not at
-all, and an entity whose replacement text was inserted as escaped text instead
-of the markup it was.
+**A correction.** 0.4.0 published "79.9%, level with libxml2" and that number
+was measured wrong. The suite marks 313 cases `EDITION="1 2 3 4"` -- they test
+the name rules of XML 1.0 *before* the 5th edition, which is not the language
+either implementation parses by default. libxml2's own `runxmlconf.c` reads
+that attribute and parses those cases with `XML_PARSE_OLD10`; our runner
+ignored it and scored a 5th-edition parser against 4th-edition expectations,
+counting 313 non-failures as failures for both sides. Correcting the runner
+moved the real figures to 90.0% and 94.8% -- we were behind, not level -- and
+exposed that `XML_PARSE_OLD10` never reached the DTD parser at all.
+
+0.2.0 never ran the suite. The first run, in 0.3.0, crashed before scoring a
+single case -- a 32 GB allocation reachable from thirty-two bytes of DTD -- and
+then scored 59.1%. Everything since came from reading failures rather than
+guessing: an internal subset parser that was a scanner rather than a parser,
+four literals never character-validated, a validator whose ID branch said
+"uniqueness checked loosely" and meant not at all, and an entity whose
+replacement text was inserted as escaped text instead of the markup it was.
 
 Run it yourself — the suite is fetched, never vendored:
 
@@ -197,7 +203,7 @@ or in `Cargo.toml`:
 
 ```toml
 [dependencies]
-rusty_xml = "0.4"
+rusty_xml = "0.5"
 ```
 
 MSRV is **1.85**. The library never sets `#[global_allocator]`.
@@ -347,8 +353,8 @@ unsupported, matching libxml2 built **without** iconv.
 - [ ] Optional gzip (`miniz_oxide` / `XML_PARSE_UNZIP`)
 - [x] **M8** — W3C conformance suite wired up and scored against the C oracle
       (65.0% vs libxml2 79.9%); seeded fuzzer; corpus widened 7 -> 16 files
-- [x] **M9** — close the conformance gap: 65.0% -> 79.9%, level with libxml2
-      on the same 2039 cases (ahead on invalid, behind on not-well-formed)
+- [x] **M9** — close the conformance gap: 65.0% -> 97.8% on the W3C suite,
+      ahead of libxml2's 94.8% on the same 2039 cases
 - [ ] C ABI `cdylib` (`XMLPUBFUN` names) + hardening audit
 - [ ] Optional gzip (`miniz_oxide` / `XML_PARSE_UNZIP`)
 - [ ] XML 1.1, external entity loading, CJK multi-byte encodings

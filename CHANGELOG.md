@@ -4,6 +4,72 @@ All notable changes to this project are documented here. The format is loosely
 based on [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.5.0]
+
+**97.8% of the W3C XML Conformance Test Suite, against pinned libxml2's 94.8%**
+on the same 2039 scored cases -- ahead on every category but one.
+
+| | 0.4.0 (as measured then) | 0.5.0 | libxml2 2.15.3 |
+|---|---|---|---|
+| Total | 79.9% | **97.8%** | 94.8% |
+| not-well-formed rejected | 70.9% | **98.6%** | 98.0% |
+| invalid rejected | 80.6% | **89.7%** | 53.7% |
+| valid accepted | 98.7% | 98.7% | 100.0% |
+
+### A correction to 0.4.0
+
+0.4.0 published "79.9%, level with libxml2". **That number was measured
+wrong.** The suite marks 313 cases `EDITION="1 2 3 4"`: they test the name
+rules of XML 1.0 before the 5th edition, which is not the language either
+implementation parses by default. libxml2's own `runxmlconf.c` reads that
+attribute and parses those cases with `XML_PARSE_OLD10`. Our runner ignored it
+and scored a 5th-edition parser against 4th-edition expectations, counting 313
+non-failures as failures on both sides.
+
+On the correct basis 0.4.0 was 90.0% against libxml2's 94.8% -- behind, not
+level. Fixing the runner also exposed a real defect worth 202 cases:
+`XML_PARSE_OLD10` reached the document parser but never the DTD parser, which
+had no idea the option existed.
+
+### Fixed
+
+- **`XML_PARSE_OLD10` did not reach the DTD parser.** Names in declarations
+  used the 5th-edition classes regardless of the option, and a processing
+  instruction inside the internal subset was skipped without a look at its
+  target -- which is exactly where the suite puts its illegal-name cases.
+  `rxmlint` gained `--oldxml10` to match `xmllint`.
+- **A PI target has to end where the name ends.** `<?_` followed by an illegal
+  combining character is not a PI with the target `_`.
+- **An unrecognized markup declaration is an error**, not something to skip:
+  `<ELEMENT ...>` with the bang missing, `<!Attlist ...>` and `<!notation ...>`
+  miscased, all went through silently.
+- Validity constraints: Unique Element Type Declaration, ID Attribute Default,
+  No Duplicate Types, No Duplicate Tokens, Attribute Value Type (an attribute
+  must be declared), and a CDATA section counts as character data even when
+  empty.
+- Required whitespace: between attributes, in the XML declaration, and between
+  the two literals of an ExternalID. VersionNum is a restricted character set.
+- The parsed-entity constraint covers `&` as well as `<`: `<!ENTITY e "&#38;">`
+  stores a bare ampersand, which is an error in content, not text. And "No < in
+  Attribute Values" is about the replacement text, not just what is written.
+- Every entry in a NOTATION attribute type is a Name.
+
+### Changed
+
+- **An undeclared namespace prefix is no longer fatal.** It is a namespace
+  error, not a well-formedness one; libxml2 reports it and exits zero, and we
+  were refusing documents C accepts. Scraped and legacy markup is full of
+  prefixes nobody declared. It also cost a valid case outright: `<A.-:x/>` is a
+  legal Name whose colon is not a prefix at all.
+
+### Known gaps
+
+- Eight valid documents we still refuse, out of 601.
+- No XML 1.1, no external entity loading, no gzip, no CJK multi-byte encodings.
+- We serialize the internal DTD subset verbatim where C re-serializes and
+  reorders it, and we expand entity references where C keeps them as reference
+  nodes. Both deliberate; they are the two byte-identity divergences.
+
 ## [0.4.0]
 
 Conformance closed. **79.9% of the W3C XML Conformance Test Suite, against

@@ -4,6 +4,57 @@ All notable changes to this project are documented here. The format is loosely
 based on [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.7.0]
+
+**Both document categories are perfect.** Every valid document in the W3C suite
+is accepted (601/601) and every invalid one is rejected (175/175), for
+**99.4% overall against pinned libxml2's 94.8%**.
+
+| | 0.6.0 | 0.7.0 | libxml2 2.15.3 |
+|---|---|---|---|
+| Total | 99.1% | **99.4%** | 94.8% |
+| valid accepted | 100.0% | **100.0%** | 100.0% |
+| invalid rejected | 96.6% | **100.0%** | 53.7% |
+| not-well-formed rejected | 99.0% | 99.0% | 98.0% |
+
+### Fixed
+
+- **List-typed attribute values separate on `#x20` and nothing else.** Literal
+  tab and newline become spaces during attribute-value normalization, but a
+  character reference contributes its character unchanged -- so `abc&#9;xyz` is
+  ONE token holding a tab, and not a valid `Nmtoken` at all. Splitting on any
+  whitespace made two tokens that both looked fine.
+- **Attribute-value normalization applies to a DTD default too**, and to the
+  literal whitespace only. That is why it belongs at the ATTLIST site rather
+  than in the shared literal reader: an entity value gets no such treatment.
+- **Whitespace provenance decides ignorability.** Erratum E15 draws a line the
+  tree cannot see -- a character reference standing in the document is
+  character data, while an entity whose replacement *is* whitespace contributes
+  ignorable whitespace, because the reference is replaced by its content. The
+  suite has four cases of identical shape and splits them two and two. Text
+  nodes now record whether their content arrived through a reference.
+- **An entity reference is content even when it expands to nothing.**
+  `<foo>&empty;</foo>` against `EMPTY` leaves no node behind, so the child list
+  alone could not see it.
+- **An ID or IDREF value is an NCName** (Namespaces erratum NE05), so a colon
+  in one is a validity error.
+
+### Note on strictness
+
+Four of these are validity errors libxml2 does not report at all. Being
+stricter there costs nothing and refuses no document: a validity error only
+surfaces when the caller asks for validation. That is the opposite of the
+namespace rules we decline to make fatal, which would reject input C reads.
+
+### Known gaps
+
+- Thirteen not-well-formed cases. libxml2 fails twelve for the same reason we
+  do: they expect a namespace violation to be fatal.
+- No XML 1.1, no external entity loading, no gzip, no CJK multi-byte encodings.
+- Two byte-identity divergences from C, both deliberate: we serialize the
+  internal DTD subset verbatim where C reorders it, and we expand entity
+  references where C keeps them as reference nodes.
+
 ## [0.6.0]
 
 **99.1% of the W3C XML Conformance Test Suite, against pinned libxml2's 94.8%**

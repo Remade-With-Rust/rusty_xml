@@ -87,6 +87,52 @@ the same pinned oracle throughout.</sub>
 
 ---
 
+### Conformance — where we actually stand
+
+Speed is the easy half. Here is the hard half, measured against the **W3C XML
+Conformance Test Suite** rather than against our own corpus, with the pinned C
+build scored on the identical cases:
+
+| | rusty_xml 0.3.0 | libxml2 2.15.3 |
+|---|---|---|
+| **Total** (2039 scored cases) | **65.0%** | **79.9%** |
+| well-formedness (`not-wf`, 1263) | 53.3% | 74.0% |
+| valid documents accepted (601) | 93.8% | 100.0% |
+| invalid documents rejected (175) | 50.9% | 53.7% |
+
+**That gap is the honest statement of where this parser stands.** It is not a
+drop-in replacement for libxml2 yet, and we would rather publish the number
+than let you discover it. 0.2.0 never ran the suite at all; the first run found
+a 32 GB allocation reachable from thirty-two bytes of DTD, and the score went
+from 59.1% to 65.0% once the internal subset parser stopped accepting malformed
+declarations.
+
+Run it yourself — the suite is fetched, never vendored:
+
+```sh
+pwsh scripts/fetch-xmlconf.ps1
+cargo run --release -p rusty_xml-bench --bin xmlconf -- --oracle
+```
+
+What we *do* gate hard, and what those numbers cost nothing:
+
+- **62 of 64** byte-identical comparisons against pinned `xmllint` over 16
+  corpora x {plain, `--format`, `--c14n`, `--exc-c14n`}. The two exceptions are
+  one deliberate divergence: we serialize the internal DTD subset verbatim
+  where C re-serializes and reorders it.
+- **0 `unsafe`** in all twelve crates.
+- Nothing on the parse, save, format, XPath, stream or canonicalize path
+  recurses per level of nesting, so document depth cannot exhaust the stack.
+- A seeded fuzzer (`--bin fuzz`) holds four invariants: no panics, chunked
+  parsing equals whole parsing at every chunk size, and both XML and HTML round
+  trips are fixed points.
+
+If you need full libxml2 conformance today, use libxml2. If you need a
+memory-safe XML toolkit that is faster than C, has no C in its dependency tree,
+and tells you exactly which cases it gets wrong, this is it.
+
+---
+
 ## What is this?
 
 `rusty_xml` is libxml2 remade in Rust. Unlike
@@ -143,7 +189,7 @@ or in `Cargo.toml`:
 
 ```toml
 [dependencies]
-rusty_xml = "0.1"
+rusty_xml = "0.3"
 ```
 
 MSRV is **1.85**. The library never sets `#[global_allocator]`.
@@ -290,9 +336,14 @@ unsupported, matching libxml2 built **without** iconv.
 - [x] **M6** — HTML parser, RelaxNG / XSD / Schematron working subsets
 - [x] **M7** — performance campaign vs pinned `xmllint`: faster than C on every
       corpus file, N=20, 20/20 pairs ([`bench/SIDE-BY-SIDE.md`](bench/SIDE-BY-SIDE.md))
-- [ ] **M8** — C ABI `cdylib` (`XMLPUBFUN` names) + hardening audit
 - [ ] Optional gzip (`miniz_oxide` / `XML_PARSE_UNZIP`)
-- [ ] Full xmlconf / full RelaxNG corpora (not only the working-subset fixtures)
+- [x] **M8** — W3C conformance suite wired up and scored against the C oracle
+      (65.0% vs libxml2 79.9%); seeded fuzzer; corpus widened 7 -> 16 files
+- [ ] **M9** — close the conformance gap: name-character classification
+      (productions 84-89) and content-model validation are where it lives
+- [ ] C ABI `cdylib` (`XMLPUBFUN` names) + hardening audit
+- [ ] Optional gzip (`miniz_oxide` / `XML_PARSE_UNZIP`)
+- [ ] XML 1.1, external entity loading, CJK multi-byte encodings
 
 Plan: [`docs/plan/rusty_xml.md`](docs/plan/rusty_xml.md).
 

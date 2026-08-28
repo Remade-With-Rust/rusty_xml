@@ -384,6 +384,17 @@ impl<'a> DtdParser<'a> {
                 if target_len == 0 {
                     return Err(self.err("xmlParsePI : no target name"));
                 }
+                // The target has to END there too. `<?_` followed by a
+                // character that is not a name character is not a PI with the
+                // target `_`; it is a PI with an illegal character in its
+                // target, which is what the suite is testing.
+                let tail = &after[target_len..];
+                let ends_cleanly = tail.is_empty()
+                    || tail.starts_with("?>")
+                    || tail.chars().next().is_some_and(char::is_whitespace);
+                if !ends_cleanly {
+                    return Err(self.err("xmlParsePI : invalid character in target name"));
+                }
                 if let Some(e) = self.rest().find("?>") {
                     self.pos += e + 2;
                     continue;
@@ -414,7 +425,11 @@ impl<'a> DtdParser<'a> {
                 }
                 self.skip_cond()?;
             } else if self.rest().starts_with('<') {
-                self.skip_decl()?;
+                // Anything else beginning with '<' is not a markup
+                // declaration, and skipping it accepted `<ELEMENT ...>` with
+                // the bang missing, `<!Attlist ...>` and `<!notation ...>`
+                // with the keyword miscased, and every other near-miss.
+                return Err(self.err("Content error in the internal subset"));
             } else {
                 self.pos += self.rest().chars().next().unwrap().len_utf8();
             }
@@ -663,9 +678,21 @@ impl<'a> DtdParser<'a> {
                     let spec = self.take_until_gt_paren();
                     for part in spec.trim().trim_matches(['(', ')']).split('|') {
                         let n = part.trim();
-                        if !n.is_empty() {
-                            enumerated.push(n.to_string());
+                        // NotationType ::= 'NOTATION' S '(' S? Name (S? '|' S?
+                        // Name)* S? ')' -- every entry is a Name, and an empty
+                        // or malformed one was quietly dropped.
+                        let ok = !n.is_empty()
+                            && n.chars().enumerate().all(|(i, c)| {
+                                if i == 0 {
+                                    crate::chvalid::xml_is_name_start_char(c as u32, self.old10)
+                                } else {
+                                    crate::chvalid::xml_is_name_char(c as u32, self.old10)
+                                }
+                            });
+                        if !ok {
+                            return Err(self.err("Name expected in NOTATION declaration"));
                         }
+                        enumerated.push(n.to_string());
                     }
                 }
                 t

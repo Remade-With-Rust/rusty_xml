@@ -1950,3 +1950,27 @@ fn declarations_are_matched_by_qname() {
     let d = xml_read_memory(src, None, None, default_parse_options()).unwrap();
     rusty_xml::xml_validate_document(&d).expect("declared element reported undeclared");
 }
+
+/// Attribute-value normalization for the tokenized types (XML 1.0 3.3.3).
+///
+/// A value whose declared type is anything but CDATA has its leading and
+/// trailing space discarded and its internal runs collapsed to one space. We
+/// did none of it, so `id="  x  y  "` stayed as written where C reports
+/// `x y` -- a different value for the same document, on anything with a DTD
+/// that declares a non-CDATA attribute.
+///
+/// It is normalization, not defaulting, so it happens whether or not
+/// XML_PARSE_DTDATTR was asked for. libxml2 is the same.
+#[test]
+fn tokenized_attribute_values_are_normalized() {
+    let src = b"<!DOCTYPE r [<!ELEMENT r EMPTY>\
+                <!ATTLIST r id ID #IMPLIED><!ATTLIST r n NMTOKENS #IMPLIED>\
+                <!ATTLIST r c CDATA #IMPLIED>]>\
+                <r id=\"  x  y  \" n=\"  a\tb\nc  \" c=\"  keep  me  \"/>";
+    let doc = xml_read_memory(src, None, None, default_parse_options()).unwrap();
+    let out = String::from_utf8(xml_save_doc(&doc, 0)).unwrap();
+    assert!(out.contains("id=\"x y\""), "ID not normalized:\n{out}");
+    assert!(out.contains("n=\"a b c\""), "NMTOKENS not normalized:\n{out}");
+    // CDATA is left exactly as the parser produced it.
+    assert!(out.contains("c=\"  keep  me  \""), "CDATA was normalized:\n{out}");
+}

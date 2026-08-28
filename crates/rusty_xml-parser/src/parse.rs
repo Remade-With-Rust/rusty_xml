@@ -384,6 +384,7 @@ pub fn xml_parse_chunk(
     let total = ctxt.consumed + ctxt.buf.len();
     let mut doc = p.suspend(open, true).doc;
     apply_dtd_defaults(&mut doc, total, ctxt.options)?;
+    normalize_tokenized_attrs(&mut doc);
     ctxt.buf = Vec::new();
     ctxt.buf.shrink_to_fit();
     ctxt.last_error = None;
@@ -2325,6 +2326,7 @@ fn parse_utf8(
     match p.parse_document() {
         Ok(()) => {
             apply_dtd_defaults(&mut p.doc, buffer.len(), options)?;
+            normalize_tokenized_attrs(&mut p.doc);
             if p.doc.encoding.is_none() {
                 if let Some(n) = enc_name {
                     if !n.eq_ignore_ascii_case("UTF-8") && !n.eq_ignore_ascii_case("US-ASCII") {
@@ -2503,4 +2505,55 @@ fn has_bare_ampersand(s: &str) -> bool {
         }
     }
     false
+}
+
+/// Attribute-value normalization for the tokenized types (XML 1.0 3.3.3).
+///
+/// A value whose declared type is anything but CDATA has its leading and
+/// trailing space discarded and its internal runs collapsed to one space each.
+/// We did none of it, so `id="  x  y  "` stayed `  x  y  ` where C reports
+/// `x y` -- a different value for the same document, on any document with a
+/// DTD that declares a non-CDATA attribute.
+///
+/// Not gated on XML_PARSE_DTDATTR: this is normalization, not defaulting, and
+/// libxml2 does it whether or not you ask for defaults.
+fn normalize_tokenized_attrs(doc: &mut XmlDoc) {
+    let Some(dtd) = doc.dtd.as_ref() else { return };
+    // The common case is a DTD with no tokenized attribute at all.
+    if !dtd.attributes.values().any(|a| a.att_type != "CDATA") {
+        return;
+    }
+    let tokenized: std::collections::HashSet<(String, String)> = dtd
+        .attributes
+        .iter()
+        .filter(|(_, a)| a.att_type != "CDATA")
+        .map(|((e, a), _)| (e.clone(), a.clone()))
+        .collect();
+
+    let mut stack = vec![NodeId::DOCUMENT];
+    let mut edits: Vec<(NodeId, String)> = Vec::new();
+    while let Some(id) = stack.pop() {
+        let mut c = doc.first_child(id);
+        while let Some(x) = c {
+            if doc.kind(x) == NodeKind::Element {
+                let elem = doc.qname(x);
+                let mut a = doc.first_attr(x);
+                while let Some(at) = a {
+                    if tokenized.contains(&(elem.clone(), doc.qname(at))) {
+                        let v = doc.content(at);
+                        let norm = v.split_ascii_whitespace().collect::<Vec<_>>().join(" ");
+                        if norm != v {
+                            edits.push((at, norm));
+                        }
+                    }
+                    a = doc.next_sibling(at);
+                }
+                stack.push(x);
+            }
+            c = doc.next_sibling(x);
+        }
+    }
+    for (at, v) in edits {
+        doc.node_mut(at).content = v;
+    }
 }

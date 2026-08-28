@@ -1,5 +1,6 @@
 //! Canonical XML 1.0 / exclusive C14N. Byte-identity vs `xmllint --c14n`.
 
+use std::rc::Rc;
 use rusty_xml_tree::{NodeId, NodeKind, XmlDoc};
 use std::cmp::Ordering;
 
@@ -18,7 +19,7 @@ pub fn xml_c14n_doc_dump_memory(
     with_comments: bool,
 ) -> Result<Vec<u8>, String> {
     let mut out = String::new();
-    emit_node(doc, NodeId::DOCUMENT, exclusive, with_comments, &[], &[], &mut out, 0)?;
+    emit_node(doc, NodeId::DOCUMENT, exclusive, with_comments, &[], &[], &mut out)?;
     Ok(out.into_bytes())
 }
 
@@ -32,18 +33,23 @@ pub fn xml_exc_c14n_1_0(doc: &XmlDoc) -> Result<Vec<u8>, String> {
     xml_c14n_doc_dump_memory(doc, true, false)
 }
 
-/// Nesting limit for canonicalization.
+/// One unit of canonicalization work, replacing recursion into children.
 ///
-/// `emit_node` recurses into children, carrying the inherited namespace
-/// rendering with it, so depth costs stack: about 500 bytes a level, and a
-/// 2000-deep document ABORTED THE PROCESS while being canonicalized even though
-/// the parser accepts 5000. A signature path must not be a crash path.
+/// This used to recurse, carrying the inherited namespace rendering down with
+/// it, so depth cost stack: a 2000-deep document ABORTED THE PROCESS while
+/// being canonicalized, inside a parser limit of 5000. It was bounded at 400
+/// as a stopgap; the bound is gone now because the traversal is.
 ///
-/// 400 is far beyond signed XML, which is shallow in practice. The real fix is
-/// to drive this from an explicit stack the way the parser and the writer now
-/// are; a constant is a bound, not a substitute, and this one is recorded as
-/// such.
-const MAX_C14N_DEPTH: u32 = 400;
+/// The inherited set is shared by `Rc` rather than cloned per child, which is
+/// what made the recursive form expensive in the first place.
+enum Step {
+    /// Emit this element's start tag, then its children and end tag.
+    Open(NodeId, Rc<Vec<(String, String)>>),
+    /// A leaf: text, CDATA, a PI or a comment.
+    Inline(NodeId),
+    /// Emit the end tag of an element whose children are done.
+    Close(String),
+}
 
 fn emit_node(
     doc: &XmlDoc,
@@ -53,13 +59,7 @@ fn emit_node(
     vis_prefixes: &[&str],
     rendered: &[(String, String)],
     out: &mut String,
-    depth: u32,
 ) -> Result<(), String> {
-    if depth > MAX_C14N_DEPTH {
-        return Err(format!(
-            "document nested deeper than {MAX_C14N_DEPTH} for canonicalization"
-        ));
-    }
     match doc.kind(id) {
         NodeKind::Document | NodeKind::HtmlDocument => {
             let mut kids = Vec::new();
@@ -75,7 +75,7 @@ fn emit_node(
                 match doc.kind(*kid) {
                     NodeKind::Element => {
                         before_element = false;
-                        emit_node(doc, *kid, exclusive, with_comments, vis_prefixes, rendered, out, depth + 1)?;
+                        emit_node(doc, *kid, exclusive, with_comments, vis_prefixes, rendered, out)?;
                         after_element = true;
                     }
                     NodeKind::Pi => {
@@ -103,7 +103,7 @@ fn emit_node(
             }
         }
         NodeKind::Element => {
-            emit_element(doc, id, exclusive, with_comments, vis_prefixes, rendered, out, depth)?
+            emit_element(doc, id, exclusive, with_comments, vis_prefixes, rendered, out)?
         }
         NodeKind::Text => out.push_str(&escape_text(doc.content(id))),
         NodeKind::CData => out.push_str(&escape_text(doc.content(id))),
@@ -139,61 +139,97 @@ fn emit_element(
     vis_prefixes: &[&str],
     rendered: &[(String, String)],
     out: &mut String,
-    depth: u32,
 ) -> Result<(), String> {
-    let qn = qname(doc.prefix(id), doc.name(id));
-    out.push('<');
-    out.push_str(&qn);
+    let mut stack: Vec<Step> = vec![Step::Open(id, Rc::new(rendered.to_vec()))];
+    while let Some(step) = stack.pop() {
+        let (id, rendered) = match step {
+            Step::Close(qn) => {
+                out.push_str("</");
+                out.push_str(&qn);
+                out.push('>');
+                continue;
+            }
+            // Text, CDATA, PIs and comments have no children, so they never
+            // needed a frame; emit them where they stand.
+            Step::Inline(id) => {
+                match doc.kind(id) {
+                    NodeKind::Text | NodeKind::CData => {
+                        out.push_str(&escape_text(doc.content(id)))
+                    }
+                    NodeKind::Pi => emit_pi(doc, id, out),
+                    NodeKind::Comment if with_comments => emit_comment(doc, id, out),
+                    _ => {}
+                }
+                continue;
+            }
+            Step::Open(id, rendered) => (id, rendered),
+        };
 
-    let mut ns_attrs = namespaces_to_emit(doc, id, exclusive, vis_prefixes, rendered);
-    ns_attrs.sort_by(|a, b| a.0.cmp(&b.0));
-    for (pre, href) in &ns_attrs {
-        out.push(' ');
-        if pre.is_empty() {
-            out.push_str("xmlns");
-        } else {
-            out.push_str("xmlns:");
-            out.push_str(pre);
+        let qn = qname(doc.prefix(id), doc.name(id));
+        out.push('<');
+        out.push_str(&qn);
+
+        let mut ns_attrs = namespaces_to_emit(doc, id, exclusive, vis_prefixes, &rendered);
+        ns_attrs.sort_by(|a, b| a.0.cmp(&b.0));
+        for (pre, href) in &ns_attrs {
+            out.push(' ');
+            if pre.is_empty() {
+                out.push_str("xmlns");
+            } else {
+                out.push_str("xmlns:");
+                out.push_str(pre);
+            }
+            out.push_str("=\"");
+            out.push_str(&escape_attr(href));
+            out.push('"');
         }
-        out.push_str("=\"");
-        out.push_str(&escape_attr(href));
-        out.push('"');
-    }
 
-    let mut child_rendered: Vec<(String, String)> = rendered.to_vec();
-    for (pre, href) in &ns_attrs {
-        child_rendered.retain(|(p, _)| p != pre);
-        child_rendered.push((pre.clone(), href.clone()));
-    }
+        // Every child of this element shares one inherited set, so it is
+        // built once and shared by pointer rather than cloned per child.
+        let child_rendered = if ns_attrs.is_empty() {
+            Rc::clone(&rendered)
+        } else {
+            let mut v: Vec<(String, String)> = rendered.as_ref().clone();
+            for (pre, href) in &ns_attrs {
+                v.retain(|(p, _)| p != pre);
+                v.push((pre.clone(), href.clone()));
+            }
+            Rc::new(v)
+        };
 
-    let mut attrs: Vec<(String, String, String)> = Vec::new();
-    let mut a = doc.first_attr(id);
-    while let Some(x) = a {
-        let ns = doc.ns_uri(x).unwrap_or("").to_string();
-        let local = doc.name(x).to_string();
-        let qn = doc.qname(x);
-        attrs.push((ns, qn, doc.content(x).to_string()));
-        let _ = local;
-        a = doc.next_sibling(x);
-    }
-    attrs.sort_by(|a, b| cmp_attr(&a.0, &a.1, &b.0, &b.1));
-    for (_ns, name, val) in attrs {
-        out.push(' ');
-        out.push_str(&name);
-        out.push_str("=\"");
-        out.push_str(&escape_attr(&val));
-        out.push('"');
-    }
+        let mut attrs: Vec<(String, String, String)> = Vec::new();
+        let mut a = doc.first_attr(id);
+        while let Some(x) = a {
+            let ns = doc.ns_uri(x).unwrap_or("").to_string();
+            attrs.push((ns, doc.qname(x), doc.content(x).to_string()));
+            a = doc.next_sibling(x);
+        }
+        attrs.sort_by(|a, b| cmp_attr(&a.0, &a.1, &b.0, &b.1));
+        for (_ns, name, val) in attrs {
+            out.push(' ');
+            out.push_str(&name);
+            out.push_str("=\"");
+            out.push_str(&escape_attr(&val));
+            out.push('"');
+        }
+        out.push('>');
 
-    out.push('>');
-    let mut c = doc.first_child(id);
-    while let Some(x) = c {
-        emit_node(doc, x, exclusive, with_comments, vis_prefixes, &child_rendered, out, depth + 1)?;
-        c = doc.next_sibling(x);
+        // Pushed in reverse so they pop in document order.
+        stack.push(Step::Close(qn));
+        let mut kids: Vec<NodeId> = Vec::new();
+        let mut c = doc.first_child(id);
+        while let Some(x) = c {
+            kids.push(x);
+            c = doc.next_sibling(x);
+        }
+        for x in kids.into_iter().rev() {
+            if doc.kind(x) == NodeKind::Element {
+                stack.push(Step::Open(x, Rc::clone(&child_rendered)));
+            } else {
+                stack.push(Step::Inline(x));
+            }
+        }
     }
-    out.push_str("</");
-    out.push_str(&qn);
-    out.push('>');
     Ok(())
 }
 

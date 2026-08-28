@@ -1219,9 +1219,9 @@ fn deep_tree_never_aborts_on_any_path() {
     let doc = xml_read_memory(&d, None, None, default_parse_options()).expect("parses");
     assert!(!xml_save_doc(&doc, 0).is_empty());
     assert!(!xml_save_doc(&doc, 1).is_empty(), "--format must not overflow either");
-    // c14n is bounded rather than iterative: it must ERROR, not abort.
-    assert!(rusty_xml::xml_c14n_doc_dump_memory(&doc, false, true).is_err());
-    assert!(rusty_xml::xml_c14n_doc_dump_memory(&doc, true, true).is_err());
+    // Canonicalization is iterative too now, so it simply works at depth.
+    assert!(!rusty_xml::xml_c14n_doc_dump_memory(&doc, false, true).unwrap().is_empty());
+    assert!(!rusty_xml::xml_c14n_doc_dump_memory(&doc, true, true).unwrap().is_empty());
     drop(doc); // recursive Drop would land here
 
     // HTML has no depth limit of its own; saving it must still be safe.
@@ -1230,21 +1230,30 @@ fn deep_tree_never_aborts_on_any_path() {
     assert!(!xml_save_doc(&hdoc, 0).is_empty());
 }
 
-/// Canonicalization is the XML-DSig path, so the bound must be a clean refusal
-/// with a real message -- and must not move the boundary for ordinary
-/// documents, which are shallow.
+/// Canonicalization is the XML-DSig path, so depth must not be a limit on it.
+///
+/// It recursed, carrying the inherited namespace rendering down with it, and a
+/// 2000-deep document ABORTED THE PROCESS while being canonicalized -- inside
+/// a parser limit of 5000. It was bounded at 400 as a stopgap. The traversal
+/// is driven by an explicit stack now, the inherited set shared by Rc rather
+/// than cloned per child, and the bound is gone.
 #[test]
-fn c14n_depth_bound_is_a_clean_refusal() {
+fn c14n_handles_any_depth_the_parser_accepts() {
     let deep = |n: usize| -> Vec<u8> {
         format!("<r>{}t{}</r>", "<a>".repeat(n), "</a>".repeat(n)).into_bytes()
     };
-    // 399 element levels: fine. 400: refused. Both modes, same boundary.
-    for exclusive in [false, true] {
-        let ok = xml_read_memory(&deep(398), None, None, default_parse_options()).unwrap();
-        assert!(rusty_xml::xml_c14n_doc_dump_memory(&ok, exclusive, true).is_ok());
-        let bad = xml_read_memory(&deep(399), None, None, default_parse_options()).unwrap();
-        let e = rusty_xml::xml_c14n_doc_dump_memory(&bad, exclusive, true).unwrap_err();
-        assert!(e.contains("nested deeper"), "unhelpful message: {e}");
+    for n in [1, 399, 400, 401, 4_000, 4_990] {
+        let doc = xml_read_memory(&deep(n), None, None, default_parse_options()).unwrap();
+        for exclusive in [false, true] {
+            let out = rusty_xml::xml_c14n_doc_dump_memory(&doc, exclusive, true)
+                .unwrap_or_else(|e| panic!("c14n failed at depth {n}: {e}"));
+            // n nested <a> plus the root, opened and closed.
+            assert_eq!(
+                String::from_utf8_lossy(&out).matches("<a>").count(),
+                n,
+                "lost elements at depth {n}"
+            );
+        }
     }
 }
 

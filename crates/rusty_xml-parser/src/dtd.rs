@@ -28,6 +28,7 @@ pub fn parse_dtd_subset(src: &str) -> Result<XmlDtd, XmlError> {
         dtd: &mut dtd,
     };
     p.parse_markup()?;
+    check_entity_graph(&dtd)?;
     Ok(dtd)
 }
 
@@ -999,4 +1000,88 @@ pub fn is_pubid_char(c: char) -> bool {
             '-' | '\'' | '(' | ')' | '+' | ',' | '.' | '/' | ':'
                 | '=' | '?' | ';' | '!' | '*' | '#' | '@' | '$' | '_' | '%'
         )
+}
+
+/// Well-formedness constraints on the entity graph, checked once the whole
+/// subset is parsed.
+///
+/// `decode_charrefs` keeps general entity references verbatim, because they are
+/// expanded at the point of use. Nothing then looked at them, so an entity
+/// value or an ATTLIST default could reference an entity that was never
+/// declared, or one declared NDATA (which may not be referenced at all), or
+/// itself by way of a cycle. All three were accepted silently, and the cycle
+/// only surfaced later as a depth-limit error pointing at the wrong entity.
+fn check_entity_graph(dtd: &XmlDtd) -> Result<(), XmlError> {
+    const PREDEFINED: &[&str] = &["lt", "gt", "amp", "apos", "quot"];
+    let err = |m: String| XmlError::new(crate::error::XML_ERR_UNDECLARED_ENTITY, m, 0, 0);
+
+    // Every reference in a literal must name a declared, parsed entity.
+    let mut refs: std::collections::HashMap<&str, Vec<String>> = Default::default();
+    let literals = dtd
+        .entities
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .chain(
+            dtd.attributes
+                .iter()
+                .filter_map(|((_, a), d)| d.default_value.as_deref().map(|v| (a.as_str(), v))),
+        );
+    for (owner, text) in literals {
+        for name in entity_refs_in(text) {
+            if PREDEFINED.contains(&name.as_str()) {
+                continue;
+            }
+            if dtd.unparsed_entities.contains(&name) {
+                return Err(err(format!("Entity reference to unparsed entity {name}")));
+            }
+            if !dtd.entities.contains_key(&name) {
+                return Err(err(format!("Entity '{name}' not defined")));
+            }
+            refs.entry(owner).or_default().push(name);
+        }
+    }
+
+    // A cycle in the reference graph is a well-formedness error, not something
+    // to discover by running out of depth.
+    for start in dtd.entities.keys() {
+        let mut seen = std::collections::HashSet::new();
+        let mut stack = vec![start.as_str()];
+        while let Some(cur) = stack.pop() {
+            if !seen.insert(cur) {
+                continue;
+            }
+            for next in refs.get(cur).into_iter().flatten() {
+                if next == start {
+                    return Err(err("Detected an entity reference loop".into()));
+                }
+                stack.push(next.as_str());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The general entity references in a literal, as `&name;` occurrences.
+fn entity_refs_in(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut it = text.chars().peekable();
+    while let Some(c) = it.next() {
+        if c != '&' || it.peek() == Some(&'#') {
+            continue;
+        }
+        let mut name = String::new();
+        while let Some(&d) = it.peek() {
+            if crate::chvalid::xml_is_name_char(d as u32, false) {
+                name.push(d);
+                it.next();
+            } else {
+                break;
+            }
+        }
+        if !name.is_empty() && it.peek() == Some(&';') {
+            it.next();
+            out.push(name);
+        }
+    }
+    out
 }

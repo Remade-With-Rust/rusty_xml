@@ -383,7 +383,7 @@ pub fn xml_parse_chunk(
     }
     let total = ctxt.consumed + ctxt.buf.len();
     let mut doc = p.suspend(open, true).doc;
-    apply_dtd_defaults(&mut doc, total)?;
+    apply_dtd_defaults(&mut doc, total, ctxt.options)?;
     ctxt.buf = Vec::new();
     ctxt.buf.shrink_to_fit();
     ctxt.last_error = None;
@@ -2085,7 +2085,7 @@ fn parse_utf8(
     };
     match p.parse_document() {
         Ok(()) => {
-            apply_dtd_defaults(&mut p.doc, buffer.len())?;
+            apply_dtd_defaults(&mut p.doc, buffer.len(), options)?;
             if p.doc.encoding.is_none() {
                 if let Some(n) = enc_name {
                     if !n.eq_ignore_ascii_case("UTF-8") && !n.eq_ignore_ascii_case("US-ASCII") {
@@ -2110,7 +2110,19 @@ fn parse_utf8(
     }
 }
 
-fn apply_dtd_defaults(doc: &mut XmlDoc, input_len: usize) -> Result<(), XmlError> {
+fn apply_dtd_defaults(
+    doc: &mut XmlDoc,
+    input_len: usize,
+    options: i32,
+) -> Result<(), XmlError> {
+    // Completing attributes from ATTLIST defaults is opt-in, as it is in C:
+    // libxml2 does it for XML_PARSE_DTDATTR (xmllint --dtdattr) and not
+    // otherwise -- not even for --valid. We did it unconditionally, so every
+    // document with an ATTLIST default came back with attributes libxml2 would
+    // not have added, which is a visible difference in the serialized output.
+    if (options & XML_PARSE_DTDATTR) == 0 {
+        return Ok(());
+    }
     // The common cases -- no DTD, or a DTD carrying no ATTLIST default -- cost
     // nothing now. Testing before the clone matters: cloning the DTD copies
     // every entity and declaration in it.

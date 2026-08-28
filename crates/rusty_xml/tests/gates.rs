@@ -425,7 +425,7 @@ fn m5_c14n_oracle_example1() {
         return;
     }
     let xml = std::fs::read(&p).unwrap();
-    let doc = xml_read_memory(&xml, None, None, default_parse_options());
+    let doc = xml_read_memory(&xml, None, None, default_parse_options() | rusty_xml::XML_PARSE_DTDATTR);
     let Ok(doc) = doc else { return };
     let ours = rusty_xml::xml_c14n_1_0(&doc).unwrap();
     let out = Command::new(oracle)
@@ -441,7 +441,7 @@ fn m5_xinclude() {
         br#"<r xmlns:xi="http://www.w3.org/2001/XInclude"><xi:include href="frag.xml"/></r>"#,
         None,
         None,
-        default_parse_options(),
+        default_parse_options() | rusty_xml::XML_PARSE_DTDATTR,
     )
     .unwrap();
     rusty_xml::xml_xinclude_process(&mut doc, |uri| {
@@ -571,7 +571,7 @@ fn m5_c14n_examples() {
             continue;
         }
         let xml = std::fs::read(&p).unwrap();
-        let Ok(doc) = xml_read_memory(&xml, None, None, default_parse_options()) else {
+        let Ok(doc) = xml_read_memory(&xml, None, None, default_parse_options() | rusty_xml::XML_PARSE_DTDATTR) else {
             continue;
         };
         let ours = rusty_xml::xml_c14n_doc_dump_memory(&doc, false, true).unwrap();
@@ -591,7 +591,7 @@ fn m5_exc_c14n_oracle() {
         return;
     }
     let xml = std::fs::read(&p).unwrap();
-    let Ok(doc) = xml_read_memory(&xml, None, None, default_parse_options()) else {
+    let Ok(doc) = xml_read_memory(&xml, None, None, default_parse_options() | rusty_xml::XML_PARSE_DTDATTR) else {
         return;
     };
     let ours = rusty_xml::xml_c14n_doc_dump_memory(&doc, true, true).unwrap();
@@ -669,7 +669,10 @@ fn xml_entry_points_do_not_panic_on_malformed_input() {
 /// rejecting a real DTD-heavy document, so both directions are pinned here.
 #[test]
 fn attlist_default_amplification_is_bounded() {
-    let opts = default_parse_options();
+    // Defaulting is what amplifies, and defaulting is opt-in (XML_PARSE_DTDATTR)
+    // exactly as it is in libxml2 -- a plain parse adds no attributes at all, so
+    // the bound only has anything to do when the flag asks for it.
+    let opts = default_parse_options() | rusty_xml::XML_PARSE_DTDATTR;
     // abusive: ~30 defaulted attributes per input byte
     let decls: String = (0..200)
         .map(|i| format!("<!ATTLIST e a{i} CDATA \"d\">\n"))
@@ -1645,4 +1648,68 @@ fn indentation_is_capped_like_c() {
         .max()
         .unwrap();
     assert_eq!(deepest, 60, "indent should cap at 60 columns, got {deepest}");
+}
+
+/// Completing attributes from ATTLIST defaults is opt-in, as it is in C.
+///
+/// We did it on every parse. libxml2 does it for XML_PARSE_DTDATTR -- xmllint's
+/// --dtdattr -- and not otherwise, not even for --valid. So any document with
+/// an ATTLIST default came back carrying attributes libxml2 would not have
+/// added, and serialized differently from C for that reason alone.
+#[test]
+fn attlist_defaults_are_opt_in_like_c() {
+    let src = b"<!DOCTYPE r [<!ELEMENT e ANY><!ATTLIST e k CDATA \"dflt\">]><r><e/></r>";
+
+    let plain = xml_read_memory(src, None, None, default_parse_options()).unwrap();
+    let out = String::from_utf8(xml_save_doc(&plain, 0)).unwrap();
+    // The serialized DOCTYPE carries the word too, so look at the element.
+    assert!(out.contains("<e/>"), "a plain parse must not add defaults:\n{out}");
+
+    let with = xml_read_memory(
+        src,
+        None,
+        None,
+        default_parse_options() | rusty_xml::XML_PARSE_DTDATTR,
+    )
+    .unwrap();
+    let out = String::from_utf8(xml_save_doc(&with, 0)).unwrap();
+    assert!(out.contains("k=\"dflt\""), "DTDATTR must add them:\n{out}");
+
+    // Validation does NOT imply defaulting -- C is the same.
+    let valid = xml_read_memory(
+        src,
+        None,
+        None,
+        default_parse_options() | rusty_xml::XML_PARSE_DTDVALID,
+    )
+    .unwrap();
+    let out = String::from_utf8(xml_save_doc(&valid, 0)).unwrap();
+    assert!(out.contains("<e/>"), "--valid must not add defaults:\n{out}");
+}
+
+/// The entity graph in a DTD has well-formedness constraints of its own.
+///
+/// General entity references are kept verbatim in entity values and attribute
+/// defaults, because they are expanded at the point of use. Nothing then looked
+/// at them, so a literal could reference an entity that was never declared, or
+/// one declared NDATA (which may not be referenced at all), or itself through a
+/// cycle. A cycle only surfaced later as a depth-limit error naming the wrong
+/// entity.
+#[test]
+fn the_entity_graph_is_checked() {
+    let bad = [
+        ("undeclared in a default", "<!DOCTYPE d [<!ATTLIST d a CDATA \"&foo;\">]><d/>"),
+        ("unparsed entity referenced", "<!DOCTYPE d [<!NOTATION n SYSTEM \"s\"><!ENTITY e SYSTEM \"x\" NDATA n><!ATTLIST d a CDATA \"&e;\">]><d/>"),
+        ("direct cycle", "<!DOCTYPE d [<!ENTITY e \"&e;\">]><d/>"),
+        ("indirect cycle", "<!DOCTYPE d [<!ENTITY a \"&b;\"><!ENTITY b \"&c;\"><!ENTITY c \"&a;\">]><d/>"),
+    ];
+    for (what, src) in bad {
+        assert!(
+            xml_read_memory(src.as_bytes(), None, None, default_parse_options()).is_err(),
+            "accepted a broken entity graph: {what}"
+        );
+    }
+    // A chain that terminates is fine, and so are the predefined entities.
+    let good = "<!DOCTYPE d [<!ENTITY a \"x&b;\"><!ENTITY b \"y&amp;z\">]><d>&a;</d>";
+    assert!(xml_read_memory(good.as_bytes(), None, None, default_parse_options()).is_ok());
 }

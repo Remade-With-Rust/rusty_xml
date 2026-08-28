@@ -116,6 +116,10 @@ fn main() {
         } else {
             0
         }
+        // Canonicalization is defined over the document AFTER attribute
+        // defaulting, so the c14n path needs the DTD defaults completed even
+        // though a plain parse does not. xmllint does the same.
+        | if c14n || exc_c14n { rusty_xml::XML_PARSE_DTDATTR } else { 0 }
         // --format implies noblanks, as it does in xmllint:
         //     noblanks++; format = 1; xmlKeepBlanksDefault(0);
         // The writer turns formatting OFF for any element with a text child,

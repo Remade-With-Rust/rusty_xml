@@ -32,6 +32,44 @@ pub fn xml_validate_dtd(doc: &XmlDoc, dtd: &XmlDtd) -> Result<(), String> {
             return Err(format!("root element {} does not match DOCTYPE {n}", doc.name(root)));
         }
     }
+    // Constraints on the DECLARATIONS themselves, before any instance of them
+    // is looked at. None of these was checked, so a declaration could promise
+    // something no document could satisfy.
+    for ((elem, aname), ad) in &dtd.attributes {
+        // "No Notation on Empty Element": an element declared EMPTY cannot
+        // carry a NOTATION attribute, since it can never have content for the
+        // notation to describe.
+        if ad.att_type == "NOTATION" && matches!(dtd.elements.get(elem), Some(ElementDecl::Empty)) {
+            return Err(format!(
+                "NOTATION attribute type declared for EMPTY element {elem}"
+            ));
+        }
+        // "Attribute Default Value Syntactically Correct": the default has to
+        // satisfy the type it is declared with.
+        let Some(def) = ad.default_value.as_deref() else {
+            continue;
+        };
+        let ok = match ad.att_type.as_str() {
+            "ID" | "IDREF" | "ENTITY" => is_name(def),
+            "IDREFS" | "ENTITIES" => {
+                def.split_ascii_whitespace().next().is_some()
+                    && def.split_ascii_whitespace().all(is_name)
+            }
+            "NMTOKEN" => is_nmtoken(def),
+            "NMTOKENS" => {
+                def.split_ascii_whitespace().next().is_some()
+                    && def.split_ascii_whitespace().all(is_nmtoken)
+            }
+            _ => true,
+        };
+        if !ok {
+            return Err(format!("invalid default value for attribute {aname} of {elem}"));
+        }
+        if !ad.enumerated.is_empty() && !ad.enumerated.iter().any(|e| e == def) {
+            return Err(format!("invalid default value for attribute {aname} of {elem}"));
+        }
+    }
+
     // Walk iteratively: validation used to recurse per element, which is the
     // same stack cliff the parser, the writer and C14N all had.
     let mut ids: std::collections::HashMap<String, ()> = Default::default();

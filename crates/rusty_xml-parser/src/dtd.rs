@@ -11,7 +11,7 @@ pub fn xml_parse_dtd(
     system_id: Option<&str>,
 ) -> Result<XmlDtd, XmlError> {
     let text = String::from_utf8_lossy(buffer);
-    let mut dtd = parse_dtd_subset(&text)?;
+    let mut dtd = parse_external_subset(&text)?;
     dtd.public_id = public_id.map(str::to_string);
     dtd.system_id = system_id.map(str::to_string);
     Ok(dtd)
@@ -19,26 +19,37 @@ pub fn xml_parse_dtd(
 
 /// Parse a DTD internal/external subset into declarations.
 pub fn parse_dtd_subset(src: &str) -> Result<XmlDtd, XmlError> {
-    let expanded = expand_pe(src)?;
+    parse_subset(src, true)
+}
+
+/// Parse an external subset, where conditional sections are legal and a
+/// parameter entity may supply part of a declaration.
+pub fn parse_external_subset(src: &str) -> Result<XmlDtd, XmlError> {
+    parse_subset(src, false)
+}
+
+fn parse_subset(src: &str, internal: bool) -> Result<XmlDtd, XmlError> {
+    let expanded = expand_pe(src, internal)?;
     let mut dtd = XmlDtd::default();
     dtd.int_subset = Some(src.to_string());
     let mut p = DtdParser {
         src: expanded.as_str(),
         pos: 0,
         dtd: &mut dtd,
+        internal,
     };
     p.parse_markup()?;
     check_entity_graph(&dtd)?;
     Ok(dtd)
 }
 
-fn expand_pe(src: &str) -> Result<String, XmlError> {
+fn expand_pe(src: &str, internal: bool) -> Result<String, XmlError> {
     // Multi-pass PE expansion so `%percent;` can invent new PE names.
     let mut cur = src.to_string();
     for _ in 0..16 {
         let mut pes: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         harvest_pe(&cur, &mut pes);
-        let next = subst_pe(&cur, &pes)?;
+        let next = subst_pe(&cur, &pes, internal)?;
         if next == cur {
             return Ok(cur);
         }
@@ -93,10 +104,20 @@ fn harvest_pe(src: &str, pes: &mut std::collections::HashMap<String, String>) {
 fn subst_pe(
     src: &str,
     pes: &std::collections::HashMap<String, String>,
+    internal: bool,
 ) -> Result<String, XmlError> {
     let mut out = String::new();
     let mut chars = src.chars().peekable();
     let mut in_comment = false;
+    // In the internal subset a parameter entity reference may only occur where
+    // a markup declaration can occur -- never inside one. `<!ELEMENT %pe;` and
+    // `<!ENTITY foo "%e;">` were both expanded happily.
+    let mut in_decl = false;
+    // A PE reference is recognized inside an EntityValue but NOT inside an
+    // attribute default, where `%` is an ordinary character. `<!ATTLIST d a
+    // CDATA "%e;">` is a valid document and must stay one.
+    let mut decl_is_entity = false;
+    let mut in_quote: Option<char> = None;
     while let Some(c) = chars.next() {
         if in_comment {
             out.push(c);
@@ -109,7 +130,22 @@ fn subst_pe(
             }
             continue;
         }
+        if c == '>' && in_decl {
+            in_decl = false;
+            out.push(c);
+            continue;
+        }
+        if in_decl {
+            match in_quote {
+                Some(q) if c == q => in_quote = None,
+                None if c == '"' || c == '\'' => in_quote = Some(c),
+                _ => {}
+            }
+        }
         if c == '<' && chars.peek() == Some(&'!') {
+            in_decl = true;
+            decl_is_entity = false;
+            in_quote = None;
             out.push(c);
             out.push(chars.next().unwrap());
             if chars.peek() == Some(&'-') {
@@ -117,7 +153,13 @@ fn subst_pe(
                 if chars.peek() == Some(&'-') {
                     out.push(chars.next().unwrap());
                     in_comment = true;
+                    in_decl = false;
                 }
+            } else {
+                // Which declaration this is decides whether a `%` inside its
+                // literals is a reference at all.
+                let rest: String = chars.clone().take(6).collect();
+                decl_is_entity = rest.starts_with("ENTITY");
             }
             continue;
         }
@@ -139,6 +181,19 @@ fn subst_pe(
                 }
                 out.push('%');
                 continue;
+            }
+            // Inside an attribute default the `%` is literal; leave it alone.
+            if in_decl && in_quote.is_some() && !decl_is_entity {
+                out.push('%');
+                continue;
+            }
+            if internal && in_decl {
+                return Err(XmlError::new(
+                    crate::error::XML_ERR_ENTITYREF_NO_NAME,
+                    "PEReferences forbidden in internal subset",
+                    0,
+                    0,
+                ));
             }
             let mut name = String::new();
             let mut terminated = false;
@@ -252,6 +307,10 @@ struct DtdParser<'a> {
     src: &'a str,
     pos: usize,
     dtd: &'a mut XmlDtd,
+    /// The internal subset carries rules the external one does not: no
+    /// conditional sections, and a parameter entity may not supply part of a
+    /// declaration.
+    internal: bool,
 }
 
 impl<'a> DtdParser<'a> {
@@ -324,6 +383,10 @@ impl<'a> DtdParser<'a> {
             } else if self.rest().starts_with("<!NOTATION") {
                 self.parse_notation()?;
             } else if self.rest().starts_with("<![") {
+                // INCLUDE and IGNORE sections are external-subset only.
+                if self.internal {
+                    return Err(self.err("Content error in the internal subset"));
+                }
                 self.skip_cond()?;
             } else if self.rest().starts_with('<') {
                 self.skip_decl()?;
@@ -726,6 +789,11 @@ impl<'a> DtdParser<'a> {
             };
             self.skip_ws_and_comments()?;
             if self.rest().starts_with("NDATA") {
+                // A parameter entity is always parsed; NDATA is for unparsed
+                // general entities only.
+                if pe {
+                    return Err(self.err("xmlParseEntityDecl: entity not terminated"));
+                }
                 if !ws_before_ndata {
                     return Err(self.err("Space required before 'NDATA'"));
                 }

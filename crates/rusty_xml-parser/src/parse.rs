@@ -878,7 +878,13 @@ impl<'a> Parser<'a> {
                 if self.eof() {
                     return Err(self.err(XML_ERR_PI_NOT_FINISHED, "PI not finished"));
                 }
-                d.push(self.bump_char()?.unwrap());
+                let c = self.bump_char()?.unwrap();
+                // The character rule applies inside a PI too. A form feed in
+                // one was accepted; C stops at it.
+                if !xml_is_char(c as u32) {
+                    return Err(self.err(XML_ERR_INVALID_CHAR, "Invalid character in PI"));
+                }
+                d.push(c);
             }
             Some(d)
         } else {

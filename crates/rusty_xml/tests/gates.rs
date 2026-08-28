@@ -2091,3 +2091,91 @@ fn id_values_are_ncnames() {
     ).unwrap();
     rusty_xml::xml_validate_document(&d).expect("a plain NCName is fine");
 }
+
+
+/// A declared encoding that contradicts the byte-order mark is reported.
+///
+/// A UTF-16 file declaring `utf-8` decodes correctly from the mark, and we
+/// said nothing at all about the contradiction -- exactly the kind of thing
+/// that bites the next program along. libxml2 reports it and carries on, so we
+/// do too, and the message is on the document because the default SAX handler
+/// discards errors and a tree-parsing caller would never see it.
+#[test]
+fn a_lying_encoding_declaration_is_reported() {
+    // UTF-16BE with a BOM, declaring utf-8.
+    let text = "<?xml version='1.0' encoding='utf-8'?><x/>";
+    let mut bytes = vec![0xFE, 0xFF];
+    for c in text.encode_utf16() {
+        bytes.extend_from_slice(&c.to_be_bytes());
+    }
+    let doc = xml_read_memory(&bytes, None, None, default_parse_options())
+        .expect("must still parse -- the mark is authoritative");
+    assert!(
+        doc.warnings.iter().any(|w| w.contains("doesn't match auto-detected")),
+        "no mismatch reported: {:?}",
+        doc.warnings
+    );
+
+    // An honest declaration says nothing.
+    let plain = b"<?xml version='1.0' encoding='utf-8'?><x/>";
+    let doc = xml_read_memory(plain, None, None, default_parse_options()).unwrap();
+    assert!(doc.warnings.is_empty(), "false positive: {:?}", doc.warnings);
+}
+
+/// Namespace violations are reported, never fatal.
+///
+/// libxml2 parses the document and logs a namespace error, and its own
+/// conformance harness (`xmlconfTestNotNSWF` in runxmlconf.c) scores the
+/// namespace tests by requiring exactly that: the parse must SUCCEED and an
+/// error must have been reported. We were rejecting several of these, which
+/// both refused documents C reads and failed the tests it was meant to pass.
+///
+/// The messages land on the document because the default SAX handler discards
+/// errors and a tree-parsing caller would never see them.
+#[test]
+fn namespace_violations_are_reported_not_fatal() {
+    let opts = default_parse_options();
+    let reported = |src: &str| -> bool {
+        match xml_read_memory(src.as_bytes(), None, None, opts) {
+            Err(e) => panic!("must not be fatal: {src}\n{e}"),
+            Ok(d) => !d.namespace_errors.is_empty(),
+        }
+    };
+    for src in [
+        // Reserved prefixes and namespaces.
+        "<foo xmlns:xml=\"http://example.org/\"/>",
+        "<foo xmlns:a=\"http://www.w3.org/XML/1998/namespace\"/>",
+        "<foo xmlns:xmlns=\"http://example.org/\"/>",
+        "<foo xmlns:a=\"http://www.w3.org/2000/xmlns/\"/>",
+        "<foo xmlns=\"http://www.w3.org/XML/1998/namespace\"/>",
+        "<foo xmlns=\"http://www.w3.org/2000/xmlns/\"/>",
+        // Prefix undeclaring is XML 1.1 only.
+        "<foo xmlns:a=\"\"/>",
+        // Unbound prefixes, on an element and on an attribute.
+        "<foo><a:bar/></foo>",
+        "<foo a:attr=\"1\"/>",
+        // QNames that are not QNames.
+        "<foo><bar a:b:attr=\"1\"/></foo>",
+        "<foo: />",
+        "<:foo />",
+        "<foo xmlns:=\"http://example.org/\"/>",
+        // xmlns is not an element prefix.
+        "<xmlns:foo/>",
+        // Colons where a QName cannot go.
+        "<?a:b bogus?><foo/>",
+        "<!DOCTYPE foo [<!ELEMENT foo ANY><!ENTITY a:b \"x\">]><foo/>",
+        "<!DOCTYPE foo [<!ELEMENT foo ANY><!NOTATION a:b SYSTEM \"n\">]><foo/>",
+        // Two prefixes bound to one URI colliding after expansion.
+        "<foo xmlns:a=\"urn:x\" xmlns:b=\"urn:x\"><bar a:attr=\"1\" b:attr=\"2\"/></foo>",
+    ] {
+        assert!(reported(src), "no namespace error reported for: {src}");
+    }
+
+    // The SAME QName twice is a well-formedness error, not a namespace one,
+    // and stays fatal. libxml2 rejects it too.
+    assert!(xml_read_memory(b"<foo a=\"1\" a=\"2\"/>", None, None, opts).is_err());
+
+    // A well-formed namespaced document reports nothing.
+    let d = xml_read_memory(b"<r xmlns:p=\"urn:x\"><p:e p:a=\"1\"/></r>", None, None, opts).unwrap();
+    assert!(d.namespace_errors.is_empty(), "false positive: {:?}", d.namespace_errors);
+}

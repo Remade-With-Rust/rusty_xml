@@ -33,6 +33,9 @@ struct Case {
     /// parser against 4th-edition expectations. Not doing that counted 313
     /// inapplicable cases as failures -- for us AND for the oracle.
     edition: String,
+    /// Which recommendation the case is written against. libxml2's own runner
+    /// scores a namespace test differently from an XML one -- see `ours_ns`.
+    rec: String,
 }
 
 /// Collect every TEST element in a catalog, including nested TESTCASES.
@@ -91,6 +94,7 @@ fn collect(catalog: &Path, out: &mut Vec<Case>) {
                             version: attr("VERSION"),
                             entities: attr("ENTITIES"),
                             edition: attr("EDITION"),
+                            rec: attr("RECOMMENDATION"),
                         });
                     }
                 }
@@ -139,6 +143,47 @@ fn ours(bytes: &[u8], want_validation: bool, old10: bool) -> (bool, bool) {
     match xml_read_memory(bytes, None, None, opts) {
         Err(_) => (false, false),
         Ok(doc) => (true, rusty_xml::xml_validate_document(&doc).is_ok()),
+    }
+}
+
+/// A namespace not-well-formed case: the document must PARSE and a namespace
+/// error must have been reported.
+///
+/// This is `xmlconfTestNotNSWF` in libxml2's own runxmlconf.c, and it is a
+/// different test from the ordinary not-wf one:
+///
+/// ```text
+/// /* In case of Namespace errors, libxml2 will still parse the document
+///    but log a Namespace error. */
+/// doc = xmlCtxtReadFile(...);
+/// if (doc == NULL) fail;
+/// else if (error->code == XML_ERR_OK || error->domain != XML_FROM_NAMESPACE) fail;
+/// ```
+///
+/// Scoring these by "did the parse fail" marked both implementations wrong on
+/// all 51 of them.
+fn ours_ns(bytes: &[u8]) -> bool {
+    match xml_read_memory(bytes, None, None, default_parse_options()) {
+        Err(_) => false,
+        Ok(doc) => !doc.namespace_errors.is_empty(),
+    }
+}
+
+/// The same judgement for the oracle. xmllint exits zero for a namespace
+/// error, so the exit code cannot express it; the message can.
+fn oracle_ns(path: &Path) -> bool {
+    let out = std::process::Command::new("oracle/bin/xmllint.exe")
+        .arg("--noout")
+        .arg(path)
+        .output();
+    match out {
+        Ok(o) => {
+            if !o.status.success() {
+                return false;
+            }
+            String::from_utf8_lossy(&o.stderr).contains("namespace error")
+        }
+        Err(_) => false,
     }
 }
 
@@ -224,8 +269,14 @@ fn main() {
 
     for c in &cases {
         // XML 1.1 is a different language and we do not implement it. Counting
-        // those as failures would flatter nobody.
-        if c.version == "1.1" {
+        // those as failures would flatter nobody. libxml2's runner skips any
+        // case whose RECOMMENDATION it does not recognise, which is the same
+        // set plus the 1.1 namespace cases.
+        if c.version == "1.1"
+            || c.rec == "XML1.1"
+            || c.rec == "NS1.1"
+            || c.rec == "NS1.1-errata1e"
+        {
             skip_11 += 1;
             continue;
         }
@@ -250,8 +301,13 @@ fn main() {
         let validating = c.ty == "valid" || c.ty == "invalid";
         // Exactly what libxml2's runxmlconf.c does at the same point.
         let old10 = !c.edition.is_empty() && !c.edition.contains('5');
+        let is_ns = c.rec.starts_with("NS1.0");
         let (p, v) = ours(&bytes, validating, old10);
-        let ok = expected(&c.ty, p, v);
+        let ok = if is_ns && c.ty == "not-wf" {
+            ours_ns(&bytes)
+        } else {
+            expected(&c.ty, p, v)
+        };
         mine.entry(c.ty.clone()).or_default().add(ok);
         if !ok {
             failures.push(format!(
@@ -264,8 +320,12 @@ fn main() {
             ));
         }
         if use_oracle {
-            let (cp, cv) = oracle(&c.uri, validating, old10);
-            let c_ok = expected(&c.ty, cp, cv);
+            let c_ok = if is_ns && c.ty == "not-wf" {
+                oracle_ns(&c.uri)
+            } else {
+                let (cp, cv) = oracle(&c.uri, validating, old10);
+                expected(&c.ty, cp, cv)
+            };
             theirs.entry(c.ty.clone()).or_default().add(c_ok);
             if ok != c_ok {
                 disagree.push(format!(

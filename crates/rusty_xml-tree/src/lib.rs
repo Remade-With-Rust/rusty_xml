@@ -59,6 +59,9 @@ pub struct XmlDtd {
     /// Declared" from a well-formedness constraint into a validity one in that
     /// case: an unresolvable entity must not kill the parse.
     pub has_parameter_entity_refs: bool,
+    /// Namespace errors found while reading the subset -- a colon in an entity
+    /// or notation name. Merged into the document's list.
+    pub namespace_errors: Vec<String>,
     /// Element name → content model.
     pub elements: HashMap<String, ElementDecl>,
     /// Element types declared more than once. A map cannot represent that, and
@@ -171,6 +174,19 @@ pub struct XmlDoc {
     /// against an element-only content model is character data where none is
     /// allowed, and looking only at whether the text is blank cannot tell it
     /// from the indentation beside it.
+    /// Namespace errors reported while parsing.
+    ///
+    /// A namespace violation is never a well-formedness error: libxml2 parses
+    /// the document and logs one, and its own conformance harness scores the
+    /// namespace tests by looking for exactly that -- the document must parse
+    /// AND an error must have been reported. Rejecting instead would refuse
+    /// input C reads, so they are recorded here for the caller to inspect.
+    pub namespace_errors: Vec<String>,
+    /// Non-fatal problems worth telling the caller about -- currently a
+    /// declared encoding that contradicts the byte-order mark. The SAX error
+    /// channel carries these too, but the default handler discards them, so a
+    /// tree-parsing caller had no way to learn of one.
+    pub warnings: Vec<String>,
     pub reference_text: std::collections::HashSet<NodeId>,
     /// Elements whose content included an entity reference, including one that
     /// expanded to nothing. `<foo>&empty;</foo>` against EMPTY is content, and
@@ -210,6 +226,8 @@ impl XmlDoc {
             root: None,
             dtd: None,
             undeclared_entity_refs: Vec::new(),
+            namespace_errors: Vec::new(),
+            warnings: Vec::new(),
             reference_text: Default::default(),
             elements_with_entity_refs: Default::default(),
         }

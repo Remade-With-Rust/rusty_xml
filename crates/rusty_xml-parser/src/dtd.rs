@@ -812,6 +812,11 @@ impl<'a> DtdParser<'a> {
         if !self.require_ws() {
             return Err(self.err("Space required after the notation name"));
         }
+        if name.contains(':') {
+            self.dtd
+                .namespace_errors
+                .push(format!("colons are forbidden from notation names '{name}'"));
+        }
         self.dtd.notations.insert(name.clone());
         let public = if self.rest().starts_with("PUBLIC") {
             true
@@ -867,6 +872,13 @@ impl<'a> DtdParser<'a> {
         }
         // EntityDecl requires S between the name and the definition. Without
         // this, `<!ENTITY foo"some text">` was accepted.
+        // An entity name is an NCName -- the colon belongs to QNames. Not
+        // fatal, as C is not: it is a namespace error and gets reported.
+        if name.contains(':') {
+            self.dtd
+                .namespace_errors
+                .push(format!("colons are forbidden from entities names '{name}'"));
+        }
         if !self.require_ws() {
             return Err(self.err("Space required after the entity name"));
         }
@@ -1004,6 +1016,7 @@ pub fn merge_dtd(dst: &mut XmlDtd, src: XmlDtd) {
     dst.unparsed_entities.extend(src.unparsed_entities);
     dst.duplicate_elements.extend(src.duplicate_elements);
     dst.notations.extend(src.notations);
+    dst.namespace_errors.extend(src.namespace_errors);
     dst.ndata_notations.extend(src.ndata_notations);
     dst.has_parameter_entity_refs |= src.has_parameter_entity_refs;
     dst.parameter_entities.extend(src.parameter_entities);

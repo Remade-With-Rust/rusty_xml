@@ -553,6 +553,28 @@ struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
+    /// A name carrying a colon that does not form a QName is legal XML but a
+    /// namespace error, and C reports it as "Failed to parse QName".
+    fn check_qname(&mut self, name: &str) {
+        let mut it = name.split(':');
+        let a = it.next().unwrap_or("");
+        if let Some(b) = it.next() {
+            if it.next().is_some() || a.is_empty() || b.is_empty() {
+                let msg = format!("Failed to parse QName '{name}'");
+                self.ns_error(&msg);
+            }
+        }
+    }
+
+    /// Report a namespace error without failing the parse.
+    ///
+    /// Namespace violations are not well-formedness errors. C logs them and
+    /// carries on, and a caller that cares can read `doc.namespace_errors`.
+    fn ns_error(&mut self, msg: &str) {
+        self.sax.error(msg);
+        self.doc.namespace_errors.push(msg.to_string());
+    }
+
     fn err(&self, code: i32, msg: impl Into<String>) -> XmlError {
         XmlError::new(code, msg, self.line, self.col)
     }
@@ -882,9 +904,8 @@ impl<'a> Parser<'a> {
         // rejecting a document libxml2 accepts is a worse trade than the three
         // conformance cases it would win.
         if target.contains(':') {
-            self.sax
-                .warning(&format!("colons are forbidden from PI names '{target}'
-"));
+            let msg = format!("colons are forbidden from PI names '{target}'");
+            self.ns_error(&msg);
         }
         let data = if matches!(self.peek_byte(), Some(b) if b < 0x80 && crate::chvalid::xml_is_blank(b as u32)) {
             self.skip_s()?;
@@ -1556,6 +1577,8 @@ impl<'a> Parser<'a> {
         } else {
             rusty_xml_tree::XmlDtd::default()
         };
+        let subset_ns_errors = std::mem::take(&mut dtd.namespace_errors);
+        self.doc.namespace_errors.extend(subset_ns_errors);
         dtd.name = Some(name);
         dtd.public_id = public_id;
         dtd.system_id = system_id;
@@ -1582,6 +1605,11 @@ impl<'a> Parser<'a> {
         }
         self.expect_byte(b'<', XML_ERR_LT_REQUIRED, "'<' required")?;
         let qname = self.parse_name()?;
+        self.check_qname(&qname);
+        // `<xmlns:foo/>`: xmlns is reserved and is not an element prefix.
+        if qname.starts_with("xmlns:") {
+            self.ns_error("Elements must not have the prefix xmlns");
+        }
         let (prefix, local) = Self::split_qname(&qname).map_err(|mut e| {
             e.line = self.line;
             e.col = self.col;
@@ -1613,6 +1641,7 @@ impl<'a> Parser<'a> {
             self.expect_byte(b'=', XML_ERR_EQUAL_REQUIRED, "'=' required")?;
             self.skip_s()?;
             let (value, value_off) = self.parse_att_value()?;
+            self.check_qname(&an);
             let colon = match Self::split_qname(&an).map_err(|mut e| {
                 e.line = self.line;
                 e.col = self.col;
@@ -1638,6 +1667,24 @@ impl<'a> Parser<'a> {
         };
 
         let mut ns_frame: Vec<(Option<String>, String)> = Vec::new();
+        // A namespace declaration is an attribute, and if the DTD declares it
+        // as a tokenized type its value is normalized before it means
+        // anything. Namespace declarations never reach the attribute chain, so
+        // the post-parse normalization pass could not see them -- and two
+        // prefixes could bind to URIs that are equal only after normalization
+        // without ever being noticed as equal.
+        let normalize_ns = |p: &Parser, name: &str, value: &str| -> String {
+            let tokenized = p.doc.dtd.as_ref().is_some_and(|d| {
+                d.attributes
+                    .get(&(qname.to_string(), name.to_string()))
+                    .is_some_and(|a| a.att_type != "CDATA")
+            });
+            if tokenized {
+                value.split(' ').filter(|t| !t.is_empty()).collect::<Vec<_>>().join(" ")
+            } else {
+                value.to_string()
+            }
+        };
         for a in &raw_attrs {
             let (ap, al) = a.parts();
             if ap.is_none() && al == "xmlns" {
@@ -1645,7 +1692,14 @@ impl<'a> Parser<'a> {
                     let msg = format!("xmlns: URI {} is not absolute\n", a.value);
                     self.sax.warning(&msg);
                 }
-                ns_frame.push((None, a.value.clone()));
+                // The reserved namespaces may not be bound as the DEFAULT
+                // either. Only the prefixed form was being checked.
+                if a.value == XML_NS {
+                    self.ns_error("xml namespace URI cannot be the default namespace");
+                } else if a.value == XMLNS_NS {
+                    self.ns_error("xmlns namespace URI cannot be the default namespace");
+                }
+                ns_frame.push((None, normalize_ns(self, &a.qname, &a.value)));
             } else if ap == Some("xmlns") {
                 if !a.value.is_empty()
                     && !Self::uri_has_scheme(&a.value)
@@ -1654,41 +1708,32 @@ impl<'a> Parser<'a> {
                     let msg = format!("xmlns:{}: URI {} is not absolute\n", al, a.value);
                     self.sax.warning(&msg);
                 }
-                // Namespaces in XML 1.0 reserves `xml` and `xmlns` and forbids
-                // undeclaring a prefix. None of this was checked.
+                // Namespaces in XML 1.0 reserves `xml` and `xmlns` and
+                // forbids undeclaring a prefix. None of it is a
+                // WELL-FORMEDNESS error: libxml2 parses the document and logs
+                // a namespace error, and its own conformance harness scores
+                // these tests by requiring exactly that -- the parse must
+                // succeed AND an error must have been reported. Returning Err
+                // here refused documents C reads, and failed the tests it was
+                // meant to pass.
                 if al == "xml" {
                     if a.value != XML_NS {
-                        return Err(self.err(
-                            XML_NS_ERR_UNDEFINED_NAMESPACE,
-                            "xml namespace prefix mapped to wrong URI",
-                        ));
+                        self.ns_error("xml namespace prefix mapped to wrong URI");
                     }
                 } else if a.value == XML_NS {
-                    return Err(self.err(
-                        XML_NS_ERR_UNDEFINED_NAMESPACE,
-                        "xml namespace URI mapped to wrong prefix",
-                    ));
+                    self.ns_error("xml namespace URI mapped to wrong prefix");
                 }
                 if al == "xmlns" {
-                    return Err(self.err(
-                        XML_NS_ERR_UNDEFINED_NAMESPACE,
-                        "redefinition of the xmlns prefix is forbidden",
-                    ));
+                    self.ns_error("redefinition of the xmlns prefix is forbidden");
                 }
                 if a.value == XMLNS_NS {
-                    return Err(self.err(
-                        XML_NS_ERR_UNDEFINED_NAMESPACE,
-                        "reuse of the xmlns namespace name is forbidden",
-                    ));
+                    self.ns_error("reuse of the xmlns namespace name is forbidden");
                 }
                 // Prefix undeclaring (`xmlns:p=""`) is XML 1.1 only.
                 if a.value.is_empty() {
-                    return Err(self.err(
-                        XML_NS_ERR_UNDEFINED_NAMESPACE,
-                        "Empty XML namespace is not allowed",
-                    ));
+                    self.ns_error("Empty XML namespace is not allowed");
                 }
-                ns_frame.push((Some(al.to_string()), a.value.clone()));
+                ns_frame.push((Some(al.to_string()), normalize_ns(self, &a.qname, &a.value)));
             }
         }
         // The frame is pushed, not copied; the stack owns it and both later
@@ -1704,10 +1749,8 @@ impl<'a> Parser<'a> {
             // worse trade than any number of conformance cases. It also cost a
             // valid case outright: `<A.-:x/>` is a legal Name whose colon is
             // not a prefix at all.
-            self.sax.error(&format!(
-                "Namespace prefix {} is not defined",
-                prefix.unwrap_or_default()
-            ));
+            let msg = format!("Namespace prefix {} is not defined", prefix.unwrap_or_default());
+            self.ns_error(&msg);
         }
 
         let mut seen_keys: std::collections::HashSet<(Option<String>, String)> =
@@ -1743,11 +1786,16 @@ impl<'a> Parser<'a> {
             }
             let uri = if ap_owned.is_some() {
                 let u = self.lookup_ns(ap_owned.as_deref());
-                if u.is_none() && !self.recover {
-                    return Err(self.err(
-                        XML_NS_ERR_UNDEFINED_NAMESPACE,
-                        format!("Undefined namespace prefix {}", ap_owned.clone().unwrap()),
-                    ));
+                if u.is_none() {
+                    // Non-fatal, like the element case and like C: an unbound
+                    // prefix is a namespace error, and rejecting refused
+                    // documents libxml2 reads.
+                    let msg = format!(
+                        "Namespace prefix {} for {} on ... is not defined",
+                        ap_owned.clone().unwrap_or_default(),
+                        al_owned
+                    );
+                    self.ns_error(&msg);
                 }
                 u
             } else {
@@ -1758,12 +1806,25 @@ impl<'a> Parser<'a> {
             // Linear over the accepted attributes is fine for the handful a real
             // element carries, but it is O(n^2) and an element with 16,000
             // attributes took 185 ms. Switch to a set once it could matter.
+            // Two kinds of duplicate, and they are not the same error.
+            // The same QName twice is a well-formedness violation and fatal.
+            // Two DIFFERENT prefixes bound to one URI, with the same local
+            // name, only collide after namespace expansion -- that is a
+            // namespace error, which C reports and carries on from. Treating
+            // both as fatal refused documents libxml2 reads.
+            if sax_attrs
+                .iter()
+                .any(|s| s.prefix == ap_owned && s.local == al_owned)
+            {
+                return Err(self.err(XML_ERR_ATTRIBUTE_REDEFINED, "Attribute redefined"));
+            }
             if sax_attrs.len() < 32 {
-                if sax_attrs
-                    .iter()
-                    .any(|s| s.uri.as_deref() == uri.as_deref() && s.local == al_owned)
+                if uri.is_some()
+                    && sax_attrs
+                        .iter()
+                        .any(|s| s.uri.as_deref() == uri.as_deref() && s.local == al_owned)
                 {
-                    return Err(self.err(XML_ERR_ATTRIBUTE_REDEFINED, "Attribute redefined"));
+                    self.ns_error("Attribute redefined after namespace expansion");
                 }
             } else {
                 if seen_keys.is_empty() {
@@ -1771,8 +1832,8 @@ impl<'a> Parser<'a> {
                         seen_keys.insert((a.uri.clone(), a.local.clone()));
                     }
                 }
-                if !seen_keys.insert((uri.clone(), al_owned.clone())) {
-                    return Err(self.err(XML_ERR_ATTRIBUTE_REDEFINED, "Attribute redefined"));
+                if !seen_keys.insert((uri.clone(), al_owned.clone())) && uri.is_some() {
+                    self.ns_error("Attribute redefined after namespace expansion");
                 }
             }
             sax_attrs.push(SaxAttr {
@@ -2364,12 +2425,28 @@ fn parse_utf8(
         Ok(()) => {
             apply_dtd_defaults(&mut p.doc, buffer.len(), options)?;
             normalize_tokenized_attrs(&mut p.doc);
-            if p.doc.encoding.is_none() {
-                if let Some(n) = enc_name {
+            match (&p.doc.encoding, enc_name) {
+                (None, Some(n)) => {
                     if !n.eq_ignore_ascii_case("UTF-8") && !n.eq_ignore_ascii_case("US-ASCII") {
                         p.doc.encoding = Some(n.to_string());
                     }
                 }
+                (Some(declared), Some(detected)) => {
+                    // A byte-order mark is evidence and a declaration is a
+                    // claim; when they disagree the document is broken, and we
+                    // were saying nothing at all. C reports it and carries on,
+                    // so we report it and carry on -- a UTF-16 file declaring
+                    // utf-8 is exactly the kind of thing that bites the next
+                    // program along.
+                    if !encodings_agree(declared, detected) {
+                        let msg = format!(
+                            "Encoding '{declared}' doesn't match auto-detected '{detected}'"
+                        );
+                        p.sax.error(&msg);
+                        p.doc.warnings.push(msg);
+                    }
+                }
+                _ => {}
             }
             Ok(p.doc)
         }
@@ -2603,4 +2680,25 @@ fn normalize_tokenized_attrs(doc: &mut XmlDoc) {
     for (at, v) in edits {
         doc.node_mut(at).content = v;
     }
+}
+
+/// Do a declared encoding and an auto-detected one describe the same thing?
+///
+/// Only the family matters: a byte-order mark can say UTF-16BE where the
+/// declaration says UTF-16, and those agree. UTF-8 against UTF-16 does not.
+fn encodings_agree(declared: &str, detected: &str) -> bool {
+    fn family(n: &str) -> &'static str {
+        let n = n.to_ascii_uppercase();
+        if n.starts_with("UTF-16") || n.starts_with("UTF16") {
+            "16"
+        } else if n.starts_with("UTF-32") || n.starts_with("UTF32") {
+            "32"
+        } else if n.starts_with("UTF-8") || n.starts_with("UTF8") || n == "US-ASCII" {
+            "8"
+        } else {
+            "other"
+        }
+    }
+    let (d, a) = (family(declared), family(detected));
+    d == a || d == "other" || a == "other"
 }

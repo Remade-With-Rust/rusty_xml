@@ -10,9 +10,9 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
 name = "rusty_alloc"
-version = "1.1.4"
+version = "1.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "037acdf50c589a85578aab74b848346b353c94db19ddad4774bfa925afbd128a"
+checksum = "c93620fee9935a120a50df2086fe48fa072f7d391f129a5e04bf20ea9b83097d"
 dependencies = [
  "libc",
  "windows-sys",
@@ -20,16 +20,16 @@ dependencies = [
 
 [[package]]
 name = "rusty_alloc-api"
-version = "1.1.4"
+version = "1.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02301ad2df6159237fe4087334310d48543aa626ae9b89410b38a9d5b77e04e0"
+checksum = "05ce52d7f72842a590e4588013d70ea02d27edbf6b6af9bc193f6e1ac173845a"
 dependencies = [
  "rusty_alloc",
 ]
 
 [[package]]
 name = "rusty_xml"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "rusty_xml-parser",
  "rusty_xml-reader",
@@ -42,14 +42,14 @@ dependencies = [
 
 [[package]]
 name = "rusty_xml-alloc"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "rusty_alloc-api",
 ]
 
 [[package]]
 name = "rusty_xml-bench"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "rusty_xml",
  "rusty_xml-alloc",
@@ -57,11 +57,11 @@ dependencies = [
 
 [[package]]
 name = "rusty_xml-c-abi"
-version = "0.8.0"
+version = "0.8.1"
 
 [[package]]
 name = "rusty_xml-cli"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "rusty_xml",
  "rusty_xml-alloc",
@@ -69,7 +69,7 @@ dependencies = [
 
 [[package]]
 name = "rusty_xml-parser"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "rusty_xml-sax",
  "rusty_xml-tree",
@@ -77,7 +77,7 @@ dependencies = [
 
 [[package]]
 name = "rusty_xml-reader"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "rusty_xml-parser",
  "rusty_xml-tree",
@@ -85,15 +85,15 @@ dependencies = [
 
 [[package]]
 name = "rusty_xml-sax"
-version = "0.8.0"
+version = "0.8.1"
 
 [[package]]
 name = "rusty_xml-tree"
-version = "0.8.0"
+version = "0.8.1"
 
 [[package]]
 name = "rusty_xml-valid"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "rusty_xml-parser",
  "rusty_xml-tree",
@@ -102,14 +102,14 @@ dependencies = [
 
 [[package]]
 name = "rusty_xml-writer"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "rusty_xml-tree",
 ]
 
 [[package]]
 name = "rusty_xml-xpath"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "rusty_xml-tree",
 ]

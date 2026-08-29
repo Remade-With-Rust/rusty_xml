@@ -16,7 +16,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.8.0"
+version = "0.8.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Remade-With-Rust/rusty_xml"
@@ -27,14 +27,14 @@ keywords = ["xml", "libxml2", "parser", "xpath"]
 categories = ["parser-implementations", "encoding"]
 
 [workspace.dependencies]
-rusty_xml-tree = { version = "0.8.0", path = "crates/rusty_xml-tree" }
-rusty_xml-sax = { version = "0.8.0", path = "crates/rusty_xml-sax" }
-rusty_xml-parser = { version = "0.8.0", path = "crates/rusty_xml-parser" }
-rusty_xml-reader = { version = "0.8.0", path = "crates/rusty_xml-reader" }
-rusty_xml-writer = { version = "0.8.0", path = "crates/rusty_xml-writer" }
-rusty_xml-xpath = { version = "0.8.0", path = "crates/rusty_xml-xpath" }
-rusty_xml-valid = { version = "0.8.0", path = "crates/rusty_xml-valid" }
-rusty_xml = { version = "0.8.0", path = "crates/rusty_xml" }
+rusty_xml-tree = { version = "0.8.1", path = "crates/rusty_xml-tree" }
+rusty_xml-sax = { version = "0.8.1", path = "crates/rusty_xml-sax" }
+rusty_xml-parser = { version = "0.8.1", path = "crates/rusty_xml-parser" }
+rusty_xml-reader = { version = "0.8.1", path = "crates/rusty_xml-reader" }
+rusty_xml-writer = { version = "0.8.1", path = "crates/rusty_xml-writer" }
+rusty_xml-xpath = { version = "0.8.1", path = "crates/rusty_xml-xpath" }
+rusty_xml-valid = { version = "0.8.1", path = "crates/rusty_xml-valid" }
+rusty_xml = { version = "0.8.1", path = "crates/rusty_xml" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

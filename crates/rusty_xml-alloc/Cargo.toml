@@ -12,7 +12,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-rusty_alloc-api = "=2.2.0"
+rusty_alloc-api = "=2.2.2"
 
 [lints]
 workspace = true

@@ -36,7 +36,7 @@ dependencies = [
 
 [[package]]
 name = "rusty_xml"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "rusty_xml-parser",
  "rusty_xml-reader",
@@ -49,14 +49,14 @@ dependencies = [
 
 [[package]]
 name = "rusty_xml-alloc"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "rusty_alloc-api",
 ]
 
 [[package]]
 name = "rusty_xml-bench"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "rusty_xml",
  "rusty_xml-alloc",
@@ -64,11 +64,11 @@ dependencies = [
 
 [[package]]
 name = "rusty_xml-c-abi"
-version = "0.8.1"
+version = "0.8.2"
 
 [[package]]
 name = "rusty_xml-cli"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "rusty_xml",
  "rusty_xml-alloc",
@@ -76,7 +76,7 @@ dependencies = [
 
 [[package]]
 name = "rusty_xml-parser"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "rusty_xml-sax",
  "rusty_xml-tree",
@@ -84,7 +84,7 @@ dependencies = [
 
 [[package]]
 name = "rusty_xml-reader"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "rusty_xml-parser",
  "rusty_xml-tree",
@@ -92,15 +92,15 @@ dependencies = [
 
 [[package]]
 name = "rusty_xml-sax"
-version = "0.8.1"
+version = "0.8.2"
 
 [[package]]
 name = "rusty_xml-tree"
-version = "0.8.1"
+version = "0.8.2"
 
 [[package]]
 name = "rusty_xml-valid"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "rusty_xml-parser",
  "rusty_xml-tree",
@@ -109,14 +109,14 @@ dependencies = [
 
 [[package]]
 name = "rusty_xml-writer"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "rusty_xml-tree",
 ]
 
 [[package]]
 name = "rusty_xml-xpath"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "rusty_xml-tree",
 ]

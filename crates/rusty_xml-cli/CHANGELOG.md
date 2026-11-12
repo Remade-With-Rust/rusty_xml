@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.4](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-cli-v0.8.3...rusty_xml-cli-v0.8.4) - 2026-11-12
+
+### Other
+
+- update Cargo.lock dependencies
+
 ## [0.8.3](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-cli-v0.8.2...rusty_xml-cli-v0.8.3) - 2026-10-17
 
 ### Other

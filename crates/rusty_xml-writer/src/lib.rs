@@ -71,9 +71,28 @@ const SAVE_XHTML_EMPTY: i32 = 1 << 28;
 /// Elements that never take an end tag in HTML. C writes `<br>`, not `<br/>`
 /// and not `<br></br>`.
 const VOID_ELEMENTS: &[&str] = &[
-    "area", "base", "basefont", "br", "col", "embed", "frame", "hr", "img",
-    "input", "isindex", "link", "meta", "param", "source", "track", "wbr",
+    "area", "base", "basefont", "bgsound", "br", "col", "embed", "frame", "hr", "img",
+    "input", "isindex", "keygen", "link", "meta", "param", "source", "track", "wbr",
 ];
+
+/// libxml2's `dataMode >= DATA_RAWTEXT` elements, whose text HTMLtree.c
+/// writes unescaped. Escaping it broke the round trip: `if (a<b)` in a
+/// script came back as `a&lt;b`, which the parser keeps verbatim.
+fn is_raw_text(name: &str) -> bool {
+    ["iframe", "noembed", "noframes", "plaintext", "script", "style", "xmp"]
+        .iter()
+        .any(|v| name.eq_ignore_ascii_case(v))
+}
+
+/// `htmlIsBooleanAttr`: serialized as the bare name whatever the value.
+fn is_boolean_attr(name: &str) -> bool {
+    [
+        "checked", "compact", "declare", "defer", "disabled", "ismap", "multiple", "nohref",
+        "noresize", "noshade", "nowrap", "readonly", "selected",
+    ]
+    .iter()
+    .any(|v| name.eq_ignore_ascii_case(v))
+}
 
 fn is_void(name: &str) -> bool {
     VOID_ELEMENTS.iter().any(|v| name.eq_ignore_ascii_case(v))
@@ -179,6 +198,13 @@ fn write_one(
             for a in doc.attrs(id) {
                 out.push(' ');
                 out.push_str(&qname(doc.prefix(a), doc.name(a)));
+                // htmlAttrDumpOutput: an attribute with no value, or a boolean
+                // one, is written as the bare name.
+                if (opts & SAVE_AS_HTML) != 0
+                    && (is_boolean_attr(doc.name(a)) || doc.html_bare_attrs.binary_search_by_key(&a.index(), |n| n.index()).is_ok())
+                {
+                    continue;
+                }
                 out.push_str("=\"");
                 out.push_str(&escape_as(
                     doc.content(a),
@@ -246,13 +272,16 @@ fn write_one(
             }
         }
         NodeKind::Text => {
-            out.push_str(&escape_as(
-                doc.content(id),
-                false,
-                doc.encoding.is_none(),
-                (opts & SAVE_AS_HTML) != 0,
-            ));
+            let html = (opts & SAVE_AS_HTML) != 0;
+            if html && doc.parent(id).is_some_and(|p| is_raw_text(doc.name(p))) {
+                out.push_str(doc.content(id));
+            } else {
+                out.push_str(&escape_as(doc.content(id), false, doc.encoding.is_none(), html));
+            }
         }
+        // HTML_PRESERVE_NODE: the HTML parser keeps raw text as CDATA, and
+        // HTMLtree.c writes it as it came.
+        NodeKind::CData if (opts & SAVE_AS_HTML) != 0 => out.push_str(doc.content(id)),
         NodeKind::CData => {
             let content = doc.content(id);
             if content.is_empty() {
@@ -731,8 +760,11 @@ fn save_html_doc(doc: &XmlDoc, options: i32) -> Vec<u8> {
     let mut child = doc.first_child(rusty_xml_tree::NodeId::DOCUMENT);
     while let Some(id) = child {
         write_node(doc, id, &mut out, options, 0, format);
-        out.push('\n');
         child = doc.next_sibling(id);
     }
+    // htmlNodeDumpInternal writes one newline when it climbs back to the
+    // document node, not one per top-level node: a comment after </html>,
+    // or a second root, follows on the same line.
+    out.push('\n');
     out.into_bytes()
 }

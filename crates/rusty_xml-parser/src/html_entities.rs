@@ -2147,93 +2147,336 @@ pub fn html_entity(name: &str) -> Option<&'static str> {
         .map(|i| HTML5_ENTITIES[i].1)
 }
 
-/// Expand character references in HTML text.
-///
-/// Handles `&name;`, `&#123;` and `&#x7B;`. Anything that is not a reference is
-/// left exactly as written, which is what a browser does and what a converter
-/// needs: a bare `&` in `AT&T` must survive.
-///
-/// HTML permits a named reference without its semicolon (`&amp` and `&ampX`
-/// both yield `&`), so the longest matching name is taken when the semicolon is
-/// missing. Borrows when there is nothing to expand.
+/// Expand character references in HTML text, by libxml2's rules for text
+/// content (see [`decode_html`]). Borrows when there is nothing to expand.
 pub fn decode_html_text(s: &str) -> std::borrow::Cow<'_, str> {
-    if !s.contains('&') {
-        return std::borrow::Cow::Borrowed(s);
-    }
-    let b = s.as_bytes();
-    let mut out = String::with_capacity(s.len());
-    let mut i = 0usize;
-    while i < b.len() {
-        if b[i] != b'&' {
-            let start = i;
-            while i < b.len() && b[i] != b'&' {
-                i += 1;
-            }
-            out.push_str(&s[start..i]);
-            continue;
-        }
-        match expand_at(s, i) {
-            Some((text, next)) => {
-                out.push_str(&text);
-                i = next;
-            }
-            None => {
-                out.push('&');
-                i += 1;
-            }
-        }
-    }
-    std::borrow::Cow::Owned(out)
+    decode_html(s, false, Nul::Keep)
 }
 
-/// Expand the reference starting at `at`, which must be `&`.
-/// Returns the replacement and the index just past it.
-fn expand_at(s: &str, at: usize) -> Option<(String, usize)> {
-    let b = s.as_bytes();
-    let rest = &b[at + 1..];
-    if rest.first() == Some(&b'#') {
-        let (radix, off) = match rest.get(1) {
-            Some(b'x') | Some(b'X') => (16u32, 2usize),
+/// The names HTML lets you write without the `;`: the WHATWG table's
+/// semicolon-less keys, which libxml2 marks `ENT_F_SEMICOLON`. Verified against
+/// pinned libxml2 2.15.3 by feeding it every name unterminated. Sorted, so a
+/// lookup is a binary search over 106 short names instead of over all 2125.
+static LEGACY: &[(&str, &str)] = &[
+    ("AElig", "\u{c6}"),
+    ("AMP", "&"),
+    ("Aacute", "\u{c1}"),
+    ("Acirc", "\u{c2}"),
+    ("Agrave", "\u{c0}"),
+    ("Aring", "\u{c5}"),
+    ("Atilde", "\u{c3}"),
+    ("Auml", "\u{c4}"),
+    ("COPY", "\u{a9}"),
+    ("Ccedil", "\u{c7}"),
+    ("ETH", "\u{d0}"),
+    ("Eacute", "\u{c9}"),
+    ("Ecirc", "\u{ca}"),
+    ("Egrave", "\u{c8}"),
+    ("Euml", "\u{cb}"),
+    ("GT", ">"),
+    ("Iacute", "\u{cd}"),
+    ("Icirc", "\u{ce}"),
+    ("Igrave", "\u{cc}"),
+    ("Iuml", "\u{cf}"),
+    ("LT", "<"),
+    ("Ntilde", "\u{d1}"),
+    ("Oacute", "\u{d3}"),
+    ("Ocirc", "\u{d4}"),
+    ("Ograve", "\u{d2}"),
+    ("Oslash", "\u{d8}"),
+    ("Otilde", "\u{d5}"),
+    ("Ouml", "\u{d6}"),
+    ("QUOT", "\""),
+    ("REG", "\u{ae}"),
+    ("THORN", "\u{de}"),
+    ("Uacute", "\u{da}"),
+    ("Ucirc", "\u{db}"),
+    ("Ugrave", "\u{d9}"),
+    ("Uuml", "\u{dc}"),
+    ("Yacute", "\u{dd}"),
+    ("aacute", "\u{e1}"),
+    ("acirc", "\u{e2}"),
+    ("acute", "\u{b4}"),
+    ("aelig", "\u{e6}"),
+    ("agrave", "\u{e0}"),
+    ("amp", "&"),
+    ("aring", "\u{e5}"),
+    ("atilde", "\u{e3}"),
+    ("auml", "\u{e4}"),
+    ("brvbar", "\u{a6}"),
+    ("ccedil", "\u{e7}"),
+    ("cedil", "\u{b8}"),
+    ("cent", "\u{a2}"),
+    ("copy", "\u{a9}"),
+    ("curren", "\u{a4}"),
+    ("deg", "\u{b0}"),
+    ("divide", "\u{f7}"),
+    ("eacute", "\u{e9}"),
+    ("ecirc", "\u{ea}"),
+    ("egrave", "\u{e8}"),
+    ("eth", "\u{f0}"),
+    ("euml", "\u{eb}"),
+    ("frac12", "\u{bd}"),
+    ("frac14", "\u{bc}"),
+    ("frac34", "\u{be}"),
+    ("gt", ">"),
+    ("iacute", "\u{ed}"),
+    ("icirc", "\u{ee}"),
+    ("iexcl", "\u{a1}"),
+    ("igrave", "\u{ec}"),
+    ("iquest", "\u{bf}"),
+    ("iuml", "\u{ef}"),
+    ("laquo", "\u{ab}"),
+    ("lt", "<"),
+    ("macr", "\u{af}"),
+    ("micro", "\u{b5}"),
+    ("middot", "\u{b7}"),
+    ("nbsp", "\u{a0}"),
+    ("not", "\u{ac}"),
+    ("ntilde", "\u{f1}"),
+    ("oacute", "\u{f3}"),
+    ("ocirc", "\u{f4}"),
+    ("ograve", "\u{f2}"),
+    ("ordf", "\u{aa}"),
+    ("ordm", "\u{ba}"),
+    ("oslash", "\u{f8}"),
+    ("otilde", "\u{f5}"),
+    ("ouml", "\u{f6}"),
+    ("para", "\u{b6}"),
+    ("plusmn", "\u{b1}"),
+    ("pound", "\u{a3}"),
+    ("quot", "\""),
+    ("raquo", "\u{bb}"),
+    ("reg", "\u{ae}"),
+    ("sect", "\u{a7}"),
+    ("shy", "\u{ad}"),
+    ("sup1", "\u{b9}"),
+    ("sup2", "\u{b2}"),
+    ("sup3", "\u{b3}"),
+    ("szlig", "\u{df}"),
+    ("thorn", "\u{fe}"),
+    ("times", "\u{d7}"),
+    ("uacute", "\u{fa}"),
+    ("ucirc", "\u{fb}"),
+    ("ugrave", "\u{f9}"),
+    ("uml", "\u{a8}"),
+    ("uuml", "\u{fc}"),
+    ("yacute", "\u{fd}"),
+    ("yen", "\u{a5}"),
+    ("yuml", "\u{ff}"),
+];
+
+/// Longest legacy name is six bytes (`frac12`, `middot`, ...).
+const LEGACY_MAX: usize = 6;
+
+fn legacy_entity(name: &[u8]) -> Option<&'static str> {
+    LEGACY
+        .binary_search_by(|(n, _)| n.as_bytes().cmp(name))
+        .ok()
+        .map(|i| LEGACY[i].1)
+}
+
+/// What to do with U+0000.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Nul {
+    /// Leave it (the public [`decode_html_text`] contract).
+    Keep,
+    /// Drop it: libxml2 strips NUL from ordinary character data.
+    Strip,
+    /// U+FFFD: attribute values, RCDATA, comments.
+    Replace,
+}
+
+/// libxml2 `htmlC1Remap`: numeric references to C1 controls mean the
+/// Windows-1252 character, as HTML5 specifies.
+const C1_REMAP: [u16; 32] = [
+    0x20AC, 0x0081, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021, 0x02C6, 0x2030, 0x0160,
+    0x2039, 0x0152, 0x008D, 0x017D, 0x008F, 0x0090, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022,
+    0x2013, 0x2014, 0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0x009D, 0x017E, 0x0178,
+];
+
+/// libxml2 `htmlCodePointToUtf8`'s substitutions.
+fn code_point(cp: u32) -> char {
+    let cp = if (0x80..0xA0).contains(&cp) { u32::from(C1_REMAP[(cp - 0x80) as usize]) } else { cp };
+    if cp == 0 {
+        return '\u{fffd}';
+    }
+    char::from_u32(cp).unwrap_or('\u{fffd}')
+}
+
+enum Repl {
+    Str(&'static str),
+    Char(char),
+}
+
+/// libxml2 `htmlFindEntityPrefix` plus the numeric branch of
+/// `htmlParseCharData` / `htmlParseData`, for the `&` at `at`. Returns the
+/// replacement and the number of input bytes it consumes, or `None` to keep the
+/// `&` as written.
+#[inline]
+fn expand(s: &str, at: usize, attr: bool) -> Option<(Repl, usize)> {
+    let r = &s.as_bytes()[at + 1..];
+    if r.first() == Some(&b'#') {
+        let (radix, mut j) = match r.get(1) {
+            Some(b'x' | b'X') => (16u32, 2usize),
             _ => (10u32, 1usize),
         };
-        let mut j = off;
-        while j < rest.len() && (rest[j] as char).is_digit(radix) {
+        let digit = |c: u8| (c as char).to_digit(radix);
+        r.get(j).copied().and_then(digit)?;
+        // Clamped like C, so a long run of digits is U+FFFD rather than an
+        // overflow -- the old decoder returned None and kept the text.
+        let mut cp = 0u32;
+        while let Some(d) = r.get(j).copied().and_then(digit) {
+            cp = (cp * radix + d).min(0x11_0000);
             j += 1;
         }
-        if j == off {
-            return None;
+        if r.get(j) == Some(&b';') {
+            j += 1;
         }
-        let digits = std::str::from_utf8(&rest[off..j]).ok()?;
-        let cp = u32::from_str_radix(digits, radix).ok()?;
-        // The trailing semicolon is conventional but optional in HTML.
-        let next = at + 1 + j + usize::from(rest.get(j) == Some(&b';'));
-        // Lone surrogates and out-of-range values are not characters; a browser
-        // substitutes U+FFFD rather than dropping the text, and so do we.
-        let ch = char::from_u32(cp).unwrap_or('\u{fffd}');
-        return Some((ch.to_string(), next));
+        return Some((Repl::Char(code_point(cp)), 1 + j));
     }
-    // Named. Take the longest run of name characters, then shrink until a known
-    // name matches, so `&ampX` yields `&` followed by `X`.
-    let mut j = 0usize;
-    while j < rest.len() && rest[j].is_ascii_alphanumeric() {
-        j += 1;
-    }
-    if j == 0 {
+    if r.len() < 2 || !r[0].is_ascii_alphabetic() {
         return None;
     }
-    let semi = rest.get(j) == Some(&b';');
-    let name_max = std::str::from_utf8(&rest[..j]).ok()?;
-    if semi {
-        if let Some(v) = html_entity(name_max) {
-            return Some((v.to_string(), at + 1 + j + 1));
+    let n = r.iter().take_while(|c| c.is_ascii_alphanumeric()).count();
+    let name = &s[at + 1..at + 1 + n];
+    if r.get(n) == Some(&b';') {
+        if let Some(v) = html_entity(name) {
+            return Some((Repl::Str(v), n + 2));
         }
     }
-    let mut len = name_max.len();
-    while len > 0 {
-        if let Some(v) = html_entity(&name_max[..len]) {
-            return Some((v.to_string(), at + 1 + len));
+    // Without the `;` only a legacy name counts, and inside an attribute only
+    // when nothing alphanumeric and no `=` follows it, so `?a=1&copy=2` stays a
+    // URL. The longest legacy prefix wins in text: `&copyright` is (c)right.
+    // Searching only the 106 legacy names, at most six bytes long, beat the
+    // obvious patch to the old decoder (shrink over all 2125 names, then
+    // filter) by 10.1% parse Ir on entity-dense input.
+    let mut len = n.min(LEGACY_MAX);
+    while len >= 2 {
+        if let Some(v) = legacy_entity(&r[..len]) {
+            if attr && (len < n || r.get(n) == Some(&b'=')) {
+                return None;
+            }
+            return Some((Repl::Str(v), 1 + len));
         }
         len -= 1;
     }
     None
+}
+
+/// Decode character references by libxml2 2.15's rules: text content when
+/// `attr` is false (`htmlParseCharData`), attribute values when it is true
+/// (`htmlParseData` with `isAttr`). Borrows when there is nothing to change.
+///
+/// The scan between references was measured three ways (parse Ir, fragments /
+/// pages): a byte loop -0.4% / +0.6%, memchr-only +1.5% / +0.03%, against
+/// this 16-byte probe then memchr. Forcing `expand` out of line changed nothing
+/// to the instruction: LLVM already keeps it out.
+pub(crate) fn decode_html(s: &str, attr: bool, nul: Nul) -> std::borrow::Cow<'_, str> {
+    let b = s.as_bytes();
+    let has_nul = nul != Nul::Keep && b.contains(&0);
+    if !has_nul {
+        // The first search doubles as the "anything to do?" test, so the
+        // prefix is scanned once, not twice.
+        let Some(first) = s.find('&') else {
+            return std::borrow::Cow::Borrowed(s);
+        };
+        let mut out = String::with_capacity(s.len());
+        let (mut i, mut last) = (first, 0usize);
+        loop {
+            if let Some((rep, used)) = expand(s, i, attr) {
+                out.push_str(&s[last..i]);
+                match rep {
+                    Repl::Str(v) => out.push_str(v),
+                    Repl::Char(c) => out.push(c),
+                }
+                i += used;
+                last = i;
+            } else {
+                i += 1;
+            }
+            // Dense references (one every few bytes) pay memchr's call and
+            // setup on every hop; a short byte scan serves those first, and a
+            // long gap still goes to memchr.
+            let near = &b[i..b.len().min(i + 16)];
+            if let Some(k) = near.iter().position(|&c| c == b'&') {
+                i += k;
+                continue;
+            }
+            if i + 16 >= b.len() {
+                break;
+            }
+            i += 16;
+            match s[i..].find('&') {
+                Some(k) => i += k,
+                None => break,
+            }
+        }
+        out.push_str(&s[last..]);
+        return std::borrow::Cow::Owned(out);
+    }
+    // A NUL to strip or replace: visit every byte (rare: the parser only asks
+    // for this when the input has a NUL somewhere).
+    let mut out = String::with_capacity(s.len());
+    let (mut i, mut last) = (0usize, 0usize);
+    while i < b.len() {
+        match b[i] {
+            b'&' => {
+                if let Some((rep, used)) = expand(s, i, attr) {
+                    out.push_str(&s[last..i]);
+                    match rep {
+                        Repl::Str(v) => out.push_str(v),
+                        Repl::Char(c) => out.push(c),
+                    }
+                    i += used;
+                    last = i;
+                    continue;
+                }
+            }
+            0 if has_nul => {
+                out.push_str(&s[last..i]);
+                if nul == Nul::Replace {
+                    out.push('\u{fffd}');
+                }
+                i += 1;
+                last = i;
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    out.push_str(&s[last..]);
+    std::borrow::Cow::Owned(out)
+}
+
+#[cfg(test)]
+mod legacy_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_table_is_sorted_and_agrees_with_the_full_table() {
+        assert_eq!(LEGACY.len(), 106);
+        for w in LEGACY.windows(2) {
+            assert!(w[0].0.as_bytes() < w[1].0.as_bytes());
+        }
+        for (n, v) in LEGACY {
+            assert_eq!(html_entity(n), Some(*v), "{n}");
+            assert!(n.len() <= LEGACY_MAX);
+        }
+    }
+
+    #[test]
+    fn libxml2_reference_rules() {
+        // Issue #12 case 3.
+        assert_eq!(decode_html("?a=1&copy=2&lang=en&amp=3", true, Nul::Replace), "?a=1&copy=2&lang=en&amp=3");
+        assert_eq!(decode_html("&lang x &copy y", false, Nul::Strip), "&lang x \u{a9} y");
+        assert_eq!(decode_html("&copyright &notin; &notit;", false, Nul::Strip), "\u{a9}right \u{2209} \u{ac}it;");
+        assert_eq!(decode_html("a&copy b&copyx", true, Nul::Replace), "a\u{a9} b&copyx");
+        assert_eq!(decode_html("&#128;&#0;&#x110000;&#xD800;&#65 &#x41x", false, Nul::Strip), "\u{20ac}\u{fffd}\u{fffd}\u{fffd}A Ax");
+        assert_eq!(decode_html("&#99999999999999999999;", false, Nul::Strip), "\u{fffd}");
+        assert_eq!(decode_html("a\0b", false, Nul::Strip), "ab");
+        assert_eq!(decode_html("a\0b", true, Nul::Replace), "a\u{fffd}b");
+        assert_eq!(decode_html("AT&T &#x; &#", false, Nul::Strip), "AT&T &#x; &#");
+    }
 }

@@ -11,6 +11,7 @@ mod encoding;
 mod parse;
 mod catalog;
 mod html_entities;
+mod html_tags;
 mod html;
 mod xinclude;
 mod dtd;

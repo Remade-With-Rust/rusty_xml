@@ -192,6 +192,10 @@ pub struct XmlDoc {
     /// expanded to nothing. `<foo>&empty;</foo>` against EMPTY is content, and
     /// the tree has no node to show for it.
     pub elements_with_entity_refs: std::collections::HashSet<NodeId>,
+    /// HTML attributes written without a value (`<input value>`), in creation
+    /// order, so sorted. libxml2 gives such an attribute no children: its value
+    /// reads as `""`, but it serializes as the bare name. Empty for XML.
+    pub html_bare_attrs: Vec<NodeId>,
 }
 
 impl Default for XmlDoc {
@@ -230,6 +234,7 @@ impl XmlDoc {
             warnings: Vec::new(),
             reference_text: Default::default(),
             elements_with_entity_refs: Default::default(),
+            html_bare_attrs: Vec::new(),
         }
     }
 

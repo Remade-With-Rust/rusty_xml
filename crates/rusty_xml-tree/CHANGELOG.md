@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-tree-v0.8.5...rusty_xml-tree-v0.9.0) - 2026-11-13
+
+### Other
+
+- *(tree)* [**breaking**] shrink Node from 184 to 88 bytes ([#23](https://github.com/Remade-With-Rust/rusty_xml/pull/23))
+
 ## [0.8.5](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-tree-v0.8.4...rusty_xml-tree-v0.8.5) - 2026-11-13
 
 ### Fixed

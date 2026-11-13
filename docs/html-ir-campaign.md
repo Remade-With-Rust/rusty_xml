@@ -69,6 +69,41 @@ what the old wrong behaviour cost in the same codebase.
   for the first. For the second, a hybrid beat both pure arms on the two
   corpora combined.
 
+## Follow-up: duplicate-attribute checks (issue #21)
+
+Both parsers compared each attribute with every earlier one on its tag, so one
+tag with 100,000 attributes took 12 s as XML and 7 s as HTML. Past 32
+attributes each now uses a hash set; up to 32 the pairwise scan stays.
+
+Same instrument, plus `rxmlint --noout` under callgrind on 8 real XML files
+from libxml2's test tree (whole-program Ir, which varies by about 3K between
+runs of one binary). Base is 0.8.5; tree fingerprints are identical.
+
+| Workload | 0.8.5 | With the fix | Change |
+|---|---|---|---|
+| HTML fragments, parse Ir | 297,996,642 | 297,873,922 | −0.04% |
+| HTML real pages, parse Ir | 316,481,131 | 315,625,915 | −0.27% |
+| XML, 8 real files, total Ir | 189,911,929 | 187,789,086 | −1.12% |
+
+Where the change comes from, on the real pages:
+
+- The length test in front of the pairwise scan costs about 3 Ir per element
+  (+0.09%). It runs before the attribute buffer is taken; the first shape,
+  which handed the taken buffer to the out-of-line path, cost +0.18%.
+- `Parser::name` compiled in two shapes, 1.5M Ir apart, and which one came out
+  changed with edits elsewhere in the crate, including edits to the XML
+  parser. In the dear shape the lowercasing collect is inlined. Moving it to
+  `fold_name` with `#[inline(never)]` fixes the shape (−0.38%): `name` then
+  cost the same 26,740,292 Ir in four builds.
+- `is_boolean_attr` gained a second caller and stopped being inlined.
+  `#[inline(always)]` restores it (−0.05%).
+- XML: the namespace-expansion set was built for every element, seeding a
+  hasher each time. Building both sets only past 32 attributes is the −1.12%.
+
+Function-level counts carry the attribution, because totals also move with
+libc `memcmp`'s own instruction count: on the fragments it rose by 0.17% of
+the parse count between two builds at an unchanged number of calls.
+
 ## Next lever (outside #12)
 
 Node creation is now the largest cost: about 500 Ir per element or text node,

@@ -776,11 +776,32 @@ fn attlist_default_amplification_is_bounded() {
     );
 }
 
-/// Duplicate-attribute detection was a linear scan over the accepted
-/// attributes, so one element with many attributes was O(n^2): 16,000 took
-/// 185 ms. This pins the shape, not a wall-clock number.
+/// Duplicate-attribute detection scanned the accepted attributes, so one tag
+/// with many attributes was O(n^2) in both parsers: 100,000 took 12 s as XML
+/// and 7 s as HTML (#21). At 200,000 the scan took 96 s as XML and 35 s as
+/// HTML in a release build, and the sets take under a second in a debug one,
+/// so the bound fails the scan on any machine without timing the sets.
 #[test]
 fn many_attributes_on_one_element_is_not_quadratic() {
+    let wide: String = (0..200_000).map(|i| format!(" a{i}=\"v\"")).collect();
+    let started = std::time::Instant::now();
+    let doc = xml_read_memory(
+        format!("<r{wide}/>").as_bytes(),
+        None,
+        None,
+        default_parse_options(),
+    )
+    .expect("200,000 attributes parse as XML");
+    assert_eq!(doc.len(), 200_002, "every attribute becomes a node");
+    let doc = rusty_xml::html_read_memory(format!("<div{wide}>").as_bytes(), None, None, 0)
+        .expect("200,000 attributes parse as HTML");
+    assert!(doc.len() > 200_000, "every attribute becomes a node");
+    let took = started.elapsed();
+    assert!(
+        took < std::time::Duration::from_secs(10),
+        "200,000 attributes on one tag took {took:?}: the duplicate check is quadratic again"
+    );
+
     let opts = default_parse_options();
     let build = |k: usize| {
         let mut s = String::from("<r");
@@ -805,6 +826,79 @@ fn many_attributes_on_one_element_is_not_quadratic() {
         xml_read_memory(dup.as_bytes(), None, None, opts).is_err(),
         "a repeated attribute must be rejected on the set path too"
     );
+}
+
+/// The XML duplicate checks give the same verdicts on the set path (past 32
+/// attributes) as on the scan path, each verified against xmllint 2.15.3: a
+/// repeated QName is fatal, two prefixes bound to one URI are a namespace
+/// error the parse survives, and one local name under two URIs is fine.
+#[test]
+fn xml_duplicate_attribute_verdicts_hold_past_32_attributes() {
+    let opts = default_parse_options();
+    let parses = |attrs: &str| {
+        let many: String = (0..40).map(|i| format!(" a{i}=\"v\"")).collect();
+        let doc = format!("<r xmlns:p=\"u\" xmlns:q=\"u\" xmlns:z=\"other\"{many} {attrs}/>");
+        xml_read_memory(doc.as_bytes(), None, None, opts).is_ok()
+    };
+    assert!(
+        !parses("p:a=\"1\" p:a=\"2\""),
+        "a repeated prefixed QName is fatal"
+    );
+    assert!(
+        !parses("a39=\"again\""),
+        "a repeat of the 40th attribute is fatal"
+    );
+    assert!(
+        parses("p:a=\"1\" q:a=\"2\""),
+        "one URI under two prefixes is not fatal"
+    );
+    assert!(
+        parses("p:a=\"1\" z:a=\"2\" a=\"3\""),
+        "one local name under two URIs is fine"
+    );
+
+    // The switch from scan to set happens at the 33rd attribute.
+    for count in [31usize, 32, 33, 34] {
+        let many: String = (0..count).map(|i| format!(" a{i}=\"v\"")).collect();
+        assert!(
+            xml_read_memory(format!("<r{many}/>").as_bytes(), None, None, opts).is_ok(),
+            "{count} distinct attributes parse"
+        );
+        for repeat in [0, count - 1] {
+            let doc = format!("<r{many} a{repeat}=\"again\"/>");
+            assert!(
+                xml_read_memory(doc.as_bytes(), None, None, opts).is_err(),
+                "a repeat of attribute {repeat} of {count} is rejected"
+            );
+        }
+    }
+}
+
+/// HTML keeps the first occurrence of a repeated attribute name, on the scan
+/// path and on the set path (past 32 attributes). Expected output is xmllint
+/// 2.15.3's.
+#[test]
+fn html_duplicate_attributes_keep_the_first_on_both_paths() {
+    let div = |html: &str| {
+        let doc = rusty_xml::html_read_memory(html.as_bytes(), None, None, 0).expect("parses");
+        let out = String::from_utf8(xml_save_doc(&doc, 0)).expect("utf-8 output");
+        let start = out.find("<div").expect("a div in the output");
+        out[start..out.find("></div>").expect("the div's end") + 1].to_string()
+    };
+    assert_eq!(
+        div("<div a=1 B=2 b=3 A=4 checked CHECKED c d=\"\" c=9>"),
+        "<div a=\"1\" b=\"2\" checked c d=\"\">"
+    );
+    for count in [31usize, 32, 33, 34, 40] {
+        let many: String = (0..count).map(|i| format!(" a{i}=\"{i}\"")).collect();
+        let last = count - 1;
+        let html = format!("<div{many} a0=dup A{last}=dup zz=1 zz=2 checked CHECKED>");
+        assert_eq!(
+            div(&html),
+            format!("<div{many} zz=\"1\" checked>"),
+            "{count} attributes, then repeats of the first, the last and two new names"
+        );
+    }
 }
 
 /// A deeply nested XPath expression overflowed the stack, which ABORTS THE

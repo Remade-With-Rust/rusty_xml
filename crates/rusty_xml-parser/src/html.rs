@@ -19,6 +19,7 @@
 //! `docs/html-ir-campaign.md`; the losing arms are recorded beside each choice.
 
 use std::borrow::Cow;
+use std::collections::HashSet;
 
 use rusty_xml_tree::{NodeId, NodeKind, XmlDoc};
 
@@ -41,6 +42,26 @@ const DATA_SCRIPT_ESC2: u8 = 6;
 
 /// libxml2 truncates names to `HTML_PARSER_BUFFER_SIZE` bytes.
 const MAX_NAME: usize = 100;
+/// A start tag with more attributes than this deduplicates them through a
+/// hash set. The pairwise scan is cheaper on ordinary tags, but quadratic.
+const ATTR_SCAN_MAX: usize = 32;
+
+/// A name holding an uppercase letter or a NUL: ASCII lowercased, NUL to
+/// U+FFFD. Out of line on purpose. Inlined, it made every call of
+/// `Parser::name` dearer, including the ones that borrow the name as it
+/// stands, and whether the compiler inlined it changed with unrelated edits.
+#[inline(never)]
+fn fold_name(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c == '\0' {
+                '\u{fffd}'
+            } else {
+                c.to_ascii_lowercase()
+            }
+        })
+        .collect()
+}
 
 /// `IS_WS_HTML`.
 #[inline]
@@ -49,6 +70,9 @@ fn is_ws(c: u8) -> bool {
 }
 
 /// `htmlIsBooleanAttr`: written without a value, these take their own name.
+/// Always inlined: with two callers the compiler left it out of line, which
+/// cost the ordinary tag 0.05% parse Ir on real pages.
+#[inline(always)]
 fn is_boolean_attr(name: &str) -> bool {
     matches!(
         name,
@@ -520,17 +544,7 @@ impl<'a> Parser<'a> {
         if !fold {
             return Cow::Borrowed(s);
         }
-        Cow::Owned(
-            s.chars()
-                .map(|c| {
-                    if c == '\0' {
-                        '\u{fffd}'
-                    } else {
-                        c.to_ascii_lowercase()
-                    }
-                })
-                .collect(),
-        )
+        Cow::Owned(fold_name(s))
     }
 
     /// `htmlParseAttValue`'s extent: quoted to the matching quote, else to a
@@ -647,28 +661,57 @@ impl<'a> Parser<'a> {
     /// list, then appending without a scan, beat probing the element's
     /// attributes in the arena by 0.3% / 0.1% parse Ir, and the old
     /// `xml_set_prop` (last wins, value = name) cost 1.0% / 0.9% more than both.
+    /// Past `ATTR_SCAN_MAX` attributes `add_attributes_wide` takes over. The
+    /// test comes before the buffer is taken, so the ordinary tag pays one
+    /// comparison for it and nothing else.
     fn add_attributes(&mut self, el: NodeId) {
+        if self.attrs.len() > ATTR_SCAN_MAX {
+            return self.add_attributes_wide(el);
+        }
         let attrs = std::mem::take(&mut self.attrs);
         for (i, (n, v)) in attrs.iter().enumerate() {
             if attrs[..i].iter().any(|(m, _)| m == n) {
                 continue;
             }
-            match v {
-                Some(v) => {
-                    self.doc.add_attr(el, n, None, v);
-                }
-                None if is_boolean_attr(n) => {
-                    self.doc.add_attr(el, n, None, n);
-                }
-                None => {
-                    let id = self.doc.add_attr(el, n, None, "");
-                    self.doc.html_bare_attrs.push(id);
-                }
-            }
+            self.add_attribute(el, n, v);
         }
         // Hand the buffer back so its capacity is reused.
         self.attrs = attrs;
         self.attrs.clear();
+    }
+
+    /// `add_attributes` for a tag whose pairwise scan would be quadratic: a
+    /// set finds the repeats, as `htmlAttrHashInsert` does. Names are
+    /// attacker-chosen, so the set keeps the standard library's keyed hasher.
+    #[cold]
+    #[inline(never)]
+    fn add_attributes_wide(&mut self, el: NodeId) {
+        let attrs = std::mem::take(&mut self.attrs);
+        let mut seen: HashSet<&str> = HashSet::with_capacity(attrs.len());
+        for (n, v) in &attrs {
+            if seen.insert(n) {
+                self.add_attribute(el, n, v);
+            }
+        }
+        drop(seen);
+        self.attrs = attrs;
+        self.attrs.clear();
+    }
+
+    #[inline(always)]
+    fn add_attribute(&mut self, el: NodeId, n: &Cow<'a, str>, v: &Option<Cow<'a, str>>) {
+        match v {
+            Some(v) => {
+                self.doc.add_attr(el, n, None, v);
+            }
+            None if is_boolean_attr(n) => {
+                self.doc.add_attr(el, n, None, n);
+            }
+            None => {
+                let id = self.doc.add_attr(el, n, None, "");
+                self.doc.html_bare_attrs.push(id);
+            }
+        }
     }
 
     /// `htmlParseEndTag` + `htmlAutoCloseOnClose`.

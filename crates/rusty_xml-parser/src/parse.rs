@@ -85,6 +85,9 @@ const MAX_DEPTH_HUGE: u32 = 1_000_000;
 
 const MAX_NAME: usize = 50_000;
 const MAX_TEXT: usize = 10_000_000;
+/// A start tag with more attributes than this checks for duplicates through
+/// hash sets. The pairwise scan is cheaper on ordinary tags, but quadratic.
+const ATTR_SCAN_MAX: usize = 32;
 
 /// Safe defaults: no network, no XXE.
 pub fn default_parse_options() -> i32 {
@@ -1753,8 +1756,11 @@ impl<'a> Parser<'a> {
             self.ns_error(&msg);
         }
 
-        let mut seen_keys: std::collections::HashSet<(Option<String>, String)> =
-            std::collections::HashSet::new();
+        // Both sets are built at the first attribute past `ATTR_SCAN_MAX`, so
+        // an ordinary element never seeds a hasher: the expanded names accepted
+        // so far, and keyed hashes of their QNames.
+        let mut seen_keys: Option<std::collections::HashSet<(Option<String>, String)>> = None;
+        let mut seen_qnames: Option<std::collections::HashSet<u64>> = None;
         let mut sax_attrs: Vec<SaxAttr> = std::mem::take(&mut self.scratch_sax);
         sax_attrs.clear();
         for idx in 0..raw_attrs.len() {
@@ -1804,21 +1810,21 @@ impl<'a> Parser<'a> {
             // The attributes already accepted ARE the "seen" set -- a separate
             // vector of copies was allocated per element to hold the same thing.
             // Linear over the accepted attributes is fine for the handful a real
-            // element carries, but it is O(n^2) and an element with 16,000
-            // attributes took 185 ms. Switch to a set once it could matter.
+            // element carries, but it is O(n^2): an element with 100,000
+            // attributes took 12 s. Past `ATTR_SCAN_MAX` both checks use a set.
             // Two kinds of duplicate, and they are not the same error.
             // The same QName twice is a well-formedness violation and fatal.
             // Two DIFFERENT prefixes bound to one URI, with the same local
             // name, only collide after namespace expansion -- that is a
             // namespace error, which C reports and carries on from. Treating
             // both as fatal refused documents libxml2 reads.
-            if sax_attrs
-                .iter()
-                .any(|s| s.prefix == ap_owned && s.local == al_owned)
-            {
-                return Err(self.err(XML_ERR_ATTRIBUTE_REDEFINED, "Attribute redefined"));
-            }
-            if sax_attrs.len() < 32 {
+            if sax_attrs.len() < ATTR_SCAN_MAX {
+                if sax_attrs
+                    .iter()
+                    .any(|s| s.prefix == ap_owned && s.local == al_owned)
+                {
+                    return Err(self.err(XML_ERR_ATTRIBUTE_REDEFINED, "Attribute redefined"));
+                }
                 if uri.is_some()
                     && sax_attrs
                         .iter()
@@ -1827,11 +1833,31 @@ impl<'a> Parser<'a> {
                     self.ns_error("Attribute redefined after namespace expansion");
                 }
             } else {
-                if seen_keys.is_empty() {
+                use std::hash::BuildHasher;
+                let seen = seen_qnames.get_or_insert_with(|| {
+                    let mut set = std::collections::HashSet::with_capacity(raw_attrs.len());
                     for a in sax_attrs.iter() {
-                        seen_keys.insert((a.uri.clone(), a.local.clone()));
+                        let key = set.hasher().hash_one((&a.prefix, &a.local));
+                        set.insert(key);
                     }
+                    set
+                });
+                let key = seen.hasher().hash_one((&ap_owned, &al_owned));
+                // The set holds hashes, not names, so a hit is confirmed by a
+                // scan. A real duplicate is fatal, so that scan runs once.
+                if !seen.insert(key)
+                    && sax_attrs
+                        .iter()
+                        .any(|s| s.prefix == ap_owned && s.local == al_owned)
+                {
+                    return Err(self.err(XML_ERR_ATTRIBUTE_REDEFINED, "Attribute redefined"));
                 }
+                let seen_keys = seen_keys.get_or_insert_with(|| {
+                    sax_attrs
+                        .iter()
+                        .map(|a| (a.uri.clone(), a.local.clone()))
+                        .collect()
+                });
                 if !seen_keys.insert((uri.clone(), al_owned.clone())) && uri.is_some() {
                     self.ns_error("Attribute redefined after namespace expansion");
                 }

@@ -720,30 +720,53 @@ pub fn xml_new_text_writer_memory() -> XmlTextWriter {
 ///
 /// C synthesizes the HTML 4.0 Transitional doctype when the source had none,
 /// and round-trips whatever doctype the source did carry.
+/// `xmlOutputBufferWriteQuotedString`: double quotes unless the literal holds
+/// one, then single quotes; with both, double quotes and `&quot;`. Always
+/// double-quoting wrote `SYSTEM "taco""`, which no parser reads back.
+fn push_quoted(out: &mut String, s: &str) {
+    if !s.contains('"') {
+        out.push('"');
+        out.push_str(s);
+        out.push('"');
+    } else if !s.contains('\'') {
+        out.push('\'');
+        out.push_str(s);
+        out.push('\'');
+    } else {
+        out.push('"');
+        out.push_str(&s.replace('"', "&quot;"));
+        out.push('"');
+    }
+}
+
 fn save_html_doc(doc: &XmlDoc, options: i32) -> Vec<u8> {
     let mut out = String::new();
     if (options & XML_SAVE_NO_DECL) == 0 {
         out.push_str("<!DOCTYPE ");
         let dtd = doc.dtd.as_ref();
-        out.push_str(dtd.and_then(|d| d.name.as_deref()).unwrap_or("html"));
+        // htmlDtdDumpOutput: a doctype without a name is written without
+        // one (`<!DOCTYPE >`); only a document with no doctype at all gets
+        // the default below.
+        let default_name = if dtd.is_some() { "" } else { "html" };
+        out.push_str(dtd.and_then(|d| d.name.as_deref()).unwrap_or(default_name));
         match (
             dtd.and_then(|d| d.public_id.as_deref()),
             dtd.and_then(|d| d.system_id.as_deref()),
         ) {
             (Some(p), sys) => {
-                out.push_str(" PUBLIC \"");
-                out.push_str(p);
-                out.push('"');
+                out.push_str(" PUBLIC ");
+                push_quoted(&mut out, p);
                 if let Some(s) = sys {
-                    out.push_str(" \"");
-                    out.push_str(s);
-                    out.push('"');
+                    out.push(' ');
+                    push_quoted(&mut out, s);
                 }
             }
+            // HTML5's `<!DOCTYPE html SYSTEM "about:legacy-compat">` is
+            // written as plain `<!DOCTYPE html>`, as libxml2 does.
+            (None, Some("about:legacy-compat")) => {}
             (None, Some(s)) => {
-                out.push_str(" SYSTEM \"");
-                out.push_str(s);
-                out.push('"');
+                out.push_str(" SYSTEM ");
+                push_quoted(&mut out, s);
             }
             (None, None) if dtd.is_none() => {
                 // No doctype in the source: C supplies this one.

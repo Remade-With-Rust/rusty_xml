@@ -272,3 +272,83 @@ fn blanks_around_head_and_body_are_kept() {
         "<html> <head> <title>t</title> </head> <body> <p>x</p> </body> </html><!--c-->",
     );
 }
+
+// ---- issue #16: rows found by the oracle-generated fixtures ----
+
+/// Serialization including the DOCTYPE line.
+fn full(src: &str) -> String {
+    String::from_utf8(xml_save_doc(&parse(src), 0)).expect("utf-8")
+}
+
+#[test]
+fn a_doctype_without_a_name_is_written_without_one() {
+    assert_eq!(
+        full("<!DOCTYPE>x"),
+        "<!DOCTYPE >\n<html><body>x</body></html>\n"
+    );
+    assert_eq!(
+        full("<!DOCTYPE >x"),
+        "<!DOCTYPE >\n<html><body>x</body></html>\n"
+    );
+}
+
+#[test]
+fn doctype_literals_are_quoted_as_libxml2_quotes_them() {
+    assert_eq!(
+        full("<!DOCTYPE potato SYSTEM 'taco\"'>"),
+        "<!DOCTYPE potato SYSTEM 'taco\"'>\n\n"
+    );
+    assert_eq!(
+        full("<!DOCTYPE potato PUBLIC 'a\"b' \"c'd\">"),
+        "<!DOCTYPE potato PUBLIC 'a\"b' \"c'd\">\n\n"
+    );
+    assert_eq!(
+        full("<!DOCTYPE html SYSTEM \"about:legacy-compat\"><p>x"),
+        "<!DOCTYPE html>\n<html><body><p>x</p></body></html>\n"
+    );
+    assert_eq!(
+        full("<!DOCTYPE x PUBLIC \"p\" \"about:legacy-compat\">"),
+        "<!DOCTYPE x PUBLIC \"p\" \"about:legacy-compat\">\n\n"
+    );
+}
+
+#[test]
+fn an_unterminated_comment_drops_a_cut_off_closer() {
+    for (src, comment) in [
+        ("<!DOCTYPE html><!--x--", "<!--x-->"),
+        ("<!DOCTYPE html><!--x-", "<!--x-->"),
+        ("<!DOCTYPE html><!--x--!", "<!--x-->"),
+        ("<!DOCTYPE html><!--x", "<!--x-->"),
+        ("<!DOCTYPE html><!---", "<!---->"),
+        ("<!DOCTYPE html><!----", "<!---->"),
+    ] {
+        assert_eq!(
+            full(src),
+            format!("<!DOCTYPE html>\n{comment}\n"),
+            "input: {src:?}"
+        );
+    }
+    same(
+        "<p>a<!--b-c",
+        "<html><body><p>a<!--b-c--></p></body></html>",
+    );
+    same(
+        "<p>a<!--b--x",
+        "<html><body><p>a<!--b--x--></p></body></html>",
+    );
+}
+
+#[test]
+fn the_root_element_is_the_first_html_not_a_later_one() {
+    let doc = parse("<html><body><p>a</p></body></html><div>after</div>");
+    let root = doc.xml_doc_get_root_element().expect("root");
+    let first = doc.first_child(NodeId::DOCUMENT).expect("first html");
+    assert_eq!(
+        root, first,
+        "xmlDocGetRootElement returns the first element child"
+    );
+    assert!(
+        doc.next_sibling(first).is_some(),
+        "the second html is still there"
+    );
+}

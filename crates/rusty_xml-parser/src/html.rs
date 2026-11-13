@@ -728,7 +728,9 @@ impl<'a> Parser<'a> {
 
     /// `htmlParseComment`. A real comment ends at `-->` or `--!>`; a bogus one
     /// (`<!x>`, `<?x>`, `</ x>`) at the next `>`. Either runs to the end of
-    /// input if unterminated.
+    /// input if unterminated, where a real one drops the start of a closer the
+    /// input cut off (`-`, `--`, `--!`): libxml2's `htmlParseData` consumes
+    /// those as a short terminator rather than keeping them as text.
     fn comment(&mut self, bogus: bool) {
         let start = self.pos;
         let len = self.b.len();
@@ -748,7 +750,12 @@ impl<'a> Parser<'a> {
                 match self.src[from..].find("--").map(|k| from + k) {
                     None => {
                         self.pos = len;
-                        break &self.src[start..];
+                        let rest = &self.src[start..];
+                        break rest
+                            .strip_suffix("--!")
+                            .or_else(|| rest.strip_suffix("--"))
+                            .or_else(|| rest.strip_suffix('-'))
+                            .unwrap_or(rest);
                     }
                     Some(d) => match self.b.get(d + 2) {
                         Some(b'>') => {

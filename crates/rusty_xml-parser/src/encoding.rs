@@ -133,6 +133,90 @@ const NAME_MAP: &[(&str, XmlCharEncoding)] = &[
     ("shift-jis", XmlCharEncoding::ShiftJis),
     ("sjis", XmlCharEncoding::ShiftJis),
     ("euc-jp", XmlCharEncoding::EucJp),
+    // The rest of libxml2 2.15.3's built-in table (`xmlEncTable`, encoding.c),
+    // which the names above did not cover. A `<meta charset="latin2">` was
+    // unsupported here and decoded in libxml2 (#27).
+    ("ansi_x3.4-1968", XmlCharEncoding::Ascii),
+    ("arabic", XmlCharEncoding::Iso8859_6),
+    ("asmo-708", XmlCharEncoding::Iso8859_6),
+    ("cp1252", XmlCharEncoding::Windows1252),
+    ("cp819", XmlCharEncoding::Iso8859_1),
+    ("cseucpkdfmtjapanese", XmlCharEncoding::EucJp),
+    ("csiso2022jp", XmlCharEncoding::Iso2022Jp),
+    ("csiso88596e", XmlCharEncoding::Iso8859_6),
+    ("csiso88596i", XmlCharEncoding::Iso8859_6),
+    ("csiso88598e", XmlCharEncoding::Iso8859_8),
+    ("csiso88598i", XmlCharEncoding::Iso8859_8),
+    ("csisolatin2", XmlCharEncoding::Iso8859_2),
+    ("csisolatin3", XmlCharEncoding::Iso8859_3),
+    ("csisolatin4", XmlCharEncoding::Iso8859_4),
+    ("csisolatin5", XmlCharEncoding::Iso8859_9),
+    ("csisolatin6", XmlCharEncoding::Iso8859_10),
+    ("csisolatin9", XmlCharEncoding::Iso8859_15),
+    ("csisolatinarabic", XmlCharEncoding::Iso8859_6),
+    ("csisolatincyrillic", XmlCharEncoding::Iso8859_5),
+    ("csisolatingreek", XmlCharEncoding::Iso8859_7),
+    ("csisolatinhebrew", XmlCharEncoding::Iso8859_8),
+    ("csshiftjis", XmlCharEncoding::ShiftJis),
+    ("csunicode", XmlCharEncoding::Utf16),
+    ("cyrillic", XmlCharEncoding::Iso8859_5),
+    ("ecma-114", XmlCharEncoding::Iso8859_6),
+    ("ecma-118", XmlCharEncoding::Iso8859_7),
+    ("elot_928", XmlCharEncoding::Iso8859_7),
+    ("greek", XmlCharEncoding::Iso8859_7),
+    ("greek8", XmlCharEncoding::Iso8859_7),
+    ("html", XmlCharEncoding::Html),
+    ("ibm819", XmlCharEncoding::Iso8859_1),
+    ("iso latin 1", XmlCharEncoding::Iso8859_1),
+    ("iso latin 2", XmlCharEncoding::Iso8859_2),
+    ("iso-10646-ucs-2", XmlCharEncoding::Ucs2),
+    ("iso-10646-ucs-4", XmlCharEncoding::Ucs4Le),
+    ("iso-8859-6-e", XmlCharEncoding::Iso8859_6),
+    ("iso-8859-6-i", XmlCharEncoding::Iso8859_6),
+    ("iso-8859-8-i", XmlCharEncoding::Iso8859_8),
+    ("iso-ir-100", XmlCharEncoding::Iso8859_1),
+    ("iso-ir-101", XmlCharEncoding::Iso8859_2),
+    ("iso-ir-109", XmlCharEncoding::Iso8859_3),
+    ("iso-ir-110", XmlCharEncoding::Iso8859_4),
+    ("iso-ir-126", XmlCharEncoding::Iso8859_7),
+    ("iso-ir-127", XmlCharEncoding::Iso8859_6),
+    ("iso-ir-138", XmlCharEncoding::Iso8859_8),
+    ("iso-ir-144", XmlCharEncoding::Iso8859_5),
+    ("iso-ir-148", XmlCharEncoding::Iso8859_9),
+    ("iso_8859-6", XmlCharEncoding::Iso8859_6),
+    ("iso_8859-6:1987", XmlCharEncoding::Iso8859_6),
+    ("iso_8859-7", XmlCharEncoding::Iso8859_7),
+    ("iso_8859-7:1987", XmlCharEncoding::Iso8859_7),
+    ("iso_8859-8", XmlCharEncoding::Iso8859_8),
+    ("iso_8859-8:1988", XmlCharEncoding::Iso8859_8),
+    ("iso_8859-9", XmlCharEncoding::Iso8859_9),
+    ("iso_8859-9:1989", XmlCharEncoding::Iso8859_9),
+    ("l1", XmlCharEncoding::Iso8859_1),
+    ("l2", XmlCharEncoding::Iso8859_2),
+    ("l3", XmlCharEncoding::Iso8859_3),
+    ("l4", XmlCharEncoding::Iso8859_4),
+    ("l5", XmlCharEncoding::Iso8859_9),
+    ("l6", XmlCharEncoding::Iso8859_10),
+    ("l9", XmlCharEncoding::Iso8859_15),
+    ("latin2", XmlCharEncoding::Iso8859_2),
+    ("latin3", XmlCharEncoding::Iso8859_3),
+    ("latin4", XmlCharEncoding::Iso8859_4),
+    ("latin5", XmlCharEncoding::Iso8859_9),
+    ("latin6", XmlCharEncoding::Iso8859_10),
+    ("logical", XmlCharEncoding::Iso8859_8),
+    ("ms932", XmlCharEncoding::ShiftJis),
+    ("ms_kanji", XmlCharEncoding::ShiftJis),
+    ("sun_eu_greek", XmlCharEncoding::Iso8859_7),
+    ("unicode-1-1-utf-8", XmlCharEncoding::Utf8),
+    ("unicode11utf8", XmlCharEncoding::Utf8),
+    ("unicode20utf8", XmlCharEncoding::Utf8),
+    ("unicodefffe", XmlCharEncoding::Utf16Be),
+    ("unicodefeff", XmlCharEncoding::Utf16Le),
+    ("visual", XmlCharEncoding::Iso8859_8),
+    ("windows-31j", XmlCharEncoding::ShiftJis),
+    ("x-euc-jp", XmlCharEncoding::EucJp),
+    ("x-sjis", XmlCharEncoding::ShiftJis),
+    ("x-unicode20utf8", XmlCharEncoding::Utf8),
 ];
 
 /// `xmlParseCharEncoding`.
@@ -263,6 +347,20 @@ fn eightbit_to_utf8(input: &[u8], table: &[u16; 128]) -> Vec<u8> {
         }
     }
     out
+}
+
+/// Decode with an ASCII-compatible single-byte encoding: ISO-8859-1 or one of
+/// the 8-bit tables. `None` for every other encoding.
+pub(crate) fn single_byte_to_utf8(input: &[u8], enc: XmlCharEncoding) -> Option<Vec<u8>> {
+    match enc {
+        XmlCharEncoding::Iso8859_1 => Some(latin1_to_utf8(input)),
+        other => table_for(other).map(|t| eightbit_to_utf8(input, t)),
+    }
+}
+
+/// Whether `single_byte_to_utf8` can decode `enc`.
+pub(crate) fn is_single_byte(enc: XmlCharEncoding) -> bool {
+    enc == XmlCharEncoding::Iso8859_1 || table_for(enc).is_some()
 }
 
 fn latin1_to_utf8(input: &[u8]) -> Vec<u8> {

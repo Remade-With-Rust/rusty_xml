@@ -101,10 +101,20 @@ pub fn html_read_memory(
     options: i32,
 ) -> Result<XmlDoc, XmlError> {
     let _ = url;
+    // A BOM, the `encoding` argument or a leading `<?xm` decide the encoding
+    // up front. Otherwise libxml2 decides as it parses: a `<meta>` charset, or
+    // a guess at the first non-ASCII byte (`html_encoding`, #27).
+    let undeclared = encoding.is_none()
+        && crate::encoding::xml_detect_char_encoding(buffer) == crate::encoding::XmlCharEncoding::None
+        && !buffer.starts_with(&[0x1f, 0x8b]);
     // Borrowed and validated once. Copying the input and re-validating it
     // lossily cost +6.5% / +21.9% parse Ir (fragments / pages).
-    let (bytes, _) = crate::encoding::xml_convert_to_utf8_cow(buffer, encoding)?;
-    let text = utf8_cow(bytes);
+    let text = if undeclared {
+        crate::html_encoding::decode(buffer)
+    } else {
+        let (bytes, _) = crate::encoding::xml_convert_to_utf8_cow(buffer, encoding)?;
+        utf8_cow(bytes)
+    };
     let (has_cr, has_nul) = scan_cr_nul(text.as_bytes());
     let text = if has_cr {
         normalize_newlines(text)
@@ -852,7 +862,7 @@ fn decode_none(s: &str, has_nul: bool) -> Cow<'_, str> {
 /// end of input. Script data also tracks libxml2's `<!--` escape states, in
 /// which `<script` and `</script` nest. Returns the end and whether the end
 /// tag was found.
-fn scan_raw(src: &str, b: &[u8], from: usize, name: &[u8], mode: u8) -> (usize, bool) {
+pub(crate) fn scan_raw(src: &str, b: &[u8], from: usize, name: &[u8], mode: u8) -> (usize, bool) {
     let mut m = mode;
     let mut i = from;
     loop {

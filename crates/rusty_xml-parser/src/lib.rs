@@ -13,6 +13,7 @@ mod catalog;
 mod html_entities;
 mod html_tags;
 mod html;
+mod html_encoding;
 mod xinclude;
 mod dtd;
 

@@ -1756,10 +1756,10 @@ impl<'a> Parser<'a> {
             self.ns_error(&msg);
         }
 
-        let mut seen_keys: std::collections::HashSet<(Option<String>, String)> =
-            std::collections::HashSet::new();
-        // Keyed hashes of the QNames accepted so far, built at the first
-        // attribute past `ATTR_SCAN_MAX`.
+        // Both sets are built at the first attribute past `ATTR_SCAN_MAX`, so
+        // an ordinary element never seeds a hasher: the expanded names accepted
+        // so far, and keyed hashes of their QNames.
+        let mut seen_keys: Option<std::collections::HashSet<(Option<String>, String)>> = None;
         let mut seen_qnames: Option<std::collections::HashSet<u64>> = None;
         let mut sax_attrs: Vec<SaxAttr> = std::mem::take(&mut self.scratch_sax);
         sax_attrs.clear();
@@ -1852,11 +1852,12 @@ impl<'a> Parser<'a> {
                 {
                     return Err(self.err(XML_ERR_ATTRIBUTE_REDEFINED, "Attribute redefined"));
                 }
-                if seen_keys.is_empty() {
-                    for a in sax_attrs.iter() {
-                        seen_keys.insert((a.uri.clone(), a.local.clone()));
-                    }
-                }
+                let seen_keys = seen_keys.get_or_insert_with(|| {
+                    sax_attrs
+                        .iter()
+                        .map(|a| (a.uri.clone(), a.local.clone()))
+                        .collect()
+                });
                 if !seen_keys.insert((uri.clone(), al_owned.clone())) && uri.is_some() {
                     self.ns_error("Attribute redefined after namespace expansion");
                 }

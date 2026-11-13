@@ -3,7 +3,6 @@
 # One entry per line: <set>/<input file name>, a TAB, then a reason key.
 # Sets: cases, libxml2, html5lib. Reason keys:
 #   writer-nonascii-refs        a non-ASCII character is written as a character reference by one side and raw by the other
-#   writer-cr-in-text           a carriage return in text is written as `&#13;` by rusty_xml and raw by libxml2
 #   writer-nonascii-attr-name  non-ASCII attribute name written differently from libxml2
 #   writer-attr-escaping        attribute value escaping differs (`<`, `>`, `&` or spaces in URI values)
 #   parser-input-encoding       input bytes decoded differently (invalid UTF-8, a declared charset, or a charset meta libxml2 adds)
@@ -96,7 +95,6 @@ html5lib/html5test-com-007.html	writer-nonascii-refs
 html5lib/html5test-com-009.html	writer-nonascii-refs
 html5lib/html5test-com-010.html	writer-nonascii-refs
 html5lib/html5test-com-011.html	writer-nonascii-refs
-html5lib/plain-text-unsafe-001.html	writer-cr-in-text
 html5lib/plain-text-unsafe-010.html	writer-nonascii-refs
 html5lib/plain-text-unsafe-011.html	writer-nonascii-refs
 html5lib/plain-text-unsafe-012.html	writer-nonascii-refs

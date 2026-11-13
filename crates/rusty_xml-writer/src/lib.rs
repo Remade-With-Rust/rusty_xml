@@ -45,9 +45,12 @@ fn escape_as(s: &str, attr: bool, non_ascii: bool, html: bool) -> String {
             '<' => out.push_str("&lt;"),
             '>' => out.push_str("&gt;"),
             '"' if attr => out.push_str("&quot;"),
-            '\r' => out.push_str("&#13;"),
-            '\t' if attr => out.push_str("&#9;"),
-            '\n' if attr => out.push_str("&#10;"),
+            // XML escapes these so a parser's whitespace normalization gives
+            // them back. libxml2's HTML tables (`htmlEscapeTab`,
+            // `htmlEscapeTabAttr`) escape none of them, in text or attributes.
+            '\r' if !html => out.push_str("&#13;"),
+            '\t' if attr && !html => out.push_str("&#9;"),
+            '\n' if attr && !html => out.push_str("&#10;"),
             c if u < 0x20 && c != '\t' && c != '\n' => {
                 if html {
                     out.push(c);

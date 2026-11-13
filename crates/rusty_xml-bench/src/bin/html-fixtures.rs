@@ -12,7 +12,7 @@
 //! Regenerate with `cargo run --release -p rusty_xml-bench --bin html-fixtures`.
 //! `--check` builds the same outputs in memory and exits 1 on any difference.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -72,8 +72,7 @@ fn oracle() -> PathBuf {
         None => {
             assert!(
                 default.is_file(),
-                "no xmllint: set RUSTY_XML_ORACLE, or build {} (lookups: RUSTY_XML_ORACLE, then {})",
-                default.display(),
+                "no xmllint: set RUSTY_XML_ORACLE, or build {} (lookups: RUSTY_XML_ORACLE, then the default path)",
                 default.display()
             );
             default
@@ -143,6 +142,22 @@ fn expected_path(input: &Path) -> PathBuf {
     input.with_extension("xmllint.html")
 }
 
+/// Fails at the first entry whose path an earlier entry already holds. The error names both
+/// entries by their position in `expected`.
+fn check_no_collisions(expected: &[PathBuf]) -> Result<(), String> {
+    let mut first_at = BTreeMap::new();
+    for (at, path) in expected.iter().enumerate() {
+        if let Some(&earlier) = first_at.get(path) {
+            return Err(format!(
+                "collision: entries {earlier} and {at} both map to {}",
+                path.display()
+            ));
+        }
+        first_at.insert(path, at);
+    }
+    Ok(())
+}
+
 /// Sorted by path, so every run visits the inputs in the same order.
 fn inputs(dir: &Path) -> Vec<PathBuf> {
     let mut found: Vec<PathBuf> = fs::read_dir(dir)
@@ -200,7 +215,7 @@ fn manifest(pin: &OraclePin, cases: usize, libxml2: usize, html5lib: usize) -> S
 }
 
 /// The pinned html5lib-tests checkout under `oracle/`, cloned from GitHub when missing.
-/// Fails unless its HEAD is the pinned SHA and it has no uncommitted or untracked files.
+/// Fails unless HEAD is the pinned SHA and nothing is uncommitted, untracked or ignored.
 fn html5lib_checkout() -> PathBuf {
     let dir = workspace_root().join("oracle").join("html5lib-tests");
     if !dir.exists() {
@@ -217,11 +232,16 @@ fn html5lib_checkout() -> PathBuf {
     );
     let dirty = run_git(
         Some(&dir),
-        &["status", "--porcelain", "--untracked-files=all"],
+        &[
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--ignored",
+        ],
     );
     assert!(
         dirty.is_empty(),
-        "{} has uncommitted or untracked files (reset the checkout yourself):\n{dirty}",
+        "{} has uncommitted, untracked or ignored files (reset the checkout yourself):\n{dirty}",
         dir.display()
     );
     dir
@@ -308,17 +328,15 @@ fn html5lib_cases(tree_construction: &Path) -> Vec<(String, Vec<u8>)> {
     cases
 }
 
-/// A directory under the system temp dir, removed when dropped.
+/// A directory created by the generator, removed when dropped.
 struct TempDir(PathBuf);
 
 impl TempDir {
-    /// Fails when the path already exists, so a planted link or directory is never reused.
-    fn new() -> Self {
-        let path = std::env::temp_dir().join(format!("rusty_xml-html5lib-{}", std::process::id()));
-        fs::create_dir(&path).unwrap_or_else(|e| {
-            panic!("cannot create {} (it must not exist): {e}", path.display())
-        });
-        TempDir(path)
+    /// Creates `path`; fails if it exists, so a planted link or directory is never reused.
+    fn create_at(path: PathBuf) -> Result<Self, String> {
+        fs::create_dir(&path)
+            .map_err(|e| format!("cannot create {} (it must not exist): {e}", path.display()))?;
+        Ok(TempDir(path))
     }
 }
 
@@ -345,7 +363,8 @@ fn html5lib_archive(xmllint: &Path, pin: &OraclePin) -> (Output, usize) {
         .unwrap_or_else(|e| panic!("cannot read the html5lib-tests LICENSE: {e}"));
     let inputs = html5lib_cases(&checkout.join("tree-construction"));
 
-    let temp = TempDir::new();
+    let temp_path = std::env::temp_dir().join(format!("rusty_xml-html5lib-{}", std::process::id()));
+    let temp = TempDir::create_at(temp_path).unwrap_or_else(|e| panic!("{e}"));
     let mut cases = Vec::with_capacity(inputs.len());
     for (name, input) in inputs {
         let path = temp.0.join(&name);
@@ -394,14 +413,12 @@ fn build(xmllint: &Path, pin: &OraclePin, write_copies: bool) -> Vec<Output> {
 
     let mut outputs = copies;
     for dir_inputs in [&cases, &libxml2] {
-        let mut expected_paths = BTreeSet::new();
-        for input in dir_inputs {
-            let path = expected_path(input);
-            assert!(
-                expected_paths.insert(path.clone()),
-                "collision: two inputs map to {}",
-                path.display()
-            );
+        let expected: Vec<PathBuf> = dir_inputs
+            .iter()
+            .map(|input| expected_path(input))
+            .collect();
+        check_no_collisions(&expected).unwrap_or_else(|e| panic!("{e}"));
+        for (input, path) in dir_inputs.iter().zip(expected) {
             let bytes = xmllint_html(xmllint, input);
             outputs.push(Output {
                 path,
@@ -584,5 +601,44 @@ mod tests {
                 ("t-003.html".to_string(), b"<c>".to_vec()),
             ]
         );
+    }
+
+    #[test]
+    fn collision_check_names_both_entries_that_share_a_path() {
+        let expected = vec![
+            PathBuf::from("cases/a.xmllint.html"),
+            PathBuf::from("cases/b.xmllint.html"),
+            PathBuf::from("cases/a.xmllint.html"),
+        ];
+        assert_eq!(
+            check_no_collisions(&expected),
+            Err("collision: entries 0 and 2 both map to cases/a.xmllint.html".to_string())
+        );
+    }
+
+    #[test]
+    fn collision_check_accepts_distinct_paths() {
+        let expected = vec![
+            PathBuf::from("cases/a.xmllint.html"),
+            PathBuf::from("cases/b.xmllint.html"),
+        ];
+        assert_eq!(check_no_collisions(&expected), Ok(()));
+    }
+
+    #[test]
+    fn temp_dir_refuses_a_path_that_already_exists() {
+        let root = std::env::temp_dir().join(format!(
+            "rusty_xml-html-fixtures-test-{}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).expect("create test root");
+        let target = root.join("planted");
+        fs::create_dir(&target).expect("pre-create target");
+        let result = TempDir::create_at(target.clone());
+        fs::remove_dir_all(&root).expect("remove test root");
+        let Err(err) = result else {
+            panic!("create_at reused an existing path");
+        };
+        assert!(err.contains(&target.display().to_string()), "{err}");
     }
 }

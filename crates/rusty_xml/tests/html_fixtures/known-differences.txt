@@ -5,7 +5,7 @@
 #   writer-nonascii-refs        a non-ASCII character is written as a character reference by one side and raw by the other
 #   writer-nonascii-attr-name   non-ASCII attribute name written differently from libxml2
 #   writer-attr-escaping        attribute value escaping differs (`<`, `>`, `&` or spaces in URI values)
-#   parser-input-encoding       input bytes decoded differently (invalid UTF-8, or a charset meta libxml2 adds)
+#   parser-input-encoding       input bytes decoded differently (invalid UTF-8, a declared charset, or a charset meta libxml2 adds)
 cases/named-refs-no-semicolon-text.html	writer-nonascii-refs
 cases/numeric-refs.html	writer-nonascii-refs
 libxml2/entities2.html	writer-nonascii-refs

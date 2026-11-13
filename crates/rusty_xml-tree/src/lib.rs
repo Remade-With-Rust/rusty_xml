@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 
 use std::collections::HashMap;
+use std::num::NonZeroU32;
 
 /// libxml2 `xmlElementType` discriminants.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -110,24 +111,86 @@ impl NodeId {
     }
 }
 
+/// A link between two nodes of one document, or none: a [`NodeId`] stored as
+/// `id + 1` in a `NonZeroU32`, so the absent case costs no extra bytes. As
+/// `Option<NodeId>` each of a node's seven links took 8 bytes; this takes 4.
+/// [`XmlDoc::parent`], [`XmlDoc::first_child`] and the other accessors still
+/// return `Option<NodeId>`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct Link(Option<NonZeroU32>);
+
+impl Link {
+    /// No node.
+    pub const NONE: Link = Link(None);
+
+    /// The node linked to, if any.
+    #[inline]
+    pub fn get(self) -> Option<NodeId> {
+        self.0.map(|n| NodeId(n.get() - 1))
+    }
+
+    #[inline]
+    pub fn is_none(self) -> bool {
+        self.0.is_none()
+    }
+
+    #[inline]
+    pub fn is_some(self) -> bool {
+        self.0.is_some()
+    }
+}
+
+impl From<NodeId> for Link {
+    #[inline]
+    fn from(id: NodeId) -> Self {
+        // The arena is capped far below u32::MAX nodes, so id + 1 cannot wrap.
+        Link(NonZeroU32::new(id.0.wrapping_add(1)))
+    }
+}
+
+impl From<Option<NodeId>> for Link {
+    #[inline]
+    fn from(id: Option<NodeId>) -> Self {
+        id.map_or(Link::NONE, Link::from)
+    }
+}
+
+impl std::fmt::Debug for Link {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.get().fmt(f)
+    }
+}
+
+/// A string interned in one document: a namespace prefix or URI. A document
+/// holds a handful of distinct ones, and storing each node's own copy cost a
+/// 24-byte `Option<String>` per field per node plus an allocation per
+/// namespaced node. Resolve it with [`XmlDoc::atom`].
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct Atom(NonZeroU32);
+
+/// Interned strings are found by a scan while there are at most this many,
+/// and through a hash index after. Prefixes and URIs come from the input, so
+/// the index keeps the standard library's keyed hasher.
+const ATOM_SCAN_MAX: usize = 16;
+
 
 
 #[derive(Clone, Debug)]
 pub struct Node {
     pub kind: NodeKind,
     pub name: String,
-    pub prefix: Option<String>,
-    pub ns_uri: Option<String>,
+    /// Interned in the owning document; read it with [`XmlDoc::prefix`].
+    pub prefix: Option<Atom>,
+    /// Interned in the owning document; read it with [`XmlDoc::ns_uri`].
+    pub ns_uri: Option<Atom>,
     pub content: String,
-    pub parent: Option<NodeId>,
-    pub first_child: Option<NodeId>,
-    pub last_child: Option<NodeId>,
-    pub prev_sibling: Option<NodeId>,
-    pub next_sibling: Option<NodeId>,
-    pub first_attr: Option<NodeId>,
-    pub last_attr: Option<NodeId>,
-    /// Namespace declarations on this element (`xmlns` / `xmlns:prefix`), in source order.
-    pub ns_defs: Vec<(Option<String>, String)>,
+    pub parent: Link,
+    pub first_child: Link,
+    pub last_child: Link,
+    pub prev_sibling: Link,
+    pub next_sibling: Link,
+    pub first_attr: Link,
+    pub last_attr: Link,
 }
 
 impl Node {
@@ -138,14 +201,13 @@ impl Node {
             prefix: None,
             ns_uri: None,
             content: String::new(),
-            parent: None,
-            first_child: None,
-            last_child: None,
-            prev_sibling: None,
-            next_sibling: None,
-            first_attr: None,
-            last_attr: None,
-            ns_defs: Vec::new(),
+            parent: Link::NONE,
+            first_child: Link::NONE,
+            last_child: Link::NONE,
+            prev_sibling: Link::NONE,
+            next_sibling: Link::NONE,
+            first_attr: Link::NONE,
+            last_attr: Link::NONE,
         }
     }
 }
@@ -196,6 +258,15 @@ pub struct XmlDoc {
     /// order, so sorted. libxml2 gives such an attribute no children: its value
     /// reads as `""`, but it serializes as the bare name. Empty for XML.
     pub html_bare_attrs: Vec<NodeId>,
+    /// Interned prefixes and URIs; [`Atom`] `n` is `atoms[n - 1]`.
+    atoms: Vec<Box<str>>,
+    /// Hash index over `atoms`, built once there are more than
+    /// `ATOM_SCAN_MAX` of them.
+    atom_index: HashMap<Box<str>, Atom>,
+    /// Namespace declarations (`xmlns` / `xmlns:prefix`) per element, in
+    /// source order, sorted by element. Few elements declare any, so a side
+    /// table costs less than a field on every node.
+    ns_defs: Vec<(NodeId, Vec<(Option<String>, String)>)>,
 }
 
 impl Default for XmlDoc {
@@ -235,7 +306,68 @@ impl XmlDoc {
             reference_text: Default::default(),
             elements_with_entity_refs: Default::default(),
             html_bare_attrs: Vec::new(),
+            atoms: Vec::new(),
+            atom_index: HashMap::new(),
+            ns_defs: Vec::new(),
         }
+    }
+
+    /// The string an [`Atom`] of this document stands for.
+    #[inline]
+    pub fn atom(&self, a: Atom) -> &str {
+        &self.atoms[a.0.get() as usize - 1]
+    }
+
+    /// Intern `s` in this document.
+    pub fn intern(&mut self, s: &str) -> Atom {
+        let hit = if self.atom_index.is_empty() {
+            self.atoms
+                .iter()
+                .position(|a| **a == *s)
+                .map(|i| Atom(NonZeroU32::new(i as u32 + 1).expect("i + 1 > 0")))
+        } else {
+            self.atom_index.get(s).copied()
+        };
+        if let Some(a) = hit {
+            return a;
+        }
+        self.atoms.push(s.into());
+        let a = Atom(NonZeroU32::new(self.atoms.len() as u32).expect("len > 0"));
+        if self.atoms.len() > ATOM_SCAN_MAX {
+            if self.atom_index.is_empty() {
+                for (i, t) in self.atoms.iter().enumerate() {
+                    let at = Atom(NonZeroU32::new(i as u32 + 1).expect("i + 1 > 0"));
+                    self.atom_index.insert(t.clone(), at);
+                }
+            } else {
+                self.atom_index.insert(s.into(), a);
+            }
+        }
+        a
+    }
+
+    /// Set a node's namespace prefix.
+    pub fn set_prefix(&mut self, id: NodeId, prefix: Option<&str>) {
+        let a = prefix.map(|p| self.intern(p));
+        self.node_mut(id).prefix = a;
+    }
+
+    /// Set a node's namespace URI.
+    pub fn set_ns_uri(&mut self, id: NodeId, uri: Option<&str>) {
+        let a = uri.map(|u| self.intern(u));
+        self.node_mut(id).ns_uri = a;
+    }
+
+    /// Number of nodes the arena can hold without reallocating.
+    pub fn node_capacity(&self) -> usize {
+        self.nodes.capacity()
+    }
+
+    /// Release node-arena capacity no node uses. A parser reserves from the
+    /// input length, which overshoots on markup-light documents; the HTML
+    /// parser calls this once its tree is complete.
+    pub fn shrink_nodes(&mut self) {
+        self.nodes.shrink_to_fit();
     }
 
     /// Pre-size the node arena. XML runs about one node per 10-15 input bytes,
@@ -284,11 +416,11 @@ impl XmlDoc {
     }
 
     pub fn prefix(&self, id: NodeId) -> Option<&str> {
-        self.node(id).prefix.as_deref()
+        self.node(id).prefix.map(|a| self.atom(a))
     }
 
     pub fn ns_uri(&self, id: NodeId) -> Option<&str> {
-        self.node(id).ns_uri.as_deref()
+        self.node(id).ns_uri.map(|a| self.atom(a))
     }
 
     pub fn content(&self, id: NodeId) -> &str {
@@ -296,31 +428,38 @@ impl XmlDoc {
     }
 
     pub fn parent(&self, id: NodeId) -> Option<NodeId> {
-        self.node(id).parent
+        self.node(id).parent.get()
     }
 
     pub fn first_child(&self, id: NodeId) -> Option<NodeId> {
-        self.node(id).first_child
+        self.node(id).first_child.get()
     }
 
     pub fn last_child(&self, id: NodeId) -> Option<NodeId> {
-        self.node(id).last_child
+        self.node(id).last_child.get()
     }
 
     pub fn next_sibling(&self, id: NodeId) -> Option<NodeId> {
-        self.node(id).next_sibling
+        self.node(id).next_sibling.get()
     }
 
     pub fn prev_sibling(&self, id: NodeId) -> Option<NodeId> {
-        self.node(id).prev_sibling
+        self.node(id).prev_sibling.get()
     }
 
     pub fn first_attr(&self, id: NodeId) -> Option<NodeId> {
-        self.node(id).first_attr
+        self.node(id).first_attr.get()
     }
 
     pub fn ns_defs(&self, id: NodeId) -> &[(Option<String>, String)] {
-        &self.node(id).ns_defs
+        match self.ns_defs.binary_search_by_key(&id.0, |(n, _)| n.0) {
+            Ok(i) => &self.ns_defs[i].1,
+            Err(_) => &[],
+        }
+    }
+
+    pub fn last_attr(&self, id: NodeId) -> Option<NodeId> {
+        self.node(id).last_attr.get()
     }
 
     /// Allocate a node whose name is implied by its kind, storing no String.
@@ -369,7 +508,7 @@ impl XmlDoc {
     #[doc(alias = "xmlNewNode")]
     pub fn xml_new_node(&mut self, ns_uri: Option<&str>, name: &str) -> NodeId {
         let id = self.alloc(NodeKind::Element, name);
-        self.node_mut(id).ns_uri = ns_uri.map(str::to_string);
+        self.set_ns_uri(id, ns_uri);
         id
     }
 
@@ -413,15 +552,15 @@ impl XmlDoc {
             return;
         }
         self.xml_unlink_node(child);
-        self.node_mut(child).parent = Some(parent);
-        let last = self.node(parent).last_child;
+        self.node_mut(child).parent = Link::from(Some(parent));
+        let last = self.node(parent).last_child.get();
         if let Some(l) = last {
-            self.node_mut(l).next_sibling = Some(child);
-            self.node_mut(child).prev_sibling = Some(l);
+            self.node_mut(l).next_sibling = Link::from(Some(child));
+            self.node_mut(child).prev_sibling = Link::from(Some(l));
         } else {
-            self.node_mut(parent).first_child = Some(child);
+            self.node_mut(parent).first_child = Link::from(Some(child));
         }
-        self.node_mut(parent).last_child = Some(child);
+        self.node_mut(parent).last_child = Link::from(Some(child));
         // `xmlDocGetRootElement` is the FIRST element child of the document.
         // Caching every appended element made a second root -- which HTML
         // content after `</html>` creates, as in libxml2 -- take the root
@@ -435,16 +574,16 @@ impl XmlDoc {
     #[doc(alias = "xmlAddNextSibling")]
     pub fn xml_add_next_sibling(&mut self, cur: NodeId, elem: NodeId) {
         self.xml_unlink_node(elem);
-        let parent = self.node(cur).parent;
-        let next = self.node(cur).next_sibling;
-        self.node_mut(elem).parent = parent;
-        self.node_mut(elem).prev_sibling = Some(cur);
-        self.node_mut(elem).next_sibling = next;
-        self.node_mut(cur).next_sibling = Some(elem);
+        let parent = self.node(cur).parent.get();
+        let next = self.node(cur).next_sibling.get();
+        self.node_mut(elem).parent = Link::from(parent);
+        self.node_mut(elem).prev_sibling = Link::from(Some(cur));
+        self.node_mut(elem).next_sibling = Link::from(next);
+        self.node_mut(cur).next_sibling = Link::from(Some(elem));
         if let Some(n) = next {
-            self.node_mut(n).prev_sibling = Some(elem);
+            self.node_mut(n).prev_sibling = Link::from(Some(elem));
         } else if let Some(p) = parent {
-            self.node_mut(p).last_child = Some(elem);
+            self.node_mut(p).last_child = Link::from(Some(elem));
         }
     }
 
@@ -452,16 +591,16 @@ impl XmlDoc {
     #[doc(alias = "xmlAddPrevSibling")]
     pub fn xml_add_prev_sibling(&mut self, cur: NodeId, elem: NodeId) {
         self.xml_unlink_node(elem);
-        let parent = self.node(cur).parent;
-        let prev = self.node(cur).prev_sibling;
-        self.node_mut(elem).parent = parent;
-        self.node_mut(elem).next_sibling = Some(cur);
-        self.node_mut(elem).prev_sibling = prev;
-        self.node_mut(cur).prev_sibling = Some(elem);
+        let parent = self.node(cur).parent.get();
+        let prev = self.node(cur).prev_sibling.get();
+        self.node_mut(elem).parent = Link::from(parent);
+        self.node_mut(elem).next_sibling = Link::from(Some(cur));
+        self.node_mut(elem).prev_sibling = Link::from(prev);
+        self.node_mut(cur).prev_sibling = Link::from(Some(elem));
         if let Some(p) = prev {
-            self.node_mut(p).next_sibling = Some(elem);
+            self.node_mut(p).next_sibling = Link::from(Some(elem));
         } else if let Some(par) = parent {
-            self.node_mut(par).first_child = Some(elem);
+            self.node_mut(par).first_child = Link::from(Some(elem));
         }
     }
 
@@ -471,29 +610,29 @@ impl XmlDoc {
         if id == NodeId::DOCUMENT {
             return;
         }
-        let parent = self.node(id).parent;
-        let prev = self.node(id).prev_sibling;
-        let next = self.node(id).next_sibling;
+        let parent = self.node(id).parent.get();
+        let prev = self.node(id).prev_sibling.get();
+        let next = self.node(id).next_sibling.get();
         if let Some(p) = prev {
-            self.node_mut(p).next_sibling = next;
+            self.node_mut(p).next_sibling = Link::from(next);
         }
         if let Some(n) = next {
-            self.node_mut(n).prev_sibling = prev;
+            self.node_mut(n).prev_sibling = Link::from(prev);
         }
         if let Some(par) = parent {
-            if self.node(par).first_child == Some(id) {
-                self.node_mut(par).first_child = next;
+            if self.node(par).first_child.get() == Some(id) {
+                self.node_mut(par).first_child = Link::from(next);
             }
-            if self.node(par).last_child == Some(id) {
-                self.node_mut(par).last_child = prev;
+            if self.node(par).last_child.get() == Some(id) {
+                self.node_mut(par).last_child = Link::from(prev);
             }
         }
         if self.root == Some(id) {
             self.root = None;
         }
-        self.node_mut(id).parent = None;
-        self.node_mut(id).prev_sibling = None;
-        self.node_mut(id).next_sibling = None;
+        self.node_mut(id).parent = Link::from(None);
+        self.node_mut(id).prev_sibling = Link::from(None);
+        self.node_mut(id).next_sibling = Link::from(None);
     }
 
     /// `xmlReplaceNode`.
@@ -515,38 +654,50 @@ impl XmlDoc {
         value: String,
     ) -> NodeId {
         let id = self.alloc(NodeKind::Attribute, name);
+        let prefix = prefix.map(|p| self.intern(&p));
         self.node_mut(id).prefix = prefix;
         self.node_mut(id).content = value;
-        self.node_mut(id).parent = Some(elem);
-        let last = self.node(elem).last_attr;
+        self.node_mut(id).parent = Link::from(Some(elem));
+        let last = self.node(elem).last_attr.get();
         if let Some(l) = last {
-            self.node_mut(l).next_sibling = Some(id);
-            self.node_mut(id).prev_sibling = Some(l);
+            self.node_mut(l).next_sibling = Link::from(Some(id));
+            self.node_mut(id).prev_sibling = Link::from(Some(l));
         } else {
-            self.node_mut(elem).first_attr = Some(id);
+            self.node_mut(elem).first_attr = Link::from(Some(id));
         }
-        self.node_mut(elem).last_attr = Some(id);
+        self.node_mut(elem).last_attr = Link::from(Some(id));
         id
     }
 
     pub fn add_attr(&mut self, elem: NodeId, name: &str, prefix: Option<&str>, value: &str) -> NodeId {
         let id = self.alloc(NodeKind::Attribute, name);
-        self.node_mut(id).prefix = prefix.map(str::to_string);
+        self.set_prefix(id, prefix);
         self.node_mut(id).content = value.to_string();
-        self.node_mut(id).parent = Some(elem);
-        let last = self.node(elem).last_attr;
+        self.node_mut(id).parent = Link::from(Some(elem));
+        let last = self.node(elem).last_attr.get();
         if let Some(l) = last {
-            self.node_mut(l).next_sibling = Some(id);
-            self.node_mut(id).prev_sibling = Some(l);
+            self.node_mut(l).next_sibling = Link::from(Some(id));
+            self.node_mut(id).prev_sibling = Link::from(Some(l));
         } else {
-            self.node_mut(elem).first_attr = Some(id);
+            self.node_mut(elem).first_attr = Link::from(Some(id));
         }
-        self.node_mut(elem).last_attr = Some(id);
+        self.node_mut(elem).last_attr = Link::from(Some(id));
         id
     }
 
     pub fn push_ns_def(&mut self, elem: NodeId, prefix: Option<String>, uri: String) {
-        self.node_mut(elem).ns_defs.push((prefix, uri));
+        // A parser declares on the element it just created, so the common
+        // case appends to the last entry or after it.
+        match self.ns_defs.last_mut() {
+            Some((n, defs)) if *n == elem => defs.push((prefix, uri)),
+            Some((n, _)) if n.0 > elem.0 => {
+                match self.ns_defs.binary_search_by_key(&elem.0, |(n, _)| n.0) {
+                    Ok(i) => self.ns_defs[i].1.push((prefix, uri)),
+                    Err(i) => self.ns_defs.insert(i, (elem, vec![(prefix, uri)])),
+                }
+            }
+            _ => self.ns_defs.push((elem, vec![(prefix, uri)])),
+        }
     }
 
     /// `xmlSetProp`.
@@ -591,19 +742,19 @@ impl XmlDoc {
             let next = self.next_sibling(id);
             if self.node(id).prefix.is_none() && self.node(id).name == name {
                 if let Some(p) = prev {
-                    self.node_mut(p).next_sibling = next;
+                    self.node_mut(p).next_sibling = Link::from(next);
                 } else {
-                    self.node_mut(node).first_attr = next;
+                    self.node_mut(node).first_attr = Link::from(next);
                 }
                 if next.is_none() {
-                    self.node_mut(node).last_attr = prev;
+                    self.node_mut(node).last_attr = Link::from(prev);
                 }
                 if let Some(n) = next {
-                    self.node_mut(n).prev_sibling = prev;
+                    self.node_mut(n).prev_sibling = Link::from(prev);
                 }
-                self.node_mut(id).parent = None;
-                self.node_mut(id).prev_sibling = None;
-                self.node_mut(id).next_sibling = None;
+                self.node_mut(id).parent = Link::from(None);
+                self.node_mut(id).prev_sibling = Link::from(None);
+                self.node_mut(id).next_sibling = Link::from(None);
                 return true;
             }
             prev = Some(id);
@@ -703,8 +854,8 @@ impl XmlDoc {
     /// `xmlSetNs`.
     #[doc(alias = "xmlSetNs")]
     pub fn xml_set_ns(&mut self, node: NodeId, href: Option<&str>, prefix: Option<&str>) {
-        self.node_mut(node).ns_uri = href.map(str::to_string);
-        self.node_mut(node).prefix = prefix.map(str::to_string);
+        self.set_ns_uri(node, href);
+        self.set_prefix(node, prefix);
     }
 
     /// `xmlCopyDoc` — deep copy.
@@ -786,12 +937,12 @@ impl XmlDoc {
         while let Some((s, parent)) = stack.pop() {
             let n = src.node(s);
             let copy = self.alloc(n.kind, n.name.clone());
-            {
-                let d = self.node_mut(copy);
-                d.prefix = n.prefix.clone();
-                d.ns_uri = n.ns_uri.clone();
-                d.content = n.content.clone();
-                d.ns_defs = n.ns_defs.clone();
+            // Atoms belong to their document: re-intern through this one.
+            self.set_prefix(copy, src.prefix(s));
+            self.set_ns_uri(copy, src.ns_uri(s));
+            self.node_mut(copy).content = n.content.clone();
+            for (p, u) in src.ns_defs(s) {
+                self.push_ns_def(copy, p.clone(), u.clone());
             }
             self.xml_add_child(parent, copy);
             // Carry the source's own judgement across rather than marking
@@ -805,14 +956,8 @@ impl XmlDoc {
             let mut a = src.first_attr(s);
             while let Some(x) = a {
                 let an = src.node(x);
-                let (nm, pre, val, uri) = (
-                    an.name.clone(),
-                    an.prefix.clone(),
-                    an.content.clone(),
-                    an.ns_uri.clone(),
-                );
-                let ac = self.add_attr_owned(copy, nm, pre, val);
-                self.node_mut(ac).ns_uri = uri;
+                let ac = self.add_attr(copy, &an.name, src.prefix(x), &an.content);
+                self.set_ns_uri(ac, src.ns_uri(x));
                 a = src.next_sibling(x);
             }
             let mut k = src.last_child(s);
@@ -821,5 +966,56 @@ impl XmlDoc {
                 k = src.prev_sibling(x);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod layout {
+    use super::*;
+
+    /// Issue #23: a node was 184 bytes, two thirds of a parsed HTML tree's heap.
+    /// Growing it again should be a decision, not an accident.
+    #[test]
+    fn node_stays_88_bytes_on_64_bit() {
+        if std::mem::size_of::<usize>() == 8 {
+            assert_eq!(std::mem::size_of::<Node>(), 88);
+        }
+        assert_eq!(std::mem::size_of::<Link>(), 4);
+        assert_eq!(std::mem::size_of::<Option<Atom>>(), 4);
+    }
+
+    #[test]
+    fn links_round_trip_and_atoms_are_shared() {
+        let mut doc = XmlDoc::xml_new_doc(None);
+        let a = doc.xml_new_node(Some("urn:x"), "a");
+        let b = doc.xml_new_node(Some("urn:x"), "b");
+        doc.xml_add_child(NodeId::DOCUMENT, a);
+        doc.xml_add_child(a, b);
+        assert_eq!(doc.parent(b), Some(a));
+        assert_eq!(doc.parent(NodeId::DOCUMENT), None);
+        assert_eq!(doc.first_child(NodeId::DOCUMENT), Some(a));
+        assert_eq!(doc.node(a).ns_uri, doc.node(b).ns_uri);
+        assert_eq!(doc.ns_uri(b), Some("urn:x"));
+        // past the scan limit the hash index takes over and still dedupes
+        let uris: Vec<String> = (0..40).map(|i| format!("urn:{i}")).collect();
+        let first: Vec<Atom> = uris.iter().map(|u| doc.intern(u)).collect();
+        let again: Vec<Atom> = uris.iter().map(|u| doc.intern(u)).collect();
+        assert_eq!(first, again);
+        assert_eq!(doc.atom(first[39]), "urn:39");
+        assert_eq!(doc.intern("urn:x"), doc.node(a).ns_uri.unwrap());
+    }
+
+    #[test]
+    fn ns_defs_side_table_keeps_order_per_element() {
+        let mut doc = XmlDoc::xml_new_doc(None);
+        let a = doc.xml_new_node(None, "a");
+        let b = doc.xml_new_node(None, "b");
+        doc.push_ns_def(b, Some("p".into()), "u1".into());
+        doc.push_ns_def(a, None, "u0".into()); // out of creation order
+        doc.push_ns_def(b, Some("q".into()), "u2".into());
+        doc.push_ns_def(a, Some("r".into()), "u3".into());
+        assert_eq!(doc.ns_defs(a), &[(None, "u0".to_string()), (Some("r".to_string()), "u3".to_string())]);
+        assert_eq!(doc.ns_defs(b), &[(Some("p".to_string()), "u1".to_string()), (Some("q".to_string()), "u2".to_string())]);
+        assert!(doc.ns_defs(NodeId::DOCUMENT).is_empty());
     }
 }

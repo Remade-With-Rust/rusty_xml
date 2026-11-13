@@ -203,7 +203,10 @@ fn normalize_newlines(s: Cow<'_, str>) -> Cow<'_, str> {
 }
 
 fn html_parse_str(text: &str, options: i32, has_nul: bool) -> XmlDoc {
-    let mut doc = XmlDoc::xml_new_doc(Some("1.0"));
+    // Sized for the densest markup measured, about one node per 10 input
+    // bytes, so the arena never doubles and copies its way up; the slack
+    // this leaves on lighter pages is released once the tree is built (#22).
+    let mut doc = XmlDoc::with_node_capacity(Some("1.0"), text.len() / 10);
     doc.encoding = Some("HTML".into());
     // Mark it as an HTML document so the serializer can tell: C emits the
     // doctype where XML would emit a declaration.
@@ -222,6 +225,7 @@ fn html_parse_str(text: &str, options: i32, has_nul: bool) -> XmlDoc {
         has_nul,
     };
     p.document();
+    p.doc.shrink_nodes();
     p.doc
 }
 

@@ -45,6 +45,7 @@ dependencies = [
  "rusty_xml-valid",
  "rusty_xml-writer",
  "rusty_xml-xpath",
+ "rusty_zstd",
 ]
 
 [[package]]
@@ -60,6 +61,7 @@ version = "0.8.5"
 dependencies = [
  "rusty_xml",
  "rusty_xml-alloc",
+ "rusty_zstd",
 ]
 
 [[package]]
@@ -120,6 +122,12 @@ version = "0.8.5"
 dependencies = [
  "rusty_xml-tree",
 ]
+
+[[package]]
+name = "rusty_zstd"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "864f2400b06de8b2491e0991790c5f01681c254a428636529c97ec26159efe42"
 
 [[package]]
 name = "windows-link"

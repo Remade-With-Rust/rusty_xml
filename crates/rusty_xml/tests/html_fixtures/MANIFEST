@@ -1,0 +1,7 @@
+oracle: v2.15.3 c94eb0210183b9d7cb43f8e7fddc6be55843ef49 (libxml version 21503)
+command: xmllint --html <input>
+html5lib-tests: 9329e64694e7835d0dcff9811e22856ef6ad16f9
+count cases: 116
+count libxml2: 47
+count html5lib: 1592
+regenerate: cargo run --release -p rusty_xml-bench --bin html-fixtures

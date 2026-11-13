@@ -23,5 +23,8 @@ rusty_xml-writer = { workspace = true }
 rusty_xml-xpath = { workspace = true }
 rusty_xml-valid = { workspace = true }
 
+[dev-dependencies]
+rusty_zstd = "0.5"
+
 [lints]
 workspace = true

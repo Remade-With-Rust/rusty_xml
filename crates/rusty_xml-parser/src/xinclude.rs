@@ -120,12 +120,12 @@ fn graft(dst: &mut XmlDoc, _parent: NodeId, before: NodeId, src: &XmlDoc, src_id
 fn copy_node(dst: &mut XmlDoc, src: &XmlDoc, id: NodeId) -> NodeId {
     let kind = src.kind(id);
     let n = dst.alloc(kind, src.name(id));
-    {
-        let node = dst.node_mut(n);
-        node.prefix = src.prefix(id).map(str::to_string);
-        node.ns_uri = src.ns_uri(id).map(str::to_string);
-        node.content = src.content(id).to_string();
-        node.ns_defs = src.ns_defs(id).to_vec();
+    // Prefixes and URIs are interned per document: re-intern through `dst`.
+    dst.set_prefix(n, src.prefix(id));
+    dst.set_ns_uri(n, src.ns_uri(id));
+    dst.node_mut(n).content = src.content(id).to_string();
+    for (p, u) in src.ns_defs(id) {
+        dst.push_ns_def(n, p.clone(), u.clone());
     }
     let mut a = src.first_attr(id);
     while let Some(x) = a {

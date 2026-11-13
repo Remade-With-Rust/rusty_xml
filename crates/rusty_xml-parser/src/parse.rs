@@ -1885,8 +1885,8 @@ impl<'a> Parser<'a> {
         );
 
         let elem = self.doc.alloc(NodeKind::Element, local);
-        self.doc.node_mut(elem).prefix = prefix.map(str::to_string);
-        self.doc.node_mut(elem).ns_uri = elem_uri;
+        self.doc.set_prefix(elem, prefix);
+        self.doc.set_ns_uri(elem, elem_uri.as_deref());
         for i in 0..self.ns_stack.last().map_or(0, Vec::len) {
             let (p, u) = {
                 let f = self.ns_stack.last().unwrap();
@@ -1898,9 +1898,8 @@ impl<'a> Parser<'a> {
             sax_attrs.clear();
         } else {
             for a in sax_attrs.drain(..) {
-                let uri = a.uri;
                 let aid = self.doc.add_attr_owned(elem, a.local, a.prefix, a.value);
-                self.doc.node_mut(aid).ns_uri = uri;
+                self.doc.set_ns_uri(aid, a.uri.as_deref());
             }
         }
         self.doc.xml_add_child(parent, elem);
@@ -1911,7 +1910,7 @@ impl<'a> Parser<'a> {
         self.scratch_sax = sax_attrs;
 
         if empty {
-            let uri = self.doc.node(elem).ns_uri.as_deref();
+            let uri = self.doc.ns_uri(elem);
             self.sax.end_element_ns(local, prefix, uri);
             self.ns_stack.pop();
             self.depth -= 1;
@@ -1952,7 +1951,7 @@ impl<'a> Parser<'a> {
                 format!("Opening and ending tag mismatch: {qname} and {end_name}"),
             ));
         }
-        let uri = self.doc.node(open.elem).ns_uri.as_deref();
+        let uri = self.doc.ns_uri(open.elem);
         self.sax.end_element_ns(local, prefix, uri);
         self.ns_stack.pop();
         self.stack.pop();

@@ -136,7 +136,7 @@ impl<'a> Reader<'a> {
         let (prefix, local) = split_qname(&qname);
         let elem = self.doc.xml_new_node(None, local);
         if let Some(p) = prefix {
-            self.doc.node_mut(elem).prefix = Some(p.to_string());
+            self.doc.set_prefix(elem, Some(p));
         }
         loop {
             self.skip_ws();

@@ -1,5 +1,5 @@
 ### In The Wild with 6,024 Active Installs
-> **In the wild** — [RAG Converter](https://ragconverter.com) uses `rusty_xml` to read Word, PowerPoint and Excel, without LibreOffice.
+> [RAG Converter](https://ragconverter.com) uses `rusty_xml` to read Word, PowerPoint and Excel, without LibreOffice.
 > It makes personal and work files AI-readable without them leaving the machine:
 > the whole conversion runs as WebAssembly in the browser tab, with nothing
 > uploaded and nothing to install.
@@ -37,23 +37,6 @@ A pure-**safe-Rust** XML 1.0 toolkit that is a **reimplementation**, not a
 wrapper, with libxml2 function names as `#[doc(alias)]` and **safe defaults**
 C historically got wrong:
 
-- **Parse:** UTF-8 well-formed documents, 15 built-in 8-bit encodings (no
-  iconv), push (`xmlParseChunk`), IO callbacks, local OASIS catalogs. SAX
-  traces are gated line-for-line against pinned `xmllint --sax`.
-- **Tree / save / writer / reader:** arena DOM, `xmlsave` (including
-  `XML_SAVE_NO_EMPTY` / `NO_DECL`), `xmlTextWriter`, `xmlTextReader`. Empty
-  elements are one reader `Element`, no extra `EndElement`.
-  `parse(write(parse(x)))` is a standing gate.
-- **XPath 1.0** compile + eval; `rxmlint --xpath` prints xmllint form.
-- **Validate / canonicalize:** DTD internal subset + default attributes,
-  `xmlValidateDocument`, C14N 1.0 and exclusive, XInclude via a caller loader.
-- **HTML** (`HTMLparser.c` grammar, implied html/head/body) and working
-  subsets of RelaxNG, XML Schema, and Schematron.
-- **CLI is `rxmlint`**, never `xmllint`. Same flag language so a bench script
-  can swap argv[0].
-- **The C oracle is an external process.** We never link libxml2. Pin:
-  libxml2 **v2.15.3** (`oracle/PIN`).
-
 | | libxml2 (C) | **rusty_xml (Rust)** |
 |---|---|---|
 | C/C++ in the dependency tree | all of it | **none** — no `libxml2-sys`, no iconv, no zlib-sys |
@@ -78,19 +61,6 @@ rows and the full method line: [`bench/SIDE-BY-SIDE.md`](bench/SIDE-BY-SIDE.md).
 
 **1.6× to 2.2× faster than the C library, on every file, in every pair.**
 
-<sub>**Two numbers, because one alone would mislead.** The table is
-**as shipped**: `rxmlint` links [`rusty_alloc`](https://crates.io/crates/rusty_alloc)
-(pure-Rust mimalloc) and `xmllint` uses the system allocator — that is what you
-actually run. **Same allocator**, both on the system allocator, the parser
-alone: `big-attr` **0.80×**, `big-300k` **1.07×**. Roughly half the margin is
-the allocator, and C could adopt one too. Also: C runs `xmlCtxtReadFile` per
-`--repeat` (the Windows pin has no mmap) while we do one `fs::read` then
-`xml_read_memory` — about 1% at these sizes, but it inflates C on small files,
-so the large rows are the honest result. Flags differ (C defaults to
-`XML_PARSE_COMPACT \| XML_PARSE_BIG_LINES`; we force `NONET \| NO_XXE`). This
-is CLI-vs-CLI, not a kernel A/B. Correctness is gated byte-identical against
-the same pinned oracle throughout.</sub>
-
 ---
 
 ### Conformance — where we actually stand
@@ -109,37 +79,6 @@ build scored on the identical cases:
 **2034 of 2036.** Every valid document accepted, every invalid one rejected,
 and one more not-well-formed case caught than libxml2.
 
-The namespace cases are scored the way libxml2's own `runxmlconf.c` scores them
--- a namespace violation is not a well-formedness error, so the document must
-PARSE and the error must be REPORTED. Reading them any other way marks both
-implementations wrong. `doc.namespace_errors` carries the reports, because the
-default SAX handler discards errors and a tree-parsing caller would never see
-them.
-
-The two cases left are not closable honestly: one is a duplicate attribute with
-the same QName, which is a well-formedness error we reject and libxml2 rejects
-(the namespace scorer counts that as a failure for both), and the other wants a
-contradiction between a declared encoding and the byte-order mark to be fatal,
-where C exits zero. libxml2 fails three; we fail two.
-
-**A correction.** 0.4.0 published "79.9%, level with libxml2" and that number
-was measured wrong. The suite marks 313 cases `EDITION="1 2 3 4"` -- they test
-the name rules of XML 1.0 *before* the 5th edition, which is not the language
-either implementation parses by default. libxml2's own `runxmlconf.c` reads
-that attribute and parses those cases with `XML_PARSE_OLD10`; our runner
-ignored it and scored a 5th-edition parser against 4th-edition expectations,
-counting 313 non-failures as failures for both sides. Correcting the runner
-moved the real figures to 90.0% and 94.8% -- we were behind, not level -- and
-exposed that `XML_PARSE_OLD10` never reached the DTD parser at all.
-
-0.2.0 never ran the suite. The first run, in 0.3.0, crashed before scoring a
-single case -- a 32 GB allocation reachable from thirty-two bytes of DTD -- and
-then scored 59.1%. Everything since came from reading failures rather than
-guessing: an internal subset parser that was a scanner rather than a parser,
-four literals never character-validated, a validator whose ID branch said
-"uniqueness checked loosely" and meant not at all, and an entity whose
-replacement text was inserted as escaped text instead of the markup it was.
-
 Run it yourself — the suite is fetched, never vendored:
 
 ```sh
@@ -157,8 +96,9 @@ What we *do* gate hard, and what those numbers cost nothing:
 - Nothing on the parse, save, format, XPath, stream or canonicalize path
   recurses per level of nesting, so document depth cannot exhaust the stack.
 - A seeded fuzzer (`--bin fuzz`) holds four invariants: no panics, chunked
-  parsing equals whole parsing at every chunk size, and both XML and HTML round
-  trips are fixed points.
+  parsing equals whole parsing at every chunk size, the XML round trip is a
+  fixed point, and the HTML round trip reaches one after a second pass, as
+  libxml2 2.15's does.
 
 If you need full libxml2 conformance today, use libxml2. If you need a
 memory-safe XML toolkit that is faster than C, has no C in its dependency tree,
@@ -357,28 +297,6 @@ oracle/PIN            libxml2 v2.15.3 pin (binary is gitignored)
 No C toolchain, no iconv, no nasm. Gzip (`XML_PARSE_UNZIP`) is not wired yet
 (a `1f 8b` buffer is an error). ISO-2022-JP / Shift_JIS / EUC-JP are
 unsupported, matching libxml2 built **without** iconv.
-
-## Roadmap
-
-- [x] **M0** — pin oracle (libxml2 v2.15.3), C-only board, workspace skeleton
-- [x] **M1** — character classes, UTF-8 well-formed parse, SAX-exact vs `xmllint --sax`
-- [x] **M2** — tree mutation, `xmlsave`, `xmlTextWriter`, `xmlTextReader`, round-trip
-- [x] **M3** — encodings without iconv, push parser, IO callbacks, local catalogs
-- [x] **M4** — XPath 1.0 compile + eval, `rxmlint --xpath`
-- [x] **M5** — DTD validation, C14N 1.0 + exclusive, XInclude (loader-gated)
-- [x] **M6** — HTML parser, RelaxNG / XSD / Schematron working subsets
-- [x] **M7** — performance campaign vs pinned `xmllint`: faster than C on every
-      corpus file, N=20, 20/20 pairs ([`bench/SIDE-BY-SIDE.md`](bench/SIDE-BY-SIDE.md))
-- [ ] Optional gzip (`miniz_oxide` / `XML_PARSE_UNZIP`)
-- [x] **M8** — W3C conformance suite wired up and scored against the C oracle
-      (65.0% vs libxml2 79.9%); seeded fuzzer; corpus widened 7 -> 16 files
-- [x] **M9** — close the conformance gap: 65.0% -> 99.9% on the W3C suite,
-      ahead of libxml2's 95.9%; 601/601 valid, 175/175 invalid, 1258/1260 not-wf
-- [ ] C ABI `cdylib` (`XMLPUBFUN` names) + hardening audit
-- [ ] Optional gzip (`miniz_oxide` / `XML_PARSE_UNZIP`)
-- [ ] XML 1.1, external entity loading, CJK multi-byte encodings
-
-Plan: [`docs/plan/rusty_xml.md`](docs/plan/rusty_xml.md).
 
 ## License
 

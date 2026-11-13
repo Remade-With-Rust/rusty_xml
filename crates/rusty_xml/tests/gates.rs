@@ -636,6 +636,86 @@ fn html_multibyte_where_an_attribute_name_should_be_does_not_panic() {
     }
 }
 
+/// `decode_html` jumps 16 bytes after a reference that has no `&` within reach;
+/// the jump used to land inside a multi-byte character and the next slice
+/// panicked (issue #15, a regression from the 16-byte probe).
+#[test]
+fn html_reference_before_multibyte_text_does_not_panic() {
+    let tail = "é".repeat(20);
+    assert_eq!(
+        rusty_xml::decode_html_text(&format!("&amp;x{tail}")),
+        format!("&x{tail}")
+    );
+    let html = format!("<p>&amp;x{tail}");
+    assert!(rusty_xml::html_read_memory(html.as_bytes(), None, None, 0).is_ok());
+}
+
+/// A reference whose remaining input is shorter than the 16-byte probe takes
+/// the end-of-input branch, which must keep the multi-byte tail.
+#[test]
+fn decode_html_text_keeps_a_multibyte_tail_shorter_than_the_probe() {
+    for ch in ['é', '日', '😀'] {
+        for len in 1..=5 {
+            let tail = ch.to_string().repeat(len);
+            assert_eq!(
+                rusty_xml::decode_html_text(&format!("&amp;{tail}")),
+                format!("&{tail}"),
+                "ch={ch} len={len}"
+            );
+        }
+    }
+}
+
+/// Every cursor position modulo the character width, for 2-, 3- and 4-byte
+/// characters, each trigger kind, and the loop re-entering the probe.
+#[test]
+fn decode_html_text_sweep_keeps_every_char_boundary() {
+    for ch in ['é', '日', '😀'] {
+        for (trigger, decoded) in [("&amp;", "&"), ("&lt;", "<"), ("&#65;", "A"), ("&", "&")] {
+            for offset in 0..=32 {
+                let pad = "x".repeat(offset);
+                let run = ch.to_string().repeat(12);
+                let input = format!("{trigger}{pad}{run}");
+                let expected = format!("{decoded}{pad}{run}");
+                assert_eq!(
+                    rusty_xml::decode_html_text(&input),
+                    expected,
+                    "ch={ch} trigger={trigger} offset={offset}"
+                );
+                assert_eq!(
+                    rusty_xml::decode_html_text(&input.repeat(3)),
+                    expected.repeat(3),
+                    "repeated: ch={ch} trigger={trigger} offset={offset}"
+                );
+            }
+        }
+    }
+}
+
+/// Attribute values take the same decode path with `attr = true`.
+#[test]
+fn html_attribute_reference_before_multibyte_text_does_not_panic() {
+    for ch in ['é', '日', '😀'] {
+        for offset in 0..=32 {
+            let value = format!("{}{}", "x".repeat(offset), ch.to_string().repeat(12));
+            let html = format!("<p a=\"&amp;{value}\">");
+            let doc = rusty_xml::html_read_memory(html.as_bytes(), None, None, 0).unwrap();
+            let child = |parent, name: &str| {
+                doc.children(parent)
+                    .find(|&c| doc.name(c) == name)
+                    .unwrap_or_else(|| panic!("no <{name}> in {html:?}"))
+            };
+            let html_el = doc.xml_doc_get_root_element().unwrap();
+            let p = child(child(html_el, "body"), "p");
+            assert_eq!(
+                doc.xml_get_prop(p, "a"),
+                Some(format!("&{value}")),
+                "ch={ch} offset={offset}"
+            );
+        }
+    }
+}
+
 /// The XML side must stay panic-free on the same shapes.
 #[test]
 fn xml_entry_points_do_not_panic_on_malformed_input() {

@@ -6,7 +6,8 @@
 //!   1. Nothing panics or aborts. Ever. On any byte sequence.
 //!   2. Streaming a document in chunks equals parsing it whole -- at every
 //!      chunk size, because the bugs live exactly at the boundaries.
-//!   3. Save is idempotent: parse -> save -> parse -> save is a fixed point.
+//!   3. Save is idempotent: XML parse -> save -> parse -> save is a fixed
+//!      point; HTML reaches one after one extra round trip, as libxml2 does.
 //!      A round trip that keeps changing the document is losing or inventing
 //!      something.
 //!   4. Canonicalization succeeds or errors; it never dies.
@@ -203,22 +204,29 @@ fn main() {
         // -- which makes the round trip the only check with any teeth on it.
         // The nesting fix is exactly the kind of change that can make one
         // unstable, since a misparented node moves again on every pass.
+        // libxml2 2.15.3's HTML writer is not idempotent on malformed
+        // attribute syntax (`<b x/='1'>` saves as `<b x ='1'>`, which reads
+        // back as `<b x="1">`) and the parser reproduces that, so stability is
+        // required from the second round trip, not the first.
         if let Ok(h1) = html_read_memory(&d, None, None, 0) {
             let once = xml_save_doc(&h1, 0);
             if let Ok(h2) = html_read_memory(&once, None, None, 0) {
                 let twice = xml_save_doc(&h2, 0);
-                if once != twice {
-                    html_bad += 1;
-                    if html_bad <= 3 {
-                        eprintln!(
-                            "HTML NOT IDEMPOTENT seed={seed} iter={i}
+                if let Ok(h3) = html_read_memory(&twice, None, None, 0) {
+                    let thrice = xml_save_doc(&h3, 0);
+                    if twice != thrice {
+                        html_bad += 1;
+                        if html_bad <= 3 {
+                            eprintln!(
+                                "HTML ROUND TRIP NOT STABLE seed={seed} iter={i}
   in:  {:?}
-  1st: {:?}
-  2nd: {:?}",
-                            String::from_utf8_lossy(&d),
-                            String::from_utf8_lossy(&once),
-                            String::from_utf8_lossy(&twice),
-                        );
+  2nd: {:?}
+  3rd: {:?}",
+                                String::from_utf8_lossy(&d),
+                                String::from_utf8_lossy(&twice),
+                                String::from_utf8_lossy(&thrice),
+                            );
+                        }
                     }
                 }
             }
@@ -264,7 +272,7 @@ fn main() {
 
     println!(
         "{iters} inputs, seed {seed}: {parsed} parsed clean, \
-         {stream_bad} stream divergences, {idem_bad} non-idempotent round trips, \n         {html_bad} non-idempotent HTML round trips"
+         {stream_bad} stream divergences, {idem_bad} non-idempotent round trips, \n         {html_bad} HTML round trips unstable after the second pass"
     );
     if stream_bad != 0 || idem_bad != 0 || html_bad != 0 {
         std::process::exit(1);

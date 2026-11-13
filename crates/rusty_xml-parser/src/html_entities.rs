@@ -2407,6 +2407,11 @@ pub(crate) fn decode_html(s: &str, attr: bool, nul: Nul) -> std::borrow::Cow<'_,
                 break;
             }
             i += 16;
+            // The skip may land mid-character; the bytes stepped over are UTF-8
+            // continuation bytes, never `&`.
+            while !s.is_char_boundary(i) {
+                i += 1;
+            }
             match s[i..].find('&') {
                 Some(k) => i += k,
                 None => break,

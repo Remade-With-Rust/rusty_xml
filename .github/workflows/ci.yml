@@ -52,6 +52,23 @@ jobs:
       - name: cargo-deny
         uses: EmbarkStudios/cargo-deny-action@v2
 
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build fuzzer
+        run: cargo build --release -p rusty_xml-bench --bin fuzz
+      - name: Fuzz
+        shell: bash
+        # Fixed seeds: a red run reproduces locally with `fuzz 150000 <seed>`.
+        run: |
+          for seed in 1 2 3 4 5; do
+            target/release/fuzz 150000 "$seed" || exit 1
+          done
+
   package:
     runs-on: ubuntu-latest
     steps:

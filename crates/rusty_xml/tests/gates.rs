@@ -778,8 +778,8 @@ fn attlist_default_amplification_is_bounded() {
 
 /// Duplicate-attribute detection scanned the accepted attributes, so one tag
 /// with many attributes was O(n^2) in both parsers: 100,000 took 12 s as XML
-/// and 7 s as HTML (#21). At 200,000 the scan needs over 25 s in a release
-/// build and minutes in a debug one, and the sets need well under a second,
+/// and 7 s as HTML (#21). At 200,000 the scan took 96 s as XML and 35 s as
+/// HTML in a release build, and the sets take under a second in a debug one,
 /// so the bound fails the scan on any machine without timing the sets.
 #[test]
 fn many_attributes_on_one_element_is_not_quadratic() {

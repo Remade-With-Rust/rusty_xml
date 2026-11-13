@@ -96,8 +96,9 @@ What we *do* gate hard, and what those numbers cost nothing:
 - Nothing on the parse, save, format, XPath, stream or canonicalize path
   recurses per level of nesting, so document depth cannot exhaust the stack.
 - A seeded fuzzer (`--bin fuzz`) holds four invariants: no panics, chunked
-  parsing equals whole parsing at every chunk size, and both XML and HTML round
-  trips are fixed points.
+  parsing equals whole parsing at every chunk size, the XML round trip is a
+  fixed point, and the HTML round trip reaches one after a second pass, as
+  libxml2 2.15's does.
 
 If you need full libxml2 conformance today, use libxml2. If you need a
 memory-safe XML toolkit that is faster than C, has no C in its dependency tree,

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.5](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-parser-v0.8.4...rusty_xml-parser-v0.8.5) - 2026-11-13
+
+### Fixed
+
+- *(html)* doctype, unterminated comment and root rows from #16
+- *(html)* keep decode_html's 16-byte skip on a char boundary
+
 ## [0.8.4](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-parser-v0.8.3...rusty_xml-parser-v0.8.4) - 2026-11-12
 
 ### Fixed

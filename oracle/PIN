@@ -10,6 +10,7 @@ Fetch:         scripts/fetch-oracle.ps1
 Source dir:    oracle/src   (gitignored)
 Build dir:     oracle/build (gitignored)
 Binary:        oracle/bin/xmllint.exe
+HTML fixtures:  cargo run --release -p rusty_xml-bench --bin html-fixtures
 
 CMake (MSVC multi-config — CMAKE_BUILD_TYPE is ignored; --config Release is the pin):
 

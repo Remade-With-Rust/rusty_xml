@@ -2,6 +2,8 @@
 //!
 //! Three sets are generated here. `cases/` holds hand-picked snippets (inputs committed).
 //! `libxml2/` holds the libxml2 HTML test files, copied from the pinned oracle source tree.
+//! A file there that this run does not produce is an orphan: write mode removes it, and
+//! `--check` reports it.
 //! Each input `<name>.html` gets `<name>.xmllint.html` beside it: the stdout of
 //! `xmllint --html <input>` from the pinned binary, which must report libxml2 21503.
 //! `html5lib/` is one zstd archive, `html5lib-9329e64.zst`, of the html5lib-tests
@@ -395,6 +397,26 @@ fn html5lib_archive(xmllint: &Path, pin: &OraclePin) -> (Output, usize) {
     (output, cases.len())
 }
 
+/// Files in `libxml2/` that no output of this run produces.
+fn orphans(outputs: &[Output]) -> Vec<PathBuf> {
+    let dir = fixtures_dir().join("libxml2");
+    let mut listed: Vec<PathBuf> = fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
+        .map(|entry| entry.expect("read_dir entry").path())
+        .filter(|p| p.is_file())
+        .collect();
+    listed.sort();
+    unproduced(&listed, outputs)
+}
+
+fn unproduced(listed: &[PathBuf], outputs: &[Output]) -> Vec<PathBuf> {
+    listed
+        .iter()
+        .filter(|p| !outputs.iter().any(|o| o.path == **p))
+        .cloned()
+        .collect()
+}
+
 /// Every file this run produces. The html5lib checkout is checked first, so a bad checkout
 /// fails before anything is written. With `write_copies`, the libxml2 copies land on disk
 /// next, because xmllint reads its inputs from disk.
@@ -409,7 +431,11 @@ fn build(xmllint: &Path, pin: &OraclePin, write_copies: bool) -> Vec<Output> {
         }
     }
     let cases = inputs(&fixtures_dir().join("cases"));
-    let libxml2 = inputs(&fixtures_dir().join("libxml2"));
+    // Only the files this pin copies are inputs; anything else in the directory is an orphan.
+    let libxml2: Vec<PathBuf> = inputs(&fixtures_dir().join("libxml2"))
+        .into_iter()
+        .filter(|p| copies.iter().any(|c| c.path == *p))
+        .collect();
 
     let mut outputs = copies;
     for dir_inputs in [&cases, &libxml2] {
@@ -498,16 +524,20 @@ fn main() -> ExitCode {
     require_pin(&xmllint);
     let pin = read_pin();
     let outputs = build(&xmllint, &pin, !check);
+    let orphans = orphans(&outputs);
 
     if check {
         let stale: Vec<&Output> = outputs.iter().filter(|o| !on_disk_matches(o)).collect();
         for o in &stale {
             eprintln!("differs: {}", relative(&o.path));
         }
-        if !stale.is_empty() {
+        for path in &orphans {
+            eprintln!("orphan: {}", relative(path));
+        }
+        if !stale.is_empty() || !orphans.is_empty() {
             eprintln!(
-                "html-fixtures --check: {} file(s) differ; run `{REGENERATE}`",
-                stale.len()
+                "html-fixtures --check: {} file(s) differ or are orphans; run `{REGENERATE}`",
+                stale.len() + orphans.len()
             );
             return ExitCode::from(1);
         }
@@ -517,6 +547,10 @@ fn main() -> ExitCode {
 
     for o in &outputs {
         write_output(o);
+    }
+    for path in &orphans {
+        fs::remove_file(path).unwrap_or_else(|e| panic!("cannot remove {}: {e}", path.display()));
+        println!("removed orphan: {}", relative(path));
     }
     println!("html-fixtures: wrote {} files", outputs.len());
     ExitCode::SUCCESS
@@ -531,6 +565,23 @@ mod tests {
         assert_eq!(
             expected_path(Path::new("cases/p-closed-by-li.html")),
             PathBuf::from("cases/p-closed-by-li.xmllint.html")
+        );
+    }
+
+    #[test]
+    fn unproduced_lists_only_files_no_output_writes() {
+        let produced = Output {
+            path: PathBuf::from("libxml2/a.xmllint.html"),
+            bytes: Vec::new(),
+            zstd: false,
+        };
+        let listed = vec![
+            PathBuf::from("libxml2/a.xmllint.html"),
+            PathBuf::from("libxml2/gone.html"),
+        ];
+        assert_eq!(
+            unproduced(&listed, &[produced]),
+            vec![PathBuf::from("libxml2/gone.html")]
         );
     }
 

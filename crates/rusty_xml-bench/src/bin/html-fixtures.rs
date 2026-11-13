@@ -303,11 +303,12 @@ fn html5lib_cases(tree_construction: &Path) -> Vec<(String, Vec<u8>)> {
 struct TempDir(PathBuf);
 
 impl TempDir {
+    /// Fails when the path already exists, so a planted link or directory is never reused.
     fn new() -> Self {
         let path = std::env::temp_dir().join(format!("rusty_xml-html5lib-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&path);
-        fs::create_dir_all(&path)
-            .unwrap_or_else(|e| panic!("cannot create {}: {e}", path.display()));
+        fs::create_dir(&path).unwrap_or_else(|e| {
+            panic!("cannot create {} (it must not exist): {e}", path.display())
+        });
         TempDir(path)
     }
 }

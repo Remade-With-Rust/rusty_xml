@@ -1806,10 +1806,9 @@ impl<'a> Parser<'a> {
             } else {
                 None
             };
-            // The attributes already accepted ARE the "seen" set below
-            // ATTR_SET_MIN -- a separate vector of copies was allocated per
-            // element to hold the same thing. From ATTR_SET_MIN on, a set is
-            // filled lazily from them: the pairwise scan is O(n^2).
+            // Below ATTR_SET_MIN the accepted attributes are scanned directly;
+            // from ATTR_SET_MIN on, `seen_qnames` and `seen_keys` are filled
+            // lazily from them, because the pairwise scan is O(n^2).
             // Two kinds of duplicate, and they are not the same error.
             // The same QName twice is a well-formedness violation and fatal.
             // Two DIFFERENT prefixes bound to one URI, with the same local

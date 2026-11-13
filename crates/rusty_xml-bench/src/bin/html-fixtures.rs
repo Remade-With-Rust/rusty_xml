@@ -200,7 +200,7 @@ fn manifest(pin: &OraclePin, cases: usize, libxml2: usize, html5lib: usize) -> S
 }
 
 /// The pinned html5lib-tests checkout under `oracle/`, cloned from GitHub when missing.
-/// Fails unless its HEAD is the pinned SHA.
+/// Fails unless its HEAD is the pinned SHA and it has no uncommitted or untracked files.
 fn html5lib_checkout() -> PathBuf {
     let dir = workspace_root().join("oracle").join("html5lib-tests");
     if !dir.exists() {
@@ -213,6 +213,15 @@ fn html5lib_checkout() -> PathBuf {
         head.trim(),
         HTML5LIB_TESTS_SHA,
         "{} is not at the pinned html5lib-tests commit",
+        dir.display()
+    );
+    let dirty = run_git(
+        Some(&dir),
+        &["status", "--porcelain", "--untracked-files=all"],
+    );
+    assert!(
+        dirty.is_empty(),
+        "{} has uncommitted or untracked files (reset the checkout yourself):\n{dirty}",
         dir.display()
     );
     dir
@@ -367,9 +376,11 @@ fn html5lib_archive(xmllint: &Path, pin: &OraclePin) -> (Output, usize) {
     (output, cases.len())
 }
 
-/// Every file this run produces. With `write_copies`, the libxml2 copies land on disk first,
-/// because xmllint reads its inputs from disk.
+/// Every file this run produces. The html5lib checkout is checked first, so a bad checkout
+/// fails before anything is written. With `write_copies`, the libxml2 copies land on disk
+/// next, because xmllint reads its inputs from disk.
 fn build(xmllint: &Path, pin: &OraclePin, write_copies: bool) -> Vec<Output> {
+    let (archive, html5lib) = html5lib_archive(xmllint, pin);
     let copies = libxml2_copies();
     if write_copies {
         fs::create_dir_all(fixtures_dir().join("libxml2")).expect("create libxml2 dir");
@@ -399,7 +410,6 @@ fn build(xmllint: &Path, pin: &OraclePin, write_copies: bool) -> Vec<Output> {
             });
         }
     }
-    let (archive, html5lib) = html5lib_archive(xmllint, pin);
     outputs.push(archive);
     outputs.push(Output {
         path: fixtures_dir().join("MANIFEST"),

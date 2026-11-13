@@ -2473,6 +2473,9 @@ fn parse_utf8(
                 }
                 _ => {}
             }
+            // The arena was reserved at one node per 10 input bytes; most
+            // documents use fewer, and the tree keeps whatever is left.
+            p.doc.shrink_nodes();
             Ok(p.doc)
         }
         Err(e) => {

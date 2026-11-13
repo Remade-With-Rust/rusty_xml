@@ -19,6 +19,7 @@
 //! `docs/html-ir-campaign.md`; the losing arms are recorded beside each choice.
 
 use std::borrow::Cow;
+use std::collections::HashSet;
 
 use rusty_xml_tree::{NodeId, NodeKind, XmlDoc};
 
@@ -644,15 +645,14 @@ impl<'a> Parser<'a> {
 
     /// First occurrence of a name wins. A valueless attribute has no value
     /// (boolean ones take their own name). Deduplicating against the parsed
-    /// list, then appending without a scan, beat probing the element's
-    /// attributes in the arena by 0.3% / 0.1% parse Ir, and the old
-    /// `xml_set_prop` (last wins, value = name) cost 1.0% / 0.9% more than both.
+    /// list (`dedup_first_wins`), then appending without a scan, beat probing
+    /// the element's attributes in the arena by 0.3% / 0.1% parse Ir, and the
+    /// old `xml_set_prop` (last wins, value = name) cost 1.0% / 0.9% more than
+    /// both.
     fn add_attributes(&mut self, el: NodeId) {
-        let attrs = std::mem::take(&mut self.attrs);
-        for (i, (n, v)) in attrs.iter().enumerate() {
-            if attrs[..i].iter().any(|(m, _)| m == n) {
-                continue;
-            }
+        let mut attrs = std::mem::take(&mut self.attrs);
+        dedup_first_wins(&mut attrs);
+        for (n, v) in attrs.iter() {
             match v {
                 Some(v) => {
                     self.doc.add_attr(el, n, None, v);
@@ -798,6 +798,32 @@ fn decode_none(s: &str, has_nul: bool) -> Cow<'_, str> {
     } else {
         Cow::Borrowed(s)
     }
+}
+
+/// Attribute count up to which `dedup_first_wins` compares pairwise.
+const PAIRWISE_MAX: usize = 32;
+
+/// Drops later repeats of an attribute name; libxml2 keeps the first.
+/// Pairwise for short lists, hashed for long ones because the scan is
+/// quadratic.
+fn dedup_first_wins(attrs: &mut Vec<(Cow<'_, str>, Option<Cow<'_, str>>)>) {
+    if attrs.len() <= PAIRWISE_MAX {
+        let mut i = 1;
+        while i < attrs.len() {
+            if attrs[..i].iter().any(|(m, _)| *m == attrs[i].0) {
+                attrs.remove(i);
+            } else {
+                i += 1;
+            }
+        }
+        return;
+    }
+    let keep: Vec<bool> = {
+        let mut seen = HashSet::with_capacity(attrs.len());
+        attrs.iter().map(|(n, _)| seen.insert(&**n)).collect()
+    };
+    let mut keep = keep.into_iter();
+    attrs.retain(|_| keep.next().unwrap_or(true));
 }
 
 /// The extent of RCDATA / RAWTEXT / script data starting at `from`: up to the

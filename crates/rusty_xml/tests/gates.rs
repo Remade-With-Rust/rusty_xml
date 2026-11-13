@@ -1,7 +1,7 @@
 //! M1 SAX-exact + M2 save/writer/reader/round-trip gates.
 
 use rusty_xml::{
-    default_parse_options, xml_is_char, xml_new_text_writer_memory, xml_read_memory,
+    default_parse_options, html_read_memory, xml_is_char, xml_new_text_writer_memory, xml_read_memory,
     xml_reader_for_memory, xml_sax_parse_memory, xml_save_doc, ReaderType, SaxRecorder, XmlDoc,
     XML_ERR_ATTRIBUTE_REDEFINED, XML_ERR_DOCUMENT_EMPTY, XML_ERR_TAG_NOT_FINISHED,
     XML_ERR_UNDECLARED_ENTITY, XML_SAVE_NO_DECL, XML_SAVE_NO_EMPTY,
@@ -812,6 +812,50 @@ fn many_attributes_on_one_element_is_not_quadratic() {
     // `p:a7` and `a7` are different QNames, also on the set path.
     let distinct = format!("<r xmlns:p=\"u:p\"{} p:a7=\"x\"/>", attrs(40));
     assert!(xml_read_memory(distinct.as_bytes(), None, None, opts).is_ok());
+}
+
+#[test]
+fn html_duplicate_attributes_keep_the_first_after_lowercasing() {
+    let doc = html_read_memory(
+        br#"<div a=1 B=2 b=3 A=4 checked CHECKED c d="" c=9></div>"#,
+        None,
+        None,
+        0,
+    )
+    .unwrap();
+    let out = String::from_utf8(xml_save_doc(&doc, 0)).unwrap();
+    assert!(
+        out.contains(r#"<div a="1" b="2" checked c d=""></div>"#),
+        "{out}"
+    );
+}
+
+/// The duplicate-attribute pass is pairwise up to 32 attributes and hashed
+/// above, so one tag with many attributes costs linear time. The O(n^2) scan
+/// took 36.1 s at 100,000 attributes in a debug build (7.2 s in release); the
+/// 2 s bound leaves room for a debug build.
+#[test]
+fn many_attributes_on_one_html_tag_is_not_quadratic() {
+    let attrs = |k: usize| -> String {
+        (0..k).map(|i| format!(" a{i}=\"v\"")).collect()
+    };
+    let big = format!("<div{}></div>", attrs(100_000));
+    let start = Instant::now();
+    let doc = html_read_memory(big.as_bytes(), None, None, 0).unwrap();
+    let elapsed = start.elapsed();
+    // 100,000 attributes plus div, and the implied html and body.
+    assert_eq!(doc.len(), 100_000 + 4);
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "100000 attributes took {elapsed:?}"
+    );
+
+    // A repeat past the 32nd attribute is dropped and the first value stays.
+    let dup = format!("<div{} a7=\"again\"></div>", attrs(40));
+    let doc = html_read_memory(dup.as_bytes(), None, None, 0).unwrap();
+    let out = String::from_utf8(xml_save_doc(&doc, 0)).unwrap();
+    assert!(out.contains(" a7=\"v\""), "{out}");
+    assert!(!out.contains("again"), "{out}");
 }
 
 /// A deeply nested XPath expression overflowed the stack, which ABORTS THE

@@ -36,6 +36,8 @@ const HTML5LIB_ARCHIVE: &str = "html5lib-9329e64.zst";
 const HTML5LIB_TESTS_SHA: &str = "9329e64694e7835d0dcff9811e22856ef6ad16f9";
 /// The archive's first line.
 const ARCHIVE_MAGIC: &str = "rusty_xml html fixtures v1";
+/// Prefix of the `Err` that `ours` returns when parsing or serializing panics.
+const PANIC_PREFIX: &str = "panic: ";
 
 /// Reason keys, defined in the header of `known-differences.txt`.
 const REASON_KEYS: [&str; 4] = [
@@ -62,7 +64,7 @@ fn ours(input: &[u8]) -> Result<Vec<u8>, String> {
             .map(|s| (*s).to_string())
             .or_else(|| payload.downcast_ref::<String>().cloned())
             .unwrap_or_else(|| "non-string panic payload".to_string());
-        Err(format!("panic: {text}"))
+        Err(format!("{PANIC_PREFIX}{text}"))
     })
 }
 
@@ -252,21 +254,33 @@ fn describe(got: &Result<Vec<u8>, String>, expected: &[u8]) -> String {
     )
 }
 
-/// Compares every case of `set` with its expected output. Fails once, listing
-/// the mismatches that are not known differences, the known differences that
-/// now match, and the known differences whose input is not in `cases`.
-fn check_set(set: &str, cases: &[(String, Vec<u8>, Vec<u8>)]) {
-    assert!(!cases.is_empty(), "{set}: no cases found");
-    let known = known_differences();
+/// Compares every case of `set`, parsed by `parse`, with its expected output.
+/// Returns the failure report, or `None` when the set agrees with `known`.
+/// The report lists the mismatches that are not known differences, the
+/// known differences that now match, and the known differences whose input
+/// is not in `cases`.
+fn compare_set(
+    set: &str,
+    cases: &[(String, Vec<u8>, Vec<u8>)],
+    known: &BTreeMap<String, &'static str>,
+    parse: impl Fn(&[u8]) -> Result<Vec<u8>, String>,
+) -> Option<String> {
     let mut mismatches = String::new();
     let mut now_matching = Vec::new();
     let mut names = Vec::new();
     for (name, input, expected) in cases {
         let key = format!("{set}/{name}");
         names.push(key.clone());
-        let got = ours(input);
+        let got = parse(input);
         let matches = got.as_deref() == Ok(expected.as_slice());
+        let panicked = got
+            .as_ref()
+            .err()
+            .is_some_and(|e| e.starts_with(PANIC_PREFIX));
         match (matches, known.contains_key(&key)) {
+            _ if panicked => {
+                mismatches.push_str(&format!("    {key}\n{}", describe(&got, expected)));
+            }
             (false, false) => {
                 mismatches.push_str(&format!("    {key}\n{}", describe(&got, expected)));
             }
@@ -280,13 +294,45 @@ fn check_set(set: &str, cases: &[(String, Vec<u8>, Vec<u8>)]) {
         .filter(|key| key.starts_with(&prefix) && !names.contains(key))
         .collect();
     if mismatches.is_empty() && now_matching.is_empty() && missing.is_empty() {
-        return;
+        return None;
     }
-    panic!(
+    Some(format!(
         "{set}: HTML output differs from libxml2\n\
          mismatches not in known-differences.txt:\n{mismatches}\
          known differences that now match (remove them):\n    {now_matching:?}\n\
          known differences with no input in {set}/:\n    {missing:?}\n"
+    ))
+}
+
+/// Compares every case of `set` with its expected output, failing on any
+/// report from `compare_set`.
+fn check_set(set: &str, cases: &[(String, Vec<u8>, Vec<u8>)]) {
+    assert!(!cases.is_empty(), "{set}: no cases found");
+    if let Some(report) = compare_set(set, cases, &known_differences(), ours) {
+        panic!("{report}");
+    }
+}
+
+#[test]
+fn panic_in_a_known_difference_case_is_reported() {
+    let mut known = BTreeMap::new();
+    known.insert("cases/wired.html".to_string(), "parser-input-encoding");
+    let cases = vec![(
+        "wired.html".to_string(),
+        b"<p>".to_vec(),
+        b"<p></p>".to_vec(),
+    )];
+    let report = compare_set("cases", &cases, &known, |_| {
+        Err(format!("{PANIC_PREFIX}boom"))
+    })
+    .expect("a panic must fail the set even for a known difference");
+    let mismatch_section = report
+        .split("known differences that now match")
+        .next()
+        .unwrap();
+    assert!(
+        mismatch_section.contains("    cases/wired.html\n      panic: boom\n"),
+        "panic not listed under mismatches: {report}"
     );
 }
 

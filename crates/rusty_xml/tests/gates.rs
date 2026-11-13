@@ -3,11 +3,12 @@
 use rusty_xml::{
     default_parse_options, xml_is_char, xml_new_text_writer_memory, xml_read_memory,
     xml_reader_for_memory, xml_sax_parse_memory, xml_save_doc, ReaderType, SaxRecorder, XmlDoc,
-    XML_ERR_DOCUMENT_EMPTY, XML_ERR_TAG_NOT_FINISHED, XML_ERR_UNDECLARED_ENTITY, XML_SAVE_NO_DECL,
-    XML_SAVE_NO_EMPTY,
+    XML_ERR_ATTRIBUTE_REDEFINED, XML_ERR_DOCUMENT_EMPTY, XML_ERR_TAG_NOT_FINISHED,
+    XML_ERR_UNDECLARED_ENTITY, XML_SAVE_NO_DECL, XML_SAVE_NO_EMPTY,
 };
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 fn workspace_root() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -776,35 +777,41 @@ fn attlist_default_amplification_is_bounded() {
     );
 }
 
-/// Duplicate-attribute detection was a linear scan over the accepted
-/// attributes, so one element with many attributes was O(n^2): 16,000 took
-/// 185 ms. This pins the shape, not a wall-clock number.
+/// The duplicate-attribute check is pairwise up to 32 attributes and set-based
+/// above, so one element with many attributes costs linear time. The O(n^2)
+/// scan took 45.5 s at 100,000 attributes in a debug build (12.1 s in release);
+/// the 2 s bound leaves room for a debug build.
 #[test]
 fn many_attributes_on_one_element_is_not_quadratic() {
     let opts = default_parse_options();
-    let build = |k: usize| {
-        let mut s = String::from("<r");
-        for i in 0..k {
-            s.push_str(&format!(" a{i}=\"v\""));
-        }
-        s.push_str("/>");
-        s
+    let attrs = |k: usize| -> String {
+        (0..k).map(|i| format!(" a{i}=\"v\"")).collect()
     };
-    for k in [1000usize, 8000] {
-        let doc = xml_read_memory(build(k).as_bytes(), None, None, opts)
-            .unwrap_or_else(|e| panic!("{k} attributes should parse: {e:?}"));
-        assert_eq!(doc.len(), k + 2, "every attribute becomes a node");
-    }
-    // duplicates must still be caught once the set path is active
-    let mut dup = String::from("<r");
-    for i in 0..40 {
-        dup.push_str(&format!(" a{i}=\"v\""));
-    }
-    dup.push_str(" a7=\"again\"/>");
+    let big = format!("<r{}/>", attrs(100_000));
+    let start = Instant::now();
+    let doc = xml_read_memory(big.as_bytes(), None, None, opts)
+        .unwrap_or_else(|e| panic!("100000 attributes should parse: {e:?}"));
+    let elapsed = start.elapsed();
+    assert_eq!(doc.len(), 100_000 + 2, "every attribute becomes a node");
     assert!(
-        xml_read_memory(dup.as_bytes(), None, None, opts).is_err(),
-        "a repeated attribute must be rejected on the set path too"
+        elapsed < Duration::from_secs(2),
+        "100000 attributes took {elapsed:?}"
     );
+
+    // A repeat past the 32nd attribute must still be caught on the set path,
+    // whether the first occurrence sits before or after attribute 32.
+    let dup = format!("<r{} a7=\"again\"/>", attrs(40));
+    let err = xml_read_memory(dup.as_bytes(), None, None, opts).unwrap_err();
+    assert_eq!(err.code, XML_ERR_ATTRIBUTE_REDEFINED);
+    let prefixed = format!(
+        "<r xmlns:p=\"u:p\" p:a7=\"x\"{} p:a7=\"y\"/>",
+        attrs(40)
+    );
+    let err = xml_read_memory(prefixed.as_bytes(), None, None, opts).unwrap_err();
+    assert_eq!(err.code, XML_ERR_ATTRIBUTE_REDEFINED);
+    // `p:a7` and `a7` are different QNames, also on the set path.
+    let distinct = format!("<r xmlns:p=\"u:p\"{} p:a7=\"x\"/>", attrs(40));
+    assert!(xml_read_memory(distinct.as_bytes(), None, None, opts).is_ok());
 }
 
 /// A deeply nested XPath expression overflowed the stack, which ABORTS THE

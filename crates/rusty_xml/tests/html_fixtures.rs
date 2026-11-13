@@ -42,7 +42,7 @@ const REASON_KEYS: [&str; 4] = [
     "writer-nonascii-refs",
     "writer-nonascii-attr-name",
     "writer-attr-escaping",
-    "parser-input-encoding",
+    "writer-output-encoding",
 ];
 
 fn fixtures_dir() -> PathBuf {
@@ -311,7 +311,7 @@ fn check_set(set: &str, cases: &[(String, Vec<u8>, Vec<u8>)]) {
 #[test]
 fn panic_in_a_known_difference_case_is_reported() {
     let mut known = BTreeMap::new();
-    known.insert("cases/wired.html".to_string(), "parser-input-encoding");
+    known.insert("cases/wired.html".to_string(), "writer-output-encoding");
     let cases = vec![(
         "wired.html".to_string(),
         b"<p>".to_vec(),

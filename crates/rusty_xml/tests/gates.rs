@@ -2353,3 +2353,80 @@ fn namespace_violations_are_reported_not_fatal() {
     let d = xml_read_memory(b"<r xmlns:p=\"urn:x\"><p:e p:a=\"1\"/></r>", None, None, opts).unwrap();
     assert!(d.namespace_errors.is_empty(), "false positive: {:?}", d.namespace_errors);
 }
+
+/// #27: with no BOM and no `encoding` argument, the input encoding is decided
+/// as libxml2 2.15.3 decides it: a `<meta>` charset (in HTML mode, where
+/// iso-8859-1 means windows-1252), else a text search for an http-equiv
+/// charset at the first non-ASCII byte (without that mapping), else
+/// windows-1252. Each expected body is xmllint's (`--encode UTF-8`, with each
+/// charset meta reduced to `<meta>`), except the two rows marked deliberate.
+#[test]
+fn html_input_encoding_is_decided_as_libxml2_decides_it() {
+    let body = |input: &[u8]| {
+        let doc = rusty_xml::html_read_memory(input, None, None, 0).expect("parses");
+        let out = String::from_utf8(xml_save_doc(&doc, 0)).expect("utf-8 output");
+        let start = out.find("<body>").map_or(0, |i| i + 6);
+        let end = out.rfind("</body>").unwrap_or(out.len());
+        let mut s = String::new();
+        let mut rest = &out[start..end];
+        while let Some(i) = rest.find("<meta ") {
+            let j = rest[i..].find('>').map_or(rest.len(), |k| i + k + 1);
+            s.push_str(&rest[..i]);
+            s.push_str("<meta>");
+            rest = &rest[j..];
+        }
+        s.push_str(rest);
+        s
+    };
+    let cases: &[(&[u8], &str)] = &[
+        // The issue's table.
+        (b"<meta charset=\"iso-8859-1\"><p>caf\xE9", "<p>caf\u{e9}</p>"),
+        (b"<meta charset=\"iso-8859-1\"><p>\x93q\x94", "<p>\u{201c}q\u{201d}</p>"),
+        (
+            b"<meta http-equiv=\"Content-Type\" content=\"text/html; charset=iso-8859-1\"><p>caf\xE9",
+            "<p>caf\u{e9}</p>",
+        ),
+        (b"<meta charset=\"latin2\"><p>\xB1", "<p>\u{105}</p>"),
+        (b"<p>caf\xE9 \x93q\x94", "<p>caf\u{e9} \u{201c}q\u{201d}</p>"),
+        // Deliberate: undeclared valid UTF-8 stays UTF-8 (libxml2: `caf\u{c3}\u{a9}`).
+        (b"<p>caf\xC3\xA9", "<p>caf\u{e9}</p>"),
+        // A meta that cannot be used is skipped; one in <body> still counts.
+        (b"<meta charset=\"bogus\"><meta charset=\"latin2\"><p>\xB1", "<p>\u{105}</p>"),
+        (b"<meta charset=\"utf-16\"><p>caf\xE9", "<p>caf\u{e9}</p>"),
+        (b"<p>x</p><meta charset=\"latin2\"><p>\xB1", "<p>x</p><meta><p>\u{105}</p>"),
+        // Meta text that is not a tag does not count.
+        (b"<!--<meta charset=\"latin2\">--><p>\xB1", "<p>\u{b1}</p>"),
+        (b"<script><meta charset=\"latin2\"></script><p>\xB1", "<p>\u{b1}</p>"),
+        (b"<title><meta charset=\"latin2\"></title><p>\xB1", "<p>\u{b1}</p>"),
+        // The first non-ASCII byte in text, a value or a doctype decides first.
+        (b"<p>\xE9</p><meta charset=\"latin2\"><p>\xB1", "<p>\u{e9}</p><meta><p>\u{b1}</p>"),
+        (
+            b"<p title=\"\xB1\"></p><meta charset=\"latin2\"><p>\xB1",
+            "<p title=\"\u{b1}\"></p><meta><p>\u{b1}</p>",
+        ),
+        (b"<!DOCTYPE html SYSTEM \"\xB1\"><meta charset=\"latin2\"><p>\xB1", "<p>\u{b1}</p>"),
+        // ... but a non-ASCII tag name does not, and is read as UTF-8.
+        (
+            b"<x\xC3\xA9><meta charset=\"latin2\"><p>\xB1",
+            "<x\u{e9}><meta><p>\u{105}</p></x\u{e9}>",
+        ),
+        // The text search finds a later http-equiv meta, without the HTML mapping.
+        (
+            b"<p>a</p><p>b\xB1</p><meta http-equiv=Content-Type content=\"text/html; charset=latin2\">",
+            "<p>a</p><p>b\u{105}</p><meta>",
+        ),
+        (
+            b"<p>\x93</p><meta http-equiv=\"Content-Type\" content=\"text/html; charset=iso-8859-1\">",
+            "<p>\u{93}</p><meta>",
+        ),
+        (
+            b"<p>caf\xE9</p><meta http-equiv=\"Content-Type\" content=\"text/html; charset=bogus\">",
+            "<p>caf\u{fffd}</p><meta>",
+        ),
+        // Deliberate: a table libxml2 reaches only through iconv (pinned oracle: `\u{c0}`).
+        (b"<meta charset=\"windows-1251\"><p>\xC0", "<p>\u{410}</p>"),
+    ];
+    for (input, expected) in cases {
+        assert_eq!(body(input), *expected, "input {:?}", String::from_utf8_lossy(input));
+    }
+}

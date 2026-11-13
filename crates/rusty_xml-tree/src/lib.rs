@@ -422,8 +422,12 @@ impl XmlDoc {
             self.node_mut(parent).first_child = Some(child);
         }
         self.node_mut(parent).last_child = Some(child);
-        if parent == NodeId::DOCUMENT && self.kind(child) == NodeKind::Element {
-            self.root = Some(child);
+        // `xmlDocGetRootElement` is the FIRST element child of the document.
+        // Caching every appended element made a second root -- which HTML
+        // content after `</html>` creates, as in libxml2 -- take the root
+        // over. Only fill an empty cache, and fill it with the first element.
+        if parent == NodeId::DOCUMENT && self.root.is_none() && self.kind(child) == NodeKind::Element {
+            self.root = self.xml_doc_get_root_element();
         }
     }
 

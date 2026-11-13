@@ -38,9 +38,8 @@ const ARCHIVE_MAGIC: &str = "rusty_xml html fixtures v1";
 const PANIC_PREFIX: &str = "panic: ";
 
 /// Reason keys, defined in the header of `known-differences.txt`.
-const REASON_KEYS: [&str; 5] = [
+const REASON_KEYS: [&str; 4] = [
     "writer-nonascii-refs",
-    "writer-cr-in-text",
     "writer-nonascii-attr-name",
     "writer-attr-escaping",
     "parser-input-encoding",

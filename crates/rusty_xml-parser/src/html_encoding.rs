@@ -43,12 +43,14 @@ pub(crate) enum Decision {
     Switch { at: usize, enc: XmlCharEncoding },
 }
 
-/// Decode `b` as [`decide`] says.
+/// Decode `b` as [`decide`] says. The input is validated as UTF-8 once, here,
+/// and the scanner and the result both reuse that.
 pub(crate) fn decode(b: &[u8]) -> Cow<'_, str> {
-    match decide(b) {
-        Decision::Utf8 => match std::str::from_utf8(b) {
-            Ok(s) => Cow::Borrowed(s),
-            Err(_) => Cow::Owned(String::from_utf8_lossy(b).into_owned()),
+    let valid = std::str::from_utf8(b).ok();
+    match decide(b, valid) {
+        Decision::Utf8 => match valid {
+            Some(s) => Cow::Borrowed(s),
+            None => Cow::Owned(String::from_utf8_lossy(b).into_owned()),
         },
         Decision::Switch { at, enc } => {
             let mut out = String::from_utf8_lossy(&b[..at]).into_owned();
@@ -60,15 +62,16 @@ pub(crate) fn decode(b: &[u8]) -> Cow<'_, str> {
     }
 }
 
-/// The index of the first byte at or after `from` that is not ASCII, or the
-/// length. Sixteen bytes at a time: `is_ascii` on a fixed block is a few word
+/// The index of the first byte in `b[from..limit]` that is not ASCII, or
+/// `limit`. Sixteen bytes at a time: `is_ascii` on a fixed block is a few word
 /// tests, where a byte loop with an exit inside does not vectorize.
-fn next_non_ascii(b: &[u8], from: usize) -> usize {
+fn next_non_ascii(b: &[u8], from: usize, limit: usize) -> usize {
+    let limit = limit.min(b.len());
     let mut i = from;
-    while i + 16 <= b.len() && b[i..i + 16].is_ascii() {
+    while i + 16 <= limit && b[i..i + 16].is_ascii() {
         i += 16;
     }
-    while i < b.len() && b[i] < 0x80 {
+    while i < limit && b[i] < 0x80 {
         i += 1;
     }
     i
@@ -79,12 +82,20 @@ fn is_ws(c: u8) -> bool {
     matches!(c, b' ' | b'\t' | b'\n' | 0x0c | b'\r')
 }
 
-/// The scanner. `ascii` is `b[lo..na]`, where `na` is the next non-ASCII byte
-/// at or after `pos`; searches run on it, so they stop where a decision could
-/// be. `lo` moves only past a name holding non-ASCII bytes (which may not be
-/// valid UTF-8), so the window never contains one.
+/// The first window. A page that declares `<meta charset>` near its top is
+/// decided inside it, so the rest of the input is never scanned.
+const WINDOW: usize = 4096;
+
+/// The scanner. `ascii` is `b[lo..hi]`, a run of ASCII bytes; searches run on
+/// it. When a search reaches `hi` the window grows, until `hi` is the end of
+/// input or a non-ASCII byte, where a decision may be due. `lo` moves only past
+/// a name holding non-ASCII bytes (which may not be valid UTF-8), so the window
+/// never contains one.
 struct Scan<'a> {
     b: &'a [u8],
+    /// The whole input, when it is valid UTF-8: windows are sliced from it
+    /// instead of validated again.
+    src: Option<&'a str>,
     lo: usize,
     ascii: &'a str,
     pos: usize,
@@ -97,56 +108,91 @@ enum Step {
 }
 
 impl<'a> Scan<'a> {
-    fn new(b: &'a [u8], at: usize) -> Self {
-        let na = next_non_ascii(b, at);
-        let ascii = std::str::from_utf8(&b[at..na]).expect("ASCII is UTF-8");
+    fn new(b: &'a [u8], src: Option<&'a str>, at: usize) -> Self {
+        let hi = next_non_ascii(b, at, at + WINDOW);
         Scan {
             b,
+            src,
             lo: at,
-            ascii,
+            ascii: Self::slice(b, src, at, hi),
             pos: at,
         }
     }
 
-    fn na(&self) -> usize {
+    /// `b[lo..hi]`, known to be ASCII.
+    fn slice(b: &'a [u8], src: Option<&'a str>, lo: usize, hi: usize) -> &'a str {
+        match src {
+            Some(s) => &s[lo..hi],
+            None => std::str::from_utf8(&b[lo..hi]).expect("ASCII is UTF-8"),
+        }
+    }
+
+    fn hi(&self) -> usize {
         self.lo + self.ascii.len()
     }
 
-    /// Re-anchor the window after a name ran over non-ASCII bytes.
+    /// Grow the window to the next non-ASCII byte or the end of input, in one
+    /// flat pass. False when it already ends there.
+    fn extend(&mut self) -> bool {
+        let hi = self.hi();
+        if hi == self.b.len() || self.b[hi] >= 0x80 {
+            return false;
+        }
+        let new_hi = next_non_ascii(self.b, hi, self.b.len());
+        self.ascii = Self::slice(self.b, self.src, self.lo, new_hi);
+        true
+    }
+
+    /// Whether everything from `pos` on is ASCII. No decision can then change
+    /// a byte of the decoded text.
+    fn rest_is_ascii(&self) -> bool {
+        self.hi() == self.b.len() && self.pos >= self.lo
+    }
+
+    /// Re-anchor the window after a name ran past it.
     fn rescan(&mut self) {
-        if self.pos > self.na() {
-            let pos = self.pos;
-            *self = Scan::new(self.b, pos);
+        if self.pos > self.hi() {
+            *self = Scan::new(self.b, self.src, self.pos);
         }
     }
 
-    /// `b[from..to]` as text; both ends are in the window.
-    fn text(&self, from: usize, to: usize) -> &'a str {
-        &self.ascii[from - self.lo..to - self.lo]
-    }
-
-    /// The decision when the token being read reached `na`: a non-ASCII byte
-    /// in a deciding position, or the end of input.
-    fn reached_na(&self) -> Step {
-        if self.na() == self.b.len() {
+    /// The decision for a non-ASCII byte at `at` in a deciding position, or
+    /// for the end of input.
+    fn decided_at(&self, at: usize) -> Step {
+        if at >= self.b.len() {
             Step::Done(Decision::Utf8)
         } else {
-            Step::Done(by_text_search(self.b, self.na()))
+            Step::Done(by_text_search(self.b, at, self.src.is_some()))
         }
     }
 
-    fn find(&self, from: usize, c: char) -> Option<usize> {
-        self.ascii
-            .get(from.checked_sub(self.lo)?..)?
-            .find(c)
-            .map(|k| from + k)
+    /// The decision when a search ran out of window: the window then ends at
+    /// the end of input or at a non-ASCII byte.
+    fn ran_out(&self) -> Step {
+        self.decided_at(self.hi())
     }
 
-    fn find_str(&self, from: usize, pat: &str) -> Option<usize> {
-        self.ascii
-            .get(from.checked_sub(self.lo)?..)?
-            .find(pat)
-            .map(|k| from + k)
+    /// `pat` at or after `from`, growing the window as needed. `None` means it
+    /// is not there before the window's end, which is then a real one.
+    fn find(&mut self, from: usize, pat: &str) -> Option<usize> {
+        let mut start = from;
+        loop {
+            let hay = self.ascii.get(start.checked_sub(self.lo)?..)?;
+            // A one-byte pattern is a memchr; `str::find(&str)` would build a
+            // substring searcher for it on every call.
+            let hit = match pat.as_bytes() {
+                [c] => hay.find(char::from(*c)),
+                _ => hay.find(pat),
+            };
+            if let Some(k) = hit {
+                return Some(start + k);
+            }
+            let hi = self.hi();
+            if !self.extend() {
+                return None;
+            }
+            start = hi.saturating_sub(pat.len() - 1).max(from);
+        }
     }
 
     fn skip_blanks(&mut self) {
@@ -176,12 +222,12 @@ impl<'a> Scan<'a> {
     /// A comment (bogus or real) from `start`, as `Parser::comment` ends it.
     fn comment(&mut self, start: usize, bogus: bool) -> Step {
         if bogus {
-            return match self.find(start, '>') {
+            return match self.find(start, ">") {
                 Some(e) => {
                     self.pos = e + 1;
                     Step::Continue
                 }
-                None => self.reached_na(),
+                None => self.ran_out(),
             };
         }
         let b = self.b;
@@ -195,8 +241,8 @@ impl<'a> Scan<'a> {
         }
         let mut from = start;
         loop {
-            let Some(d) = self.find_str(from, "--") else {
-                return self.reached_na();
+            let Some(d) = self.find(from, "--") else {
+                return self.ran_out();
             };
             match b.get(d + 2) {
                 Some(b'>') => {
@@ -240,19 +286,20 @@ impl<'a> Scan<'a> {
                 let (vs, ve) = match b.get(self.pos) {
                     Some(&q @ (b'"' | b'\'')) => {
                         let from = self.pos + 1;
-                        match self.find(from, q as char) {
+                        let quote = if q == b'"' { "\"" } else { "'" };
+                        match self.find(from, quote) {
                             Some(e) => {
                                 self.pos = e + 1;
                                 (from, e)
                             }
-                            None => return Err(self.reached_na()),
+                            None => return Err(self.ran_out()),
                         }
                     }
                     _ => {
                         let mut i = self.pos;
                         while i < b.len() && !is_ws(b[i]) && b[i] != b'>' {
                             if b[i] >= 0x80 {
-                                return Err(self.reached_na());
+                                return Err(self.decided_at(i));
                             }
                             i += 1;
                         }
@@ -266,7 +313,7 @@ impl<'a> Scan<'a> {
             if keep {
                 if let Some((vs, ve)) = value {
                     let name = String::from_utf8_lossy(&b[ns..ne]).to_ascii_lowercase();
-                    let raw = self.text(vs, ve);
+                    let raw = std::str::from_utf8(&b[vs..ve]).expect("ASCII is UTF-8");
                     out.push((name, decode_html(raw, true, Nul::Replace).into_owned()));
                 }
             }
@@ -312,22 +359,32 @@ impl<'a> Scan<'a> {
         }
         match tags::data_mode(tag) {
             0 => Step::Continue,
-            tags::DATA_PLAINTEXT => self.reached_na(),
+            tags::DATA_PLAINTEXT => {
+                // The rest of the input is text: its first non-ASCII byte decides.
+                while self.extend() {}
+                let at = next_non_ascii(self.b, self.pos.max(self.lo), self.b.len());
+                self.decided_at(at)
+            }
             mode => {
+                // Known tags only, so the name fits `lower`.
                 let name = &lower[..ne - ns];
-                let lo = self.lo;
-                let (end, found) = crate::html::scan_raw(
-                    self.ascii,
-                    self.ascii.as_bytes(),
-                    self.pos - lo,
-                    name,
-                    mode,
-                );
-                if found {
-                    self.pos = lo + end;
-                    Step::Continue
-                } else {
-                    self.reached_na()
+                loop {
+                    self.rescan();
+                    let lo = self.lo;
+                    let (end, found) = crate::html::scan_raw(
+                        self.ascii,
+                        self.ascii.as_bytes(),
+                        self.pos - lo,
+                        name,
+                        mode,
+                    );
+                    if found {
+                        self.pos = lo + end;
+                        return Step::Continue;
+                    }
+                    if !self.extend() {
+                        return self.ran_out();
+                    }
                 }
             }
         }
@@ -360,16 +417,28 @@ impl<'a> Scan<'a> {
 }
 
 /// libxml2's decision for input with no BOM and no `encoding` argument.
-pub(crate) fn decide(b: &[u8]) -> Decision {
-    let mut s = Scan::new(b, 0);
-    if s.na() == b.len() {
+/// `src` is the input as text when it is valid UTF-8.
+pub(crate) fn decide<'a>(b: &'a [u8], src: Option<&'a str>) -> Decision {
+    let mut s = Scan::new(b, src, 0);
+    if s.rest_is_ascii() {
+        return Decision::Utf8;
+    }
+    // Every way to another encoding names `charset`: a `charset` attribute,
+    // `charset` in a Content-Type `content`, or the `CHARSET=` text search.
+    // Valid UTF-8 without it stays UTF-8 whatever the tokens are, so the walk
+    // is skipped. (A `content` that spells the word with character references
+    // is not seen.)
+    if src.is_some() && !contains_charset(b) {
         return Decision::Utf8;
     }
     let mut attrs = Vec::new();
     loop {
-        let Some(lt) = s.find(s.pos, '<') else {
+        if s.rest_is_ascii() {
+            return Decision::Utf8;
+        }
+        let Some(lt) = s.find(s.pos, "<") else {
             // Text runs into a non-ASCII byte, or to the end.
-            return match s.reached_na() {
+            return match s.ran_out() {
                 Step::Done(d) => d,
                 Step::Continue => unreachable!(),
             };
@@ -490,7 +559,7 @@ fn parse_content_type(val: &str) -> Option<&str> {
 }
 
 /// `htmlFindEncoding`, then the fallback, for a decision at `at`.
-fn by_text_search(b: &[u8], at: usize) -> Decision {
+fn by_text_search(b: &[u8], at: usize, valid: bool) -> Decision {
     let found = find_ci(b, at, b"http-equiv")
         .and_then(|i| find_ci(b, i, b"content"))
         .and_then(|i| find_ci(b, i, b"charset="))
@@ -516,12 +585,38 @@ fn by_text_search(b: &[u8], at: usize) -> Decision {
             }
         }
         // libxml2 falls back to windows-1252 here; valid UTF-8 is kept.
-        None if std::str::from_utf8(b).is_ok() => Decision::Utf8,
+        None if valid => Decision::Utf8,
         None => Decision::Switch {
             at,
             enc: XmlCharEncoding::Windows1252,
         },
     }
+}
+
+/// Whether `b` holds `charset` in any ASCII case. Thirty-two positions at a
+/// time are tested for `ch` with no exit inside, which vectorizes; only a block
+/// with a candidate is checked byte by byte.
+fn contains_charset(b: &[u8]) -> bool {
+    const W: &[u8] = b"charset";
+    let at = |i: usize| {
+        b.get(i..i + W.len())
+            .is_some_and(|w| w.eq_ignore_ascii_case(W))
+    };
+    let mut i = 0;
+    while i + 33 <= b.len() {
+        // A fixed-size view, so the index loop carries no bounds checks and
+        // compiles to vector compares.
+        let w: &[u8; 33] = b[i..i + 33].try_into().expect("33 bytes");
+        let mut hit = 0u8;
+        for k in 0..32 {
+            hit |= u8::from(w[k] | 0x20 == b'c') & u8::from(w[k + 1] | 0x20 == b'h');
+        }
+        if hit != 0 && (i..i + 32).any(at) {
+            return true;
+        }
+        i += 32;
+    }
+    (i..b.len()).any(at)
 }
 
 /// ASCII case-insensitive search for lowercase `needle` in `b[from..]`.
@@ -546,7 +641,7 @@ mod tests {
     use XmlCharEncoding::{Iso8859_1, Iso8859_2, Windows1252};
 
     fn d(b: &[u8]) -> Decision {
-        decide(b)
+        decide(b, std::str::from_utf8(b).ok())
     }
 
     #[test]
@@ -702,6 +797,23 @@ mod tests {
         // A label libxml2 cannot use leaves UTF-8.
         let b = b"<p>caf\xE9</p><meta http-equiv=\"Content-Type\" content=\"text/html; charset=bogus\">";
         assert_eq!(d(b), Decision::Utf8);
+    }
+
+    #[test]
+    fn charset_word_is_found_in_any_case_and_position() {
+        assert!(contains_charset(b"<meta charset=x>"));
+        assert!(contains_charset(b"CHARSET"));
+        assert!(contains_charset(
+            b"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxCharSet"
+        ));
+        assert!(contains_charset(
+            b"xxxxxxxxxxxxxxxc
+hxxxxxxxxxxxxxxcharsetxxxxx"
+        ));
+        // Straddling a 16-byte block boundary.
+        assert!(contains_charset(b"xxxxxxxxxxxxxxxcharset"));
+        assert!(!contains_charset(b"chars set charse char-set"));
+        assert!(!contains_charset(b""));
     }
 
     #[test]

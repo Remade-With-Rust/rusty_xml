@@ -798,10 +798,14 @@ fn many_attributes_on_one_element_is_not_quadratic() {
         "100000 attributes took {elapsed:?}"
     );
 
-    // A repeat past the 32nd attribute must still be caught on the set path,
-    // whether the first occurrence sits before or after attribute 32.
+    // A repeat past the 32nd attribute must still be caught on the set path:
+    // first occurrence before attribute 32 (lazy fill), then both
+    // occurrences past it (plain insert).
     let dup = format!("<r{} a7=\"again\"/>", attrs(40));
     let err = xml_read_memory(dup.as_bytes(), None, None, opts).unwrap_err();
+    assert_eq!(err.code, XML_ERR_ATTRIBUTE_REDEFINED);
+    let late = format!("<r{} a35=\"again\"/>", attrs(40));
+    let err = xml_read_memory(late.as_bytes(), None, None, opts).unwrap_err();
     assert_eq!(err.code, XML_ERR_ATTRIBUTE_REDEFINED);
     let prefixed = format!(
         "<r xmlns:p=\"u:p\" p:a7=\"x\"{} p:a7=\"y\"/>",

@@ -45,6 +45,7 @@ dependencies = [
  "rusty_xml-valid",
  "rusty_xml-writer",
  "rusty_xml-xpath",
+ "ruzstd",
 ]
 
 [[package]]
@@ -60,6 +61,7 @@ version = "0.8.5"
 dependencies = [
  "rusty_xml",
  "rusty_xml-alloc",
+ "ruzstd",
 ]
 
 [[package]]
@@ -120,6 +122,21 @@ version = "0.8.5"
 dependencies = [
  "rusty_xml-tree",
 ]
+
+[[package]]
+name = "ruzstd"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3640bec8aad418d7d03c72ea2de10d5c646a598f9883c7babc160d91e3c1b26c"
+dependencies = [
+ "twox-hash",
+]
+
+[[package]]
+name = "twox-hash"
+version = "2.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86a801b3cea342a06d468c8710662aa29e5e05e4f5c0d62f00bbb7f2ad7941c2"
 
 [[package]]
 name = "windows-link"

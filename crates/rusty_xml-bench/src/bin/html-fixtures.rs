@@ -1,9 +1,12 @@
 //! Writes libxml2 reference output for the HTML fixture cases.
 //!
-//! Two sets are generated here. `cases/` holds hand-picked snippets (inputs committed).
+//! Three sets are generated here. `cases/` holds hand-picked snippets (inputs committed).
 //! `libxml2/` holds the libxml2 HTML test files, copied from the pinned oracle source tree.
 //! Each input `<name>.html` gets `<name>.xmllint.html` beside it: the stdout of
 //! `xmllint --html <input>` from the pinned binary, which must report libxml2 21503.
+//! `html5lib/` is one zstd archive, `html5lib-9329e64.zst`, of the html5lib-tests
+//! tree-construction documents and their expected output. Its layout is documented on
+//! `html5lib_archive`.
 //! `MANIFEST` records the pin and the counts.
 //!
 //! Regenerate with `cargo run --release -p rusty_xml-bench --bin html-fixtures`.
@@ -11,10 +14,17 @@
 
 use std::collections::BTreeSet;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
+use ruzstd::encoding::CompressionLevel;
+
 const HTML5LIB_TESTS_SHA: &str = "9329e64694e7835d0dcff9811e22856ef6ad16f9";
+const HTML5LIB_TESTS_URL: &str = "https://github.com/html5lib/html5lib-tests";
+const HTML5LIB_ARCHIVE: &str = "html5lib-9329e64.zst";
+/// First line of the archive, before the `oracle` line.
+const ARCHIVE_MAGIC: &str = "rusty_xml html fixtures v1";
 const LIBXML_VERSION: &str = "21503";
 const REGENERATE: &str = "cargo run --release -p rusty_xml-bench --bin html-fixtures";
 
@@ -25,7 +35,9 @@ struct OraclePin {
 
 struct Output {
     path: PathBuf,
+    /// The file's content. For a `zstd` output, the content before compression.
     bytes: Vec<u8>,
+    zstd: bool,
 }
 
 fn workspace_root() -> PathBuf {
@@ -167,22 +179,191 @@ fn libxml2_copies() -> Vec<Output> {
             Output {
                 path: dst_dir.join(name),
                 bytes,
+                zstd: false,
             }
         })
         .collect()
 }
 
-fn manifest(pin: &OraclePin, cases: usize, libxml2: usize) -> String {
+fn manifest(pin: &OraclePin, cases: usize, libxml2: usize, html5lib: usize) -> String {
     format!(
         "oracle: {tag} {sha} (libxml version {LIBXML_VERSION})\n\
          command: xmllint --html <input>\n\
          html5lib-tests: {HTML5LIB_TESTS_SHA}\n\
          count cases: {cases}\n\
          count libxml2: {libxml2}\n\
+         count html5lib: {html5lib}\n\
          regenerate: {REGENERATE}\n",
         tag = pin.tag,
         sha = pin.sha,
     )
+}
+
+/// The pinned html5lib-tests checkout under `oracle/`, cloned from GitHub when missing.
+/// Fails unless its HEAD is the pinned SHA.
+fn html5lib_checkout() -> PathBuf {
+    let dir = workspace_root().join("oracle").join("html5lib-tests");
+    if !dir.exists() {
+        let dir_arg = dir.to_string_lossy().into_owned();
+        run_git(None, &["clone", HTML5LIB_TESTS_URL, dir_arg.as_str()]);
+    }
+    run_git(Some(&dir), &["checkout", "--quiet", HTML5LIB_TESTS_SHA]);
+    let head = run_git(Some(&dir), &["rev-parse", "HEAD"]);
+    assert_eq!(
+        head.trim(),
+        HTML5LIB_TESTS_SHA,
+        "{} is not at the pinned html5lib-tests commit",
+        dir.display()
+    );
+    dir
+}
+
+fn run_git(dir: Option<&Path>, args: &[&str]) -> String {
+    let mut cmd = Command::new("git");
+    if let Some(dir) = dir {
+        cmd.arg("-C").arg(dir);
+    }
+    let out = cmd
+        .args(args)
+        .output()
+        .unwrap_or_else(|e| panic!("cannot run git: {e}"));
+    if !out.status.success() {
+        panic!(
+            "git {} failed ({}): {}",
+            args.join(" "),
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// The `#data` blocks of one `.dat` file, as `<stem>-<NNN>.html` and the input bytes.
+/// Numbering counts every block, so a skipped block keeps its number.
+fn split_dat(text: &[u8], stem: &str) -> Vec<(String, Vec<u8>)> {
+    const DATA: &[u8] = b"#data\n";
+    let starts: Vec<usize> = (0..text.len())
+        .filter(|&at| (at == 0 || text[at - 1] == b'\n') && text[at..].starts_with(DATA))
+        .collect();
+    let mut cases = Vec::new();
+    for (index, &start) in starts.iter().enumerate() {
+        let end = starts.get(index + 1).copied().unwrap_or(text.len());
+        let block = &text[start..end];
+        let number = index + 1;
+        // xmllint has no fragment context, and libxml2 never runs scripts.
+        if has_line(block, b"#document-fragment") || has_line(block, b"#script-on") {
+            continue;
+        }
+        let body = &block[DATA.len()..];
+        let input: &[u8] = if body.starts_with(b"#errors\n") {
+            &[]
+        } else {
+            let end = find(body, b"\n#errors\n")
+                .unwrap_or_else(|| panic!("{stem}-{number:03}: no #errors line"));
+            &body[..end]
+        };
+        cases.push((format!("{stem}-{number:03}.html"), input.to_vec()));
+    }
+    cases
+}
+
+fn has_line(block: &[u8], line: &[u8]) -> bool {
+    block.split(|&b| b == b'\n').any(|l| l == line)
+}
+
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+/// The document cases of `tree-construction/*.dat`, sorted by name. Not recursive:
+/// `scripted/` repeats the stems `adoption01` and `webkit01`.
+fn html5lib_cases(tree_construction: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut files: Vec<PathBuf> = fs::read_dir(tree_construction)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", tree_construction.display()))
+        .map(|entry| entry.expect("read_dir entry").path())
+        .filter(|p| p.is_file() && p.extension().is_some_and(|e| e == "dat"))
+        .collect();
+    files.sort();
+    let mut cases = Vec::new();
+    for file in files {
+        let stem = file
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .expect("utf-8 file name")
+            .to_string();
+        let text =
+            fs::read(&file).unwrap_or_else(|e| panic!("cannot read {}: {e}", file.display()));
+        cases.extend(split_dat(&text, &stem));
+    }
+    cases.sort_by(|a, b| a.0.cmp(&b.0));
+    cases
+}
+
+/// A directory under the system temp dir, removed when dropped.
+struct TempDir(PathBuf);
+
+impl TempDir {
+    fn new() -> Self {
+        let path = std::env::temp_dir().join(format!("rusty_xml-html5lib-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path)
+            .unwrap_or_else(|e| panic!("cannot create {}: {e}", path.display()));
+        TempDir(path)
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Set 3, as one archive of the uncompressed layout below, zstd-compressed on write.
+/// Returns the output and the number of cases.
+///
+/// Layout:
+/// ```text
+/// rusty_xml html fixtures v1\n
+/// oracle <tag> <sha>\n
+/// html5lib-tests <sha>\n
+/// license <len>\n<len bytes of html5lib-tests/LICENSE>
+/// then per case, sorted by name: <name>\n<input len>\n<input bytes><expected len>\n<expected bytes>
+/// ```
+fn html5lib_archive(xmllint: &Path, pin: &OraclePin) -> (Output, usize) {
+    let checkout = html5lib_checkout();
+    let license = fs::read(checkout.join("LICENSE"))
+        .unwrap_or_else(|e| panic!("cannot read the html5lib-tests LICENSE: {e}"));
+    let inputs = html5lib_cases(&checkout.join("tree-construction"));
+
+    let temp = TempDir::new();
+    let mut cases = Vec::with_capacity(inputs.len());
+    for (name, input) in inputs {
+        let path = temp.0.join(&name);
+        fs::write(&path, &input).unwrap_or_else(|e| panic!("cannot write {}: {e}", path.display()));
+        let expected = xmllint_html(xmllint, &path);
+        cases.push((name, input, expected));
+    }
+
+    let mut stream = format!(
+        "{ARCHIVE_MAGIC}\noracle {tag} {sha}\nhtml5lib-tests {HTML5LIB_TESTS_SHA}\nlicense {len}\n",
+        tag = pin.tag,
+        sha = pin.sha,
+        len = license.len(),
+    )
+    .into_bytes();
+    stream.extend_from_slice(&license);
+    for (name, input, expected) in &cases {
+        stream.extend_from_slice(format!("{name}\n{}\n", input.len()).as_bytes());
+        stream.extend_from_slice(input);
+        stream.extend_from_slice(format!("{}\n", expected.len()).as_bytes());
+        stream.extend_from_slice(expected);
+    }
+    let output = Output {
+        path: fixtures_dir().join(HTML5LIB_ARCHIVE),
+        bytes: stream,
+        zstd: true,
+    };
+    (output, cases.len())
 }
 
 /// Every file this run produces. With `write_copies`, the libxml2 copies land on disk first,
@@ -210,12 +391,19 @@ fn build(xmllint: &Path, pin: &OraclePin, write_copies: bool) -> Vec<Output> {
                 path.display()
             );
             let bytes = xmllint_html(xmllint, input);
-            outputs.push(Output { path, bytes });
+            outputs.push(Output {
+                path,
+                bytes,
+                zstd: false,
+            });
         }
     }
+    let (archive, html5lib) = html5lib_archive(xmllint, pin);
+    outputs.push(archive);
     outputs.push(Output {
         path: fixtures_dir().join("MANIFEST"),
-        bytes: manifest(pin, cases.len(), libxml2.len()).into_bytes(),
+        bytes: manifest(pin, cases.len(), libxml2.len(), html5lib).into_bytes(),
+        zstd: false,
     });
     outputs
 }
@@ -225,6 +413,47 @@ fn relative(path: &Path) -> String {
         .unwrap_or(path)
         .display()
         .to_string()
+}
+
+/// Decompresses a zstd frame, or `None` when the bytes are not one.
+fn unzstd(packed: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    ruzstd::decoding::StreamingDecoder::new(packed)
+        .ok()?
+        .read_to_end(&mut out)
+        .ok()?;
+    Some(out)
+}
+
+/// Compares what is on disk with the output. A zstd output is compared decompressed.
+fn on_disk_matches(o: &Output) -> bool {
+    let Ok(raw) = fs::read(&o.path) else {
+        return false;
+    };
+    let on_disk = if o.zstd {
+        match unzstd(&raw) {
+            Some(bytes) => bytes,
+            None => return false,
+        }
+    } else {
+        raw
+    };
+    on_disk == o.bytes
+}
+
+/// Writes a zstd output through `<path>.tmp`, then renames it into place.
+fn write_output(o: &Output) {
+    if o.zstd {
+        let packed =
+            ruzstd::encoding::compress_to_vec(o.bytes.as_slice(), CompressionLevel::Fastest);
+        let tmp = PathBuf::from(format!("{}.tmp", o.path.display()));
+        fs::write(&tmp, &packed).unwrap_or_else(|e| panic!("cannot write {}: {e}", tmp.display()));
+        fs::rename(&tmp, &o.path)
+            .unwrap_or_else(|e| panic!("cannot rename {} into place: {e}", tmp.display()));
+    } else {
+        fs::write(&o.path, &o.bytes)
+            .unwrap_or_else(|e| panic!("cannot write {}: {e}", o.path.display()));
+    }
 }
 
 fn main() -> ExitCode {
@@ -243,10 +472,7 @@ fn main() -> ExitCode {
     let outputs = build(&xmllint, &pin, !check);
 
     if check {
-        let stale: Vec<&Output> = outputs
-            .iter()
-            .filter(|o| fs::read(&o.path).ok().as_deref() != Some(o.bytes.as_slice()))
-            .collect();
+        let stale: Vec<&Output> = outputs.iter().filter(|o| !on_disk_matches(o)).collect();
         for o in &stale {
             eprintln!("differs: {}", relative(&o.path));
         }
@@ -262,8 +488,7 @@ fn main() -> ExitCode {
     }
 
     for o in &outputs {
-        fs::write(&o.path, &o.bytes)
-            .unwrap_or_else(|e| panic!("cannot write {}: {e}", o.path.display()));
+        write_output(o);
     }
     println!("html-fixtures: wrote {} files", outputs.len());
     ExitCode::SUCCESS
@@ -295,5 +520,58 @@ mod tests {
         assert!(is_input("p-closed-by-li.html"));
         assert!(!is_input("p-closed-by-li.xmllint.html"));
         assert!(!is_input("Copyright"));
+    }
+
+    fn split(text: &str) -> Vec<(String, Vec<u8>)> {
+        split_dat(text.as_bytes(), "t")
+    }
+
+    #[test]
+    fn split_dat_skips_a_fragment_block() {
+        let text = "#data\n<p>a\n#errors\n#document\n| <html>\n\
+                    #data\n<p>b\n#errors\n#document-fragment\ndiv\n#document\n| <html>\n";
+        assert_eq!(
+            split(text),
+            vec![("t-001.html".to_string(), b"<p>a".to_vec())]
+        );
+    }
+
+    #[test]
+    fn split_dat_skips_a_script_on_block() {
+        let text = "#data\n<p>a\n#errors\n#script-on\n#document\n| <html>\n\
+                    #data\n<p>b\n#errors\n#document\n| <html>\n";
+        assert_eq!(
+            split(text),
+            vec![("t-002.html".to_string(), b"<p>b".to_vec())]
+        );
+    }
+
+    #[test]
+    fn split_dat_excludes_the_errors_delimiter_and_keeps_inner_newlines() {
+        let text = "#data\n<p>a\n<b>\n#errors\n1:1 expected\n#document\n| <html>\n";
+        assert_eq!(
+            split(text),
+            vec![("t-001.html".to_string(), b"<p>a\n<b>".to_vec())]
+        );
+    }
+
+    #[test]
+    fn split_dat_gives_empty_input_when_the_block_starts_with_errors() {
+        let text = "#data\n#errors\n#document\n| <html>\n";
+        assert_eq!(split(text), vec![("t-001.html".to_string(), Vec::new())]);
+    }
+
+    #[test]
+    fn split_dat_numbers_skipped_blocks_so_names_keep_their_position() {
+        let text = "#data\n<a>\n#errors\n#document-fragment\ndiv\n#document\n| <html>\n\
+                    #data\n<b>\n#errors\n#document\n| <html>\n\
+                    #data\n<c>\n#errors\n#document\n| <html>\n";
+        assert_eq!(
+            split(text),
+            vec![
+                ("t-002.html".to_string(), b"<b>".to_vec()),
+                ("t-003.html".to_string(), b"<c>".to_vec()),
+            ]
+        );
     }
 }

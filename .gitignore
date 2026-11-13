@@ -10,6 +10,7 @@
 /oracle/bin
 /oracle/tools/build
 /oracle/tmp-*.xml
+/oracle/html5lib-tests
 
 # Local / generated
 .DS_Store

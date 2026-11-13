@@ -13,6 +13,7 @@ publish = false
 [dependencies]
 rusty_xml = { workspace = true }
 rusty_xml-alloc = { version = "0.8.5", path = "../rusty_xml-alloc" }
+ruzstd = "=0.8.1"
 
 [lints]
 workspace = true

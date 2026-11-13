@@ -24,7 +24,7 @@ rusty_xml-xpath = { workspace = true }
 rusty_xml-valid = { workspace = true }
 
 [dev-dependencies]
-ruzstd = "=0.8.1"
+rusty_zstd = "0.5"
 
 [lints]
 workspace = true

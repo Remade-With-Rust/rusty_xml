@@ -16,11 +16,8 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
-
-use ruzstd::encoding::CompressionLevel;
 
 const HTML5LIB_TESTS_SHA: &str = "9329e64694e7835d0dcff9811e22856ef6ad16f9";
 const HTML5LIB_TESTS_URL: &str = "https://github.com/html5lib/html5lib-tests";
@@ -471,12 +468,7 @@ fn relative(path: &Path) -> String {
 
 /// Decompresses a zstd frame, or `None` when the bytes are not one.
 fn unzstd(packed: &[u8]) -> Option<Vec<u8>> {
-    let mut out = Vec::new();
-    ruzstd::decoding::StreamingDecoder::new(packed)
-        .ok()?
-        .read_to_end(&mut out)
-        .ok()?;
-    Some(out)
+    rusty_zstd::decompress(packed).ok()
 }
 
 /// Compares what is on disk with the output. A zstd output is compared decompressed.
@@ -498,8 +490,7 @@ fn on_disk_matches(o: &Output) -> bool {
 /// Writes a zstd output through `<path>.tmp`, then renames it into place.
 fn write_output(o: &Output) {
     if o.zstd {
-        let packed =
-            ruzstd::encoding::compress_to_vec(o.bytes.as_slice(), CompressionLevel::Fastest);
+        let packed = rusty_zstd::compress(&o.bytes, 19).expect("zstd compress");
         let tmp = PathBuf::from(format!("{}.tmp", o.path.display()));
         fs::write(&tmp, &packed).unwrap_or_else(|e| panic!("cannot write {}: {e}", tmp.display()));
         fs::rename(&tmp, &o.path)

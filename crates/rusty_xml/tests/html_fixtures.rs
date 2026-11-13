@@ -22,12 +22,10 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Read;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 
 use rusty_xml::{html_read_memory, xml_save_doc};
-use ruzstd::decoding::StreamingDecoder;
 
 /// Sets a `known-differences.txt` key may name.
 const SETS: [&str; 3] = ["cases", "libxml2", "html5lib"];
@@ -40,8 +38,9 @@ const ARCHIVE_MAGIC: &str = "rusty_xml html fixtures v1";
 const PANIC_PREFIX: &str = "panic: ";
 
 /// Reason keys, defined in the header of `known-differences.txt`.
-const REASON_KEYS: [&str; 4] = [
+const REASON_KEYS: [&str; 5] = [
     "writer-nonascii-refs",
+    "writer-cr-in-text",
     "writer-nonascii-attr-name",
     "writer-attr-escaping",
     "parser-input-encoding",
@@ -152,10 +151,7 @@ struct ArchiveHeader {
 fn read_archive() -> (ArchiveHeader, Vec<(String, Vec<u8>, Vec<u8>)>) {
     let path = fixtures_dir().join(HTML5LIB_ARCHIVE);
     let packed = fs::read(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
-    let mut bytes = Vec::new();
-    StreamingDecoder::new(packed.as_slice())
-        .unwrap_or_else(|e| panic!("{}: not a zstd frame: {e}", path.display()))
-        .read_to_end(&mut bytes)
+    let bytes = rusty_zstd::decompress(&packed)
         .unwrap_or_else(|e| panic!("{}: cannot decompress: {e}", path.display()));
 
     let mut r = Reader { rest: &bytes };

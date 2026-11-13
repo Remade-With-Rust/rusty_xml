@@ -34,6 +34,11 @@ deny = [
 
 [advisories]
 yanked = "deny"
+# The fix needs rustc 1.87, above MSRV 1.85. ruzstd reaches only the dev graph of
+# rusty_xml and the unpublished rusty_xml-bench, which decode the committed fixture archive.
+ignore = [
+    { id = "RUSTSEC-2026-0344", reason = "ruzstd 0.8.1 decompression bomb; fixed only in 0.9.1 (rustc 1.87). Dev and bench only, decodes committed input. Revisit at MSRV 1.87." },
+]
 
 [sources]
 unknown-registry = "deny"

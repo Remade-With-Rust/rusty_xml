@@ -19,6 +19,7 @@
 //! `docs/html-ir-campaign.md`; the losing arms are recorded beside each choice.
 
 use std::borrow::Cow;
+use std::collections::HashSet;
 
 use rusty_xml_tree::{NodeId, NodeKind, XmlDoc};
 
@@ -41,6 +42,9 @@ const DATA_SCRIPT_ESC2: u8 = 6;
 
 /// libxml2 truncates names to `HTML_PARSER_BUFFER_SIZE` bytes.
 const MAX_NAME: usize = 100;
+/// A start tag with more attributes than this deduplicates them through a
+/// hash set. The pairwise scan is cheaper on ordinary tags, but quadratic.
+const ATTR_SCAN_MAX: usize = 32;
 
 /// `IS_WS_HTML`.
 #[inline]
@@ -647,28 +651,50 @@ impl<'a> Parser<'a> {
     /// list, then appending without a scan, beat probing the element's
     /// attributes in the arena by 0.3% / 0.1% parse Ir, and the old
     /// `xml_set_prop` (last wins, value = name) cost 1.0% / 0.9% more than both.
+    /// Past `ATTR_SCAN_MAX` attributes `add_attributes_wide` takes over.
     fn add_attributes(&mut self, el: NodeId) {
         let attrs = std::mem::take(&mut self.attrs);
-        for (i, (n, v)) in attrs.iter().enumerate() {
-            if attrs[..i].iter().any(|(m, _)| m == n) {
-                continue;
-            }
-            match v {
-                Some(v) => {
-                    self.doc.add_attr(el, n, None, v);
-                }
-                None if is_boolean_attr(n) => {
-                    self.doc.add_attr(el, n, None, n);
-                }
-                None => {
-                    let id = self.doc.add_attr(el, n, None, "");
-                    self.doc.html_bare_attrs.push(id);
+        if attrs.len() > ATTR_SCAN_MAX {
+            self.add_attributes_wide(el, &attrs);
+        } else {
+            for (i, (n, v)) in attrs.iter().enumerate() {
+                if !attrs[..i].iter().any(|(m, _)| m == n) {
+                    self.add_attribute(el, n, v.as_deref());
                 }
             }
         }
         // Hand the buffer back so its capacity is reused.
         self.attrs = attrs;
         self.attrs.clear();
+    }
+
+    /// `add_attributes` for a tag whose pairwise scan would be quadratic: a
+    /// set finds the repeats, as `htmlAttrHashInsert` does. Names are
+    /// attacker-chosen, so the set keeps the standard library's keyed hasher.
+    #[cold]
+    fn add_attributes_wide(&mut self, el: NodeId, attrs: &[(Cow<'a, str>, Option<Cow<'a, str>>)]) {
+        let mut seen: HashSet<&str> = HashSet::with_capacity(attrs.len());
+        for (n, v) in attrs {
+            if seen.insert(n) {
+                self.add_attribute(el, n, v.as_deref());
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn add_attribute(&mut self, el: NodeId, n: &str, v: Option<&str>) {
+        match v {
+            Some(v) => {
+                self.doc.add_attr(el, n, None, v);
+            }
+            None if is_boolean_attr(n) => {
+                self.doc.add_attr(el, n, None, n);
+            }
+            None => {
+                let id = self.doc.add_attr(el, n, None, "");
+                self.doc.html_bare_attrs.push(id);
+            }
+        }
     }
 
     /// `htmlParseEndTag` + `htmlAutoCloseOnClose`.

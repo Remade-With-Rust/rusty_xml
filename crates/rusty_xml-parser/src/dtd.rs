@@ -1229,15 +1229,19 @@ fn check_entity_graph(dtd: &XmlDtd) -> Result<(), XmlError> {
     let err = |m: String| XmlError::new(crate::error::XML_ERR_UNDECLARED_ENTITY, m, 0, 0);
 
     // Every reference in a literal must name a declared, parsed entity.
+    // Only entity values form the reference graph: an ATTLIST default cannot
+    // be referenced, so it cannot close a cycle. Keying both by bare name made
+    // an attribute `a` and an entity `a` share an entry, which reported a loop
+    // that does not exist.
     let mut refs: std::collections::HashMap<&str, Vec<String>> = Default::default();
     let literals = dtd
         .entities
         .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .map(|(k, v)| (Some(k.as_str()), v.as_str()))
         .chain(
             dtd.attributes
-                .iter()
-                .filter_map(|((_, a), d)| d.default_value.as_deref().map(|v| (a.as_str(), v))),
+                .values()
+                .filter_map(|d| d.default_value.as_deref().map(|v| (None, v))),
         );
     for (owner, text) in literals {
         for name in entity_refs_in(text) {
@@ -1250,24 +1254,59 @@ fn check_entity_graph(dtd: &XmlDtd) -> Result<(), XmlError> {
             if !dtd.entities.contains_key(&name) {
                 return Err(err(format!("Entity '{name}' not defined")));
             }
-            refs.entry(owner).or_default().push(name);
+            if let Some(owner) = owner {
+                refs.entry(owner).or_default().push(name);
+            }
         }
     }
 
     // A cycle in the reference graph is a well-formedness error, not something
-    // to discover by running out of depth.
-    for start in dtd.entities.keys() {
-        let mut seen = std::collections::HashSet::new();
-        let mut stack = vec![start.as_str()];
-        while let Some(cur) = stack.pop() {
-            if !seen.insert(cur) {
-                continue;
-            }
-            for next in refs.get(cur).into_iter().flatten() {
-                if next == start {
-                    return Err(err("Detected an entity reference loop".into()));
+    // to discover by running out of depth. One depth-first pass with three
+    // colours visits each entity and reference once. The previous form
+    // walked the graph afresh from every entity, which is quadratic: a chain
+    // of 20,000 entities took 38 s to load.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Mark {
+        Active,
+        Done,
+    }
+    let mut mark: std::collections::HashMap<&str, Mark> =
+        std::collections::HashMap::with_capacity(dtd.entities.len());
+    let mut names: Vec<&str> = dtd.entities.keys().map(String::as_str).collect();
+    // HashMap order is random; sorting makes the reported error repeatable.
+    names.sort_unstable();
+    for start in names {
+        if mark.contains_key(start) {
+            continue;
+        }
+        // (entity, index of the next reference to follow)
+        let mut stack: Vec<(&str, usize)> = vec![(start, 0)];
+        mark.insert(start, Mark::Active);
+        while let Some(top) = stack.last_mut() {
+            let (cur, idx) = *top;
+            match refs.get(cur).and_then(|v| v.get(idx)) {
+                Some(n) => {
+                    top.1 += 1;
+                    match mark.get(n.as_str()) {
+                        Some(Mark::Active) => {
+                            return Err(XmlError::new(
+                                crate::error::XML_ERR_ENTITY_LOOP,
+                                "Detected an entity reference loop",
+                                0,
+                                0,
+                            ));
+                        }
+                        Some(Mark::Done) => {}
+                        None => {
+                            mark.insert(n.as_str(), Mark::Active);
+                            stack.push((n.as_str(), 0));
+                        }
+                    }
                 }
-                stack.push(next.as_str());
+                None => {
+                    mark.insert(cur, Mark::Done);
+                    stack.pop();
+                }
             }
         }
     }

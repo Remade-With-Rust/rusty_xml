@@ -449,3 +449,133 @@ fn xinclude_handles_any_depth() {
     assert!(out.contains("<i k=\"v\"><b><b>"));
     assert!(!out.contains("xi:include"));
 }
+
+/// #41: parameter entities expand one level per pass, so ten references per
+/// entity grew 639 bytes into 17 MB at six levels. They are charged like
+/// general entities now; xmllint refuses from five levels.
+#[test]
+fn parameter_entity_amplification_is_bounded() {
+    let pe = |depth: usize| {
+        let mut d = String::from("<!ENTITY % a0 \"<!-- xxxxxxxx -->\">");
+        for i in 1..=depth {
+            d.push_str(&format!("<!ENTITY % a{i} \"{}\">", format!("&#37;a{};", i - 1).repeat(10)));
+        }
+        format!("<!DOCTYPE r [{d}%a{depth};]><r/>").into_bytes()
+    };
+    let opts = default_parse_options();
+    assert_eq!(code(xml_read_memory(&pe(4), None, None, opts)), 0);
+    for depth in [5, 6, 9] {
+        assert_eq!(code(xml_read_memory(&pe(depth), None, None, opts)), XML_ERR_RESOURCE_LIMIT, "{depth} levels");
+    }
+}
+
+/// #41: re-parsing a markup entity cloned the whole DTD per reference, so
+/// 100,000 references under a 500 KB subset took 6.5 s.
+#[test]
+fn spliced_entities_do_not_copy_the_dtd() {
+    let mut d = String::from("<!DOCTYPE r [");
+    for i in 0..2_000 {
+        d.push_str(&format!("<!ENTITY big{i} \"{}\">", "y".repeat(500)));
+    }
+    d.push_str("<!ENTITY s \"<b/>\">]><r>");
+    d.push_str(&"&s;".repeat(60_000));
+    d.push_str("</r>");
+    let t = std::time::Instant::now();
+    let doc = xml_read_memory(d.as_bytes(), None, None, default_parse_options()).unwrap();
+    assert!(t.elapsed().as_secs() < 10, "took {:?}", t.elapsed());
+    assert!(doc.len() > 60_000);
+    assert!(doc.dtd.as_ref().is_some_and(|x| x.entities.len() == 2_001), "the DTD is intact");
+}
+
+/// #41: namespace lookup walked every open element, so 200,000 nested
+/// elements under XML_PARSE_HUGE took 14 s. Lookup is bounded now, also with
+/// a declaration on every level and many prefixes on one element.
+#[test]
+fn namespace_lookup_does_not_walk_the_depth() {
+    let opts = default_parse_options() | XML_PARSE_HUGE;
+    let n = 300_000;
+    let t = std::time::Instant::now();
+    let plain = format!("<r>{}{}</r>", "<a>".repeat(n), "</a>".repeat(n));
+    xml_read_memory(plain.as_bytes(), None, None, opts).unwrap();
+    let declaring = format!(
+        "<r xmlns:q=\"top\">{}<q:z/>{}</r>",
+        "<a xmlns:p=\"u\">".repeat(n),
+        "</a>".repeat(n)
+    );
+    let doc = xml_read_memory(declaring.as_bytes(), None, None, opts).unwrap();
+    let z = (0..doc.len() as u32)
+        .map(rusty_xml::NodeId)
+        .find(|&i| doc.kind(i) == rusty_xml::NodeKind::Element && doc.name(i) == "z")
+        .unwrap();
+    assert_eq!(doc.ns_uri(z), Some("top"), "an outer binding still resolves through the index");
+    let decls: String = (0..10_000).map(|i| format!(" xmlns:p{i}=\"u{i}\"")).collect();
+    let wide = format!("<r{decls}>{}</r>", "<p0:e/>".repeat(50_000));
+    let doc = xml_read_memory(wide.as_bytes(), None, None, opts).unwrap();
+    let e = (0..doc.len() as u32)
+        .map(rusty_xml::NodeId)
+        .find(|&i| doc.name(i) == "e")
+        .unwrap();
+    assert_eq!(doc.ns_uri(e), Some("u0"));
+    assert!(t.elapsed().as_secs() < 20, "took {:?}", t.elapsed());
+}
+
+/// #41: HTML has no nesting cap (libxml2's is 256), and an end tag that
+/// matched nothing, or a stray <body>, scanned the whole open-element stack:
+/// 80,000 of them under 80,000 open elements took 3.8 s.
+#[test]
+fn html_end_tags_do_not_scan_a_deep_stack() {
+    let n = 200_000;
+    let t = std::time::Instant::now();
+    for tail in ["</i>", "<body>", "</div>"] {
+        let d = format!("<div>{}<td>{}", "<b>".repeat(n), tail.repeat(n));
+        let doc = html_read_memory(d.as_bytes(), None, None, 0).unwrap();
+        assert!(doc.len() > n);
+    }
+    assert!(t.elapsed().as_secs() < 20, "took {:?}", t.elapsed());
+}
+
+/// #41: one large construct arriving in many small chunks was rescanned from
+/// its start on every chunk, and so was a large prolog. Both are linear now;
+/// before, these took tens of seconds.
+#[test]
+fn push_parser_is_linear_in_chunk_count() {
+    let opts = default_parse_options();
+    let t = std::time::Instant::now();
+    for doc in [
+        format!("<r><!--{}--></r>", "c".repeat(1_000_000)),
+        format!("<r><a x=\"{}\"/></r>", "v>".repeat(500_000)),
+        format!("<r><![CDATA[{}]]></r>", "d".repeat(1_000_000)),
+        format!("<!DOCTYPE r [{}]><r/>", "<!ENTITY e \"x\">".repeat(60_000)),
+    ] {
+        let mut c = xml_create_push_parser_ctxt(&[], None, None, opts);
+        for ch in doc.as_bytes().chunks(128) {
+            xml_parse_chunk(&mut c, ch, 0).unwrap();
+        }
+        let got = xml_parse_chunk(&mut c, &[], 1).unwrap().unwrap();
+        let whole = xml_read_memory(doc.as_bytes(), None, None, opts).unwrap();
+        assert_eq!(xml_save_doc(&got, 0), xml_save_doc(&whole, 0));
+    }
+    assert!(t.elapsed().as_secs() < 30, "took {:?}", t.elapsed());
+}
+
+/// The carried scan position must find a terminator split across chunks
+/// and keep the quote state of a tag: tiny chunks give the one-shot tree.
+#[test]
+fn push_parser_matches_one_shot_at_every_tiny_chunk_size() {
+    let opts = default_parse_options();
+    let docs = [
+        "<r><!-- a - b - c --><x a=\"q>'\" b='>\"'>t</x><![CDATA[ ]] ]> ]]><?p ? > ?>&amp;&#65;</r>",
+        "<r>\r\n<a k=\"v\"/>\u{e9}\u{4e2d}\u{1f600}<!---->x</r>",
+    ];
+    for d in docs {
+        let whole = xml_save_doc(&xml_read_memory(d.as_bytes(), None, None, opts).unwrap(), 0);
+        for size in 1..=9 {
+            let mut c = xml_create_push_parser_ctxt(&[], None, None, opts);
+            for ch in d.as_bytes().chunks(size) {
+                xml_parse_chunk(&mut c, ch, 0).unwrap();
+            }
+            let got = xml_parse_chunk(&mut c, &[], 1).unwrap().unwrap();
+            assert_eq!(xml_save_doc(&got, 0), whole, "chunk size {size}");
+        }
+    }
+}

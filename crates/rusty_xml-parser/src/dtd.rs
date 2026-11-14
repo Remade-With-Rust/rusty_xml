@@ -19,17 +19,31 @@ pub fn xml_parse_dtd(
 
 /// Parse a DTD internal/external subset into declarations.
 pub fn parse_dtd_subset(src: &str, old10: bool) -> Result<XmlDtd, XmlError> {
-    parse_subset(src, true, old10)
+    parse_subset(src, true, old10, crate::parse::XML_MAX_AMPLIFICATION_DEFAULT)
+}
+
+/// [`parse_dtd_subset`] with the parse's entity amplification factor.
+pub(crate) fn parse_dtd_subset_ampl(
+    src: &str,
+    old10: bool,
+    max_ampl: u32,
+) -> Result<XmlDtd, XmlError> {
+    parse_subset(src, true, old10, max_ampl)
 }
 
 /// Parse an external subset, where conditional sections are legal and a
 /// parameter entity may supply part of a declaration.
 pub fn parse_external_subset(src: &str, old10: bool) -> Result<XmlDtd, XmlError> {
-    parse_subset(src, false, old10)
+    parse_subset(src, false, old10, crate::parse::XML_MAX_AMPLIFICATION_DEFAULT)
 }
 
-fn parse_subset(src: &str, internal: bool, old10: bool) -> Result<XmlDtd, XmlError> {
-    let expanded = expand_pe(src, internal)?;
+fn parse_subset(
+    src: &str,
+    internal: bool,
+    old10: bool,
+    max_ampl: u32,
+) -> Result<XmlDtd, XmlError> {
+    let expanded = expand_pe(src, internal, max_ampl)?;
     let mut dtd = XmlDtd::default();
     dtd.int_subset = Some(src.to_string());
     let mut p = DtdParser {
@@ -51,13 +65,50 @@ fn parse_subset(src: &str, internal: bool, old10: bool) -> Result<XmlDtd, XmlErr
     Ok(dtd)
 }
 
-fn expand_pe(src: &str, internal: bool) -> Result<String, XmlError> {
+/// Parameter entity amplification, charged as libxml2's
+/// `xmlParserEntityCheck` charges a PE reference: the replacement's length
+/// plus the fixed cost, failing past 1,000,000 bytes once the total exceeds
+/// `max_ampl` times the subset's length.
+struct PeAmpl {
+    expanded: u64,
+    consumed: u64,
+    max_ampl: u64,
+}
+
+impl PeAmpl {
+    fn charge(&mut self, len: usize) -> Result<(), XmlError> {
+        self.expanded = self.expanded.saturating_add(len as u64).saturating_add(20);
+        if self.expanded > 1_000_000
+            && (self.expanded == u64::MAX || self.expanded / self.max_ampl > self.consumed)
+        {
+            return Err(XmlError::new(
+                crate::error::XML_ERR_RESOURCE_LIMIT,
+                "Maximum entity amplification factor exceeded, see xmlCtxtSetMaxAmplification.",
+                0,
+                0,
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn expand_pe(src: &str, internal: bool, max_ampl: u32) -> Result<String, XmlError> {
     // Multi-pass PE expansion so `%percent;` can invent new PE names.
+    //
+    // Every pass expands one more level, so ten references per entity grow
+    // the subset tenfold per pass: 639 bytes became 17 MB at six levels, and
+    // each further level is another factor of ten. The expansion is charged
+    // as libxml2 charges it; xmllint refuses the five-level form.
+    let mut ampl = PeAmpl {
+        expanded: 0,
+        consumed: src.len() as u64,
+        max_ampl: u64::from(max_ampl.max(1)),
+    };
     let mut cur = src.to_string();
     for _ in 0..16 {
         let mut pes: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         harvest_pe(&cur, &mut pes);
-        let next = subst_pe(&cur, &pes, internal)?;
+        let next = subst_pe(&cur, &pes, internal, &mut ampl)?;
         if next == cur {
             return Ok(cur);
         }
@@ -113,6 +164,7 @@ fn subst_pe(
     src: &str,
     pes: &std::collections::HashMap<String, String>,
     internal: bool,
+    ampl: &mut PeAmpl,
 ) -> Result<String, XmlError> {
     let mut out = String::new();
     let mut chars = src.chars().peekable();
@@ -245,6 +297,7 @@ fn subst_pe(
                 ));
             }
             if let Some(v) = pes.get(&name) {
+                ampl.charge(v.len())?;
                 out.push_str(v);
             } else {
                 out.push('%');

@@ -524,6 +524,8 @@ pub struct XmlPushParserCtxt {
     recovered: Option<XmlDoc>,
     /// libxml2's `maxAmpl`, see [`xml_ctxt_set_max_amplification`].
     max_ampl: u32,
+    /// Buffer length at the last attempt to parse the prolog.
+    prolog_tried: usize,
 }
 
 impl XmlPushParserCtxt {
@@ -566,6 +568,7 @@ pub fn xml_create_push_parser_ctxt(
         stopped: false,
         recovered: None,
         max_ampl: XML_MAX_AMPLIFICATION_DEFAULT,
+        prolog_tried: 0,
     }
 }
 
@@ -691,7 +694,20 @@ fn parse_chunk(
     // Phase 1 -- prolog. Nothing can stream until the root's start tag is in
     // hand, so buffer until it parses. The prolog is small, and re-parsing it
     // per chunk is cheap; the body, which is not small, is never re-parsed.
+    // Until the root's start tag is in hand the whole buffer is re-parsed,
+    // so a large internal subset fed in small chunks was quadratic: 1.5 MB in
+    // 4 KB chunks took 2.0 s (#41). Waiting until the buffer has doubled
+    // since the last attempt keeps the total linear and changes nothing else:
+    // an error here is only ever reported by the terminating chunk.
+    if ctxt.state.is_none()
+        && !ctxt.no_stream
+        && !terminate
+        && ctxt.buf.len() < ctxt.prolog_tried.saturating_mul(2)
+    {
+        return Ok(None);
+    }
     if ctxt.state.is_none() && !ctxt.no_stream {
+        ctxt.prolog_tried = ctxt.buf.len();
         // Conversion is stateful and the streaming path hands raw bytes to the
         // parser, so anything that is not already plain UTF-8 is buffered.
         match crate::encoding::xml_convert_to_utf8_cow(&ctxt.buf, ctxt.encoding.as_deref()) {
@@ -766,7 +782,13 @@ fn parse_chunk(
         let at = safe.min(ctxt.buf.len());
         ctxt.state = Some(p.suspend(open, root_closed));
         ctxt.buf.drain(..at);
-        ctxt.buf.shrink_to_fit();
+        // Shrinking on every chunk made the next chunk's append copy the
+        // whole unparsed tail, which is quadratic while one large construct
+        // arrives in many chunks (#41). Release memory only once most of the
+        // capacity is unused.
+        if ctxt.buf.capacity() > 4 * ctxt.buf.len() + (64 << 10) {
+            ctxt.buf.shrink_to_fit();
+        }
         ctxt.consumed += at;
         return Ok(None);
     }
@@ -812,7 +834,7 @@ fn fresh_parser<'a>(
         options,
         old10: (options & XML_PARSE_OLD10) != 0,
         depth: 0,
-        ns_stack: Vec::new(),
+        ns_stack: NsScope::default(),
         sax,
         doc: XmlDoc::with_node_capacity(
             Some("1.0"),
@@ -832,6 +854,7 @@ fn fresh_parser<'a>(
         watch: cfg.sax_stop || cfg.settings.interrupt.is_some(),
         interrupt: cfg.settings.interrupt.map(InterruptPoll::new),
         interrupted: false,
+        scan_hint: None,
         scratch_raw: Vec::new(),
         scratch_sax: Vec::new(),
         started: false,
@@ -897,6 +920,96 @@ pub fn xml_ctxt_reset(ctxt: &mut XmlParserCtxt) {
     ctxt.last_error = None;
 }
 
+/// The namespace declarations in scope: one frame per open element.
+///
+/// Lookup walked every frame from the innermost out, so an element whose
+/// prefix (or default namespace) was declared far up, or nowhere, cost the
+/// whole depth: 200,000 nested elements under `XML_PARSE_HUGE` took 9.8 s,
+/// and the HUGE cap is 1,000,000 (#41). Lookup now walks only frames that
+/// declare something, and once more than [`NS_WALK`] declarations are in
+/// scope it switches to a prefix index, kept until they drop below half.
+#[derive(Default)]
+struct NsScope {
+    frames: Vec<Vec<(Option<String>, String)>>,
+    /// Indices of the frames that declare something, innermost last.
+    declaring: Vec<u32>,
+    /// Declarations in scope.
+    count: usize,
+    /// Prefix (`""` for the default namespace) to its URIs in scope,
+    /// innermost last. Present only while `count` is large.
+    index: Option<std::collections::HashMap<String, Vec<String>>>,
+}
+
+/// Declarations in scope beyond which lookup uses the prefix index.
+const NS_WALK: usize = 32;
+
+impl NsScope {
+    fn push(&mut self, frame: Vec<(Option<String>, String)>) {
+        if !frame.is_empty() {
+            self.declaring.push(self.frames.len() as u32);
+            self.count += frame.len();
+            if let Some(ix) = self.index.as_mut() {
+                for (p, u) in &frame {
+                    ix.entry(p.clone().unwrap_or_default()).or_default().push(u.clone());
+                }
+            }
+        }
+        self.frames.push(frame);
+        if self.index.is_none() && self.count > NS_WALK {
+            let mut ix: std::collections::HashMap<String, Vec<String>> =
+                std::collections::HashMap::new();
+            for &fi in &self.declaring {
+                for (p, u) in &self.frames[fi as usize] {
+                    ix.entry(p.clone().unwrap_or_default()).or_default().push(u.clone());
+                }
+            }
+            self.index = Some(ix);
+        }
+    }
+
+    fn pop(&mut self) {
+        let Some(frame) = self.frames.pop() else {
+            return;
+        };
+        if frame.is_empty() {
+            return;
+        }
+        self.declaring.pop();
+        self.count -= frame.len();
+        if let Some(ix) = self.index.as_mut() {
+            for (p, _) in &frame {
+                if let Some(v) = ix.get_mut(p.as_deref().unwrap_or("")) {
+                    v.pop();
+                }
+            }
+            if self.count < NS_WALK / 2 {
+                self.index = None;
+            }
+        }
+    }
+
+    fn last(&self) -> Option<&Vec<(Option<String>, String)>> {
+        self.frames.last()
+    }
+
+    fn lookup(&self, prefix: Option<&str>) -> Option<&str> {
+        if let Some(ix) = &self.index {
+            return ix
+                .get(prefix.unwrap_or(""))
+                .and_then(|v| v.last())
+                .map(String::as_str);
+        }
+        for &fi in self.declaring.iter().rev() {
+            for (p, uri) in self.frames[fi as usize].iter().rev() {
+                if p.as_deref() == prefix {
+                    return Some(uri);
+                }
+            }
+        }
+        None
+    }
+}
+
 /// Parser state that survives between push chunks.
 ///
 /// Everything the parser needs to carry across a chunk boundary is owned data,
@@ -904,7 +1017,7 @@ pub fn xml_ctxt_reset(ctxt: &mut XmlParserCtxt) {
 /// on the call stack.
 struct PushState {
     doc: XmlDoc,
-    ns_stack: Vec<Vec<(Option<String>, String)>>,
+    ns_stack: NsScope,
     stack: Vec<NodeId>,
     open: Vec<OpenElem>,
     char_buf: String,
@@ -913,6 +1026,8 @@ struct PushState {
     depth: u32,
     /// Entity amplification so far; the ratio spans the whole document.
     ampl: Ampl,
+    /// How far the construct the chunk stopped at was already scanned.
+    scan_hint: Option<ScanHint>,
     /// The root's end tag has been consumed. Without this, a later chunk would
     /// re-enter the content loop with an empty stack and parse the document's
     /// trailing whitespace as content, adding a stray text node.
@@ -952,7 +1067,7 @@ struct Parser<'a> {
     options: i32,
     old10: bool,
     depth: u32,
-    ns_stack: Vec<Vec<(Option<String>, String)>>,
+    ns_stack: NsScope,
     sax: &'a mut dyn SaxHandler,
     doc: XmlDoc,
     stack: Vec<NodeId>,
@@ -977,6 +1092,22 @@ struct Parser<'a> {
     interrupt: Option<InterruptPoll<'a>>,
     /// The interrupt fired: fail even under `XML_PARSE_RECOVER`.
     interrupted: bool,
+    /// See [`ScanHint`].
+    scan_hint: Option<ScanHint>,
+}
+
+/// Progress of [`Parser::incomplete_construct`] on the construct a push
+/// chunk stopped at, carried to the next chunk, where that construct starts
+/// the buffer. Without it each chunk rescanned the construct from its start,
+/// so a 2 MB comment cost ten times more in 4 KB chunks than in 64 KB ones
+/// (#41); libxml2 keeps `checkIndex` for the same reason.
+#[derive(Clone, Copy)]
+struct ScanHint {
+    /// Bytes from the construct's start already scanned without finding
+    /// its end.
+    scanned: usize,
+    /// Inside a start tag: the open attribute quote at `scanned`.
+    quote: Option<u8>,
 }
 
 impl<'a> Parser<'a> {
@@ -1227,14 +1358,7 @@ impl<'a> Parser<'a> {
         if prefix == Some("xmlns") {
             return Some(XMLNS_NS.into());
         }
-        for frame in self.ns_stack.iter().rev() {
-            for (p, uri) in frame.iter().rev() {
-                if p.as_deref() == prefix {
-                    return Some(uri.clone());
-                }
-            }
-        }
-        None
+        self.ns_stack.lookup(prefix).map(str::to_string)
     }
 
     fn uri_has_scheme(uri: &str) -> bool {
@@ -1805,7 +1929,7 @@ impl<'a> Parser<'a> {
             options: self.options,
             old10: self.old10,
             depth: self.depth + 1,
-            ns_stack: Vec::new(),
+            ns_stack: NsScope::default(),
             sax: &mut null,
             doc: XmlDoc::with_node_capacity(Some("1.0"), 8),
             stack: Vec::new(),
@@ -1821,9 +1945,14 @@ impl<'a> Parser<'a> {
             watch: false,
             interrupt: None,
             interrupted: false,
+            scan_hint: None,
         };
-        sub.doc.dtd = self.doc.dtd.clone();
+        // Lent, not cloned: copying the whole DTD for every reference made
+        // 100,000 references to `<!ENTITY s "<b/>">` under a 500 KB subset
+        // take 6.5 s. The sub-parse reads the DTD and never changes it.
+        sub.doc.dtd = self.doc.dtd.take();
         let r = sub.parse_document();
+        self.doc.dtd = sub.doc.dtd.take();
         match r {
             Ok(()) => {
                 if let Some(root) = sub.doc.xml_doc_get_root_element() {
@@ -2132,7 +2261,7 @@ impl<'a> Parser<'a> {
             // entities and ATTLIST defaults it declared just vanished and the
             // failure surfaced later as a bogus "entity not defined". Recovery
             // mode still tolerates it, because that is what recovery is for.
-            match crate::dtd::parse_dtd_subset(subset, self.old10) {
+            match crate::dtd::parse_dtd_subset_ampl(subset, self.old10, self.ampl.max_ampl) {
                 Ok(d) => d,
                 Err(_) if self.recover => rusty_xml_tree::XmlDtd::default(),
                 Err(e) => return Err(e),
@@ -2584,6 +2713,7 @@ impl<'a> Parser<'a> {
             watch: cfg.sax_stop || cfg.settings.interrupt.is_some(),
             interrupt: cfg.settings.interrupt.map(InterruptPoll::new),
             interrupted: false,
+            scan_hint: st.scan_hint,
             scratch_raw: Vec::new(),
             scratch_sax: Vec::new(),
             started: true,
@@ -2593,6 +2723,7 @@ impl<'a> Parser<'a> {
     fn suspend(self, open: Vec<OpenElem>, root_closed: bool) -> PushState {
         PushState {
             ampl: self.ampl,
+            scan_hint: self.scan_hint,
             root_closed,
             doc: self.doc,
             ns_stack: self.ns_stack,
@@ -2611,54 +2742,64 @@ impl<'a> Parser<'a> {
     /// Only consulted while streaming. Character data is never "incomplete":
     /// the run scanner stops at `<`, `&` and `]`, and pending text is kept in
     /// `char_buf` rather than flushed, so more of it can simply be appended.
-    fn incomplete_construct(&self) -> bool {
+    fn incomplete_construct(&mut self) -> bool {
+        // A hint describes the construct at the start of a resumed buffer.
+        let hint = if self.pos == 0 { self.scan_hint.take() } else { None };
         let r = &self.input[self.pos..];
-        fn has(h: &[u8], n: &[u8]) -> bool {
-            h.len() >= n.len() && h.windows(n.len()).any(|w| w == n)
+        /// Is `n` in `h[from..]`? `from` steps back so a terminator split
+        /// across the previous scan's end is still found.
+        fn has_from(h: &[u8], n: &[u8], min: usize, scanned: usize) -> bool {
+            let from = min.max(scanned.saturating_sub(n.len() - 1));
+            h.len() >= from + n.len() && h[from..].windows(n.len()).any(|w| w == n)
         }
         // A tag ends at the first '>' that is not inside an attribute value.
-        fn tag_complete(r: &[u8]) -> bool {
-            let mut quote: Option<u8> = None;
-            for &b in &r[1..] {
+        // Err carries the quote state at the end of the input.
+        fn tag_complete(r: &[u8], from: usize, mut quote: Option<u8>) -> Result<(), Option<u8>> {
+            for &b in &r[from..] {
                 match quote {
                     Some(q) if b == q => quote = None,
                     Some(_) => {}
                     None => match b {
                         b'"' | 0x27 => quote = Some(b),
-                        b'>' => return true,
+                        b'>' => return Ok(()),
                         _ => {}
                     },
                 }
             }
-            false
+            Err(quote)
         }
-        match r.first() {
+        let scanned = hint.map_or(0, |h| h.scanned);
+        let (incomplete, quote) = match r.first() {
             Some(b'<') => {
                 if r.len() < 2 {
-                    return true;
+                    (true, None)
+                } else if r.starts_with(b"<!--") {
+                    (!has_from(r, b"-->", 4, scanned), None)
+                } else if r.starts_with(b"<![CDATA[") {
+                    (!has_from(r, b"]]>", 9, scanned), None)
+                } else if r.starts_with(b"<?") {
+                    (!has_from(r, b"?>", 2, scanned), None)
+                } else if r[1] == b'!' && r.len() < 9 {
+                    // `<!` could still become a comment, CDATA or a doctype.
+                    (true, None)
+                } else {
+                    let (from, q) = match hint {
+                        Some(h) if h.scanned >= 1 => (h.scanned, h.quote),
+                        _ => (1, None),
+                    };
+                    match tag_complete(r, from.min(r.len()), q) {
+                        Ok(()) => (false, None),
+                        Err(q) => (true, q),
+                    }
                 }
-                if r.starts_with(b"<!--") {
-                    return !has(&r[4..], b"-->");
-                }
-                if r.starts_with(b"<![CDATA[") {
-                    return !has(&r[9..], b"]]>");
-                }
-                if r.starts_with(b"<?") {
-                    return !has(&r[2..], b"?>");
-                }
-                // `<!` could still become a comment, CDATA or a doctype.
-                if r[1] == b'!' && r.len() < 9 {
-                    return true;
-                }
-                !tag_complete(r)
             }
-            Some(b'&') => !r.contains(&b';'),
+            Some(b'&') => (!has_from(r, b";", 0, scanned), None),
             // `]` might yet become `]]>`.
-            Some(b']') => r.len() < 3,
+            Some(b']') => (r.len() < 3, None),
             // XML 1.0 2.11 folds CRLF to a single LF. A trailing CR gives no
             // way to know whether the LF follows, and guessing turned every
             // CRLF that landed on a chunk boundary into two newlines.
-            Some(0x0D) => r.len() < 2,
+            Some(0x0D) => (r.len() < 2, None),
             // A multi-byte character split across chunks: the lead byte says
             // how many continuation bytes belong to it, and without them the
             // scalar cannot be decoded.
@@ -2674,10 +2815,17 @@ impl<'a> Parser<'a> {
                 } else {
                     1
                 };
-                r.len() < need
+                (r.len() < need, None)
             }
-            None => false,
+            None => (false, None),
+        };
+        if incomplete {
+            self.scan_hint = Some(ScanHint {
+                scanned: r.len(),
+                quote,
+            });
         }
+        incomplete
     }
 
     /// The content loop, with the open-element stack supplied by the caller so
@@ -3008,7 +3156,7 @@ fn parse_utf8(
         options,
         old10: (options & XML_PARSE_OLD10) != 0,
         depth: 0,
-        ns_stack: Vec::new(),
+        ns_stack: NsScope::default(),
         sax,
         // Reserving a full arena is the dominant cost of a no-tree parse --
         // pre-allocating a tree only to leave it empty.
@@ -3033,6 +3181,7 @@ fn parse_utf8(
         watch: cfg.sax_stop || cfg.settings.interrupt.is_some(),
         interrupt: cfg.settings.interrupt.map(InterruptPoll::new),
         interrupted: false,
+        scan_hint: None,
         scratch_raw: Vec::new(),
         scratch_sax: Vec::new(),
         started: false,

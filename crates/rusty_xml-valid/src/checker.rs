@@ -9,7 +9,9 @@ use rusty_xml_parser::{
     default_parse_options, xml_read_memory, xml_read_memory_with_interrupt, XML_ERR_USER_STOP,
 };
 use rusty_xml_tree::{InterruptCheck, InterruptError, Interrupted, XmlDoc};
-use rusty_xml_xpath::{xml_xpath_eval, xml_xpath_eval_with_interrupt, XPathObject, XmlXPathContext};
+use rusty_xml_xpath::{
+    xml_xpath_eval, xml_xpath_eval_with_interrupt, XPathObject, XmlXPathContext,
+};
 
 pub(crate) trait Checker {
     fn tick(&mut self) -> Result<(), Interrupted>;
@@ -72,7 +74,8 @@ impl Checker for NoCheck {
     }
 
     fn read_schema(&mut self, bytes: &[u8]) -> Result<XmlDoc, InterruptError<String>> {
-        xml_read_memory(bytes, None, None, default_parse_options()).map_err(|e| other(e.to_string()))
+        xml_read_memory(bytes, None, None, default_parse_options())
+            .map_err(|e| other(e.to_string()))
     }
 
     fn xpath(
@@ -100,7 +103,9 @@ pub(crate) fn plain<T>(r: Result<T, InterruptError<String>>) -> Result<T, String
 
 /// A branch that may fail without failing the match: `Ok(false)` for an ordinary failure, but a
 /// stop propagates instead of reading as "this branch did not match".
-pub(crate) fn branch_ok(r: Result<(), InterruptError<String>>) -> Result<bool, InterruptError<String>> {
+pub(crate) fn branch_ok(
+    r: Result<(), InterruptError<String>>,
+) -> Result<bool, InterruptError<String>> {
     match r {
         Ok(()) => Ok(true),
         Err(InterruptError::Other(_)) => Ok(false),

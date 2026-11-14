@@ -1,7 +1,7 @@
 //! RelaxNG (simplified) matching libxml2 `relaxng.h` for the tutorial corpus.
 
-use rusty_xml_parser::{default_parse_options, xml_read_memory};
-use rusty_xml_tree::{NodeId, NodeKind, XmlDoc};
+use crate::checker::{branch_ok, other, plain, settle, Checker, NoCheck};
+use rusty_xml_tree::{InterruptCheck, InterruptError, NodeId, NodeKind, XmlDoc};
 use std::collections::HashMap;
 
 const RNG_NS: &str = "http://relaxng.org/ns/structure/1.0";
@@ -33,16 +33,33 @@ struct Schema {
 /// `xmlRelaxNGParse` + `xmlRelaxNGValidateDoc`.
 #[doc(alias = "xmlRelaxNGValidateDoc")]
 pub fn xml_relaxng_validate_doc(rng_xml: &[u8], doc: &XmlDoc) -> Result<(), String> {
-    let rng_doc = xml_read_memory(rng_xml, None, None, default_parse_options())
-        .map_err(|e| e.to_string())?;
-    let schema = compile(&rng_doc)?;
-    let root = doc.xml_doc_get_root_element().ok_or("no root")?;
-    match_element(&schema, &schema.start, doc, root)?;
-    Ok(())
+    plain(relaxng_inner(rng_xml, doc, &mut NoCheck))
 }
 
-fn compile(doc: &XmlDoc) -> Result<Schema, String> {
-    let root = doc.xml_doc_get_root_element().ok_or("empty rng")?;
+/// Like [`xml_relaxng_validate_doc`], but returns `InterruptError::Interrupted` once `check`
+/// reports an interrupt, also while the schema is being parsed; a stop is never a verdict.
+pub fn xml_relaxng_validate_doc_with_interrupt(
+    rng_xml: &[u8],
+    doc: &XmlDoc,
+    check: &mut InterruptCheck<'_>,
+) -> Result<(), InterruptError<String>> {
+    relaxng_inner(rng_xml, doc, check)
+}
+
+fn relaxng_inner<C: Checker>(
+    rng_xml: &[u8],
+    doc: &XmlDoc,
+    check: &mut C,
+) -> Result<(), InterruptError<String>> {
+    let rng_doc = check.read_schema(rng_xml)?;
+    let schema = compile(&rng_doc, check)?;
+    let root = doc.xml_doc_get_root_element().ok_or_else(|| other("no root"))?;
+    let verdict = match_element(&schema, &schema.start, doc, root, check);
+    settle(verdict, check)
+}
+
+fn compile(doc: &XmlDoc, check: &mut impl Checker) -> Result<Schema, InterruptError<String>> {
+    let root = doc.xml_doc_get_root_element().ok_or_else(|| other("empty rng"))?;
     let mut defs = HashMap::new();
     harvest_defs(doc, root, &mut defs);
     let start = if is_rng(doc, root, "grammar") {
@@ -50,14 +67,14 @@ fn compile(doc: &XmlDoc) -> Result<Schema, String> {
             // `<start/>` with no pattern inside used to `.unwrap()` an Err and
             // panic. It is a malformed schema, which is an error to report, not
             // a reason to kill the caller's thread.
-            Some(s) => compile_pat(doc, first_pat_child(doc, s).ok_or("empty start")?),
+            Some(s) => compile_pat(doc, first_pat_child(doc, s).ok_or_else(|| other("empty start"))?),
             None => compile_pat(doc, root),
         }
     } else {
         compile_pat(doc, root)
     };
     let schema = Schema { start, defs };
-    check_no_ref_cycle(&schema)?;
+    check_no_ref_cycle(&schema, check)?;
     Ok(schema)
 }
 
@@ -70,25 +87,31 @@ fn compile(doc: &XmlDoc) -> Result<Schema, String> {
 /// same. Such a grammar can never match anything, so refusing it at compile
 /// time loses nothing and is decidable here, unlike a depth limit in the
 /// matcher which would only move the cliff.
-fn check_no_ref_cycle(schema: &Schema) -> Result<(), String> {
+fn check_no_ref_cycle(
+    schema: &Schema,
+    check: &mut impl Checker,
+) -> Result<(), InterruptError<String>> {
     fn walk(
         schema: &Schema,
         pat: &Pat,
         stack: &mut Vec<String>,
-    ) -> Result<(), String> {
+        check: &mut impl Checker,
+    ) -> Result<(), InterruptError<String>> {
+        // No visited set: a ref DAG is walked once per path.
+        check.tick()?;
         match pat {
             // An Element consumes input, so a reference under it cannot loop
             // forever; that is where recursive grammars are legitimate.
             Pat::Element { .. } => Ok(()),
             Pat::Ref(n) => {
                 if stack.iter().any(|s| s == n) {
-                    return Err(format!("cyclic ref {n} in schema"));
+                    return Err(other(format!("cyclic ref {n} in schema")));
                 }
                 let Some(next) = schema.defs.get(n) else {
                     return Ok(()); // undefined refs are reported while matching
                 };
                 stack.push(n.clone());
-                let r = walk(schema, next, stack);
+                let r = walk(schema, next, stack, check);
                 stack.pop();
                 r
             }
@@ -96,10 +119,10 @@ fn check_no_ref_cycle(schema: &Schema) -> Result<(), String> {
             | Pat::Optional(inner)
             | Pat::ZeroOrMore(inner)
             | Pat::OneOrMore(inner)
-            | Pat::List(inner) => walk(schema, inner, stack),
+            | Pat::List(inner) => walk(schema, inner, stack, check),
             Pat::Group(v) | Pat::Choice(v) | Pat::Interleave(v) => {
                 for p in v {
-                    walk(schema, p, stack)?;
+                    walk(schema, p, stack, check)?;
                 }
                 Ok(())
             }
@@ -107,11 +130,11 @@ fn check_no_ref_cycle(schema: &Schema) -> Result<(), String> {
         }
     }
     let mut stack = Vec::new();
-    walk(schema, &schema.start, &mut stack)?;
+    walk(schema, &schema.start, &mut stack, check)?;
     for (name, pat) in &schema.defs {
         stack.clear();
         stack.push(name.clone());
-        walk(schema, pat, &mut stack)?;
+        walk(schema, pat, &mut stack, check)?;
     }
     Ok(())
 }
@@ -219,43 +242,57 @@ fn compile_group_children(doc: &XmlDoc, id: NodeId) -> Pat {
     }
 }
 
-fn match_element(schema: &Schema, pat: &Pat, doc: &XmlDoc, id: NodeId) -> Result<(), String> {
+fn match_element(
+    schema: &Schema,
+    pat: &Pat,
+    doc: &XmlDoc,
+    id: NodeId,
+    check: &mut impl Checker,
+) -> Result<(), InterruptError<String>> {
+    check.tick()?;
     let pat = deref_pat(schema, pat)?;
     match pat {
         Pat::Element { name, inner } => {
             if doc.name(id) != name {
-                return Err(format!("expected element {name}, got {}", doc.name(id)));
+                return Err(other(format!("expected element {name}, got {}", doc.name(id))));
             }
-            match_content(schema, &inner, doc, id)
+            match_content(schema, &inner, doc, id, check)
         }
         Pat::Choice(alts) => {
             for a in &alts {
-                if match_element(schema, a, doc, id).is_ok() {
+                if branch_ok(match_element(schema, a, doc, id, check))? {
                     return Ok(());
                 }
             }
-            Err("choice failed".into())
+            Err(other("choice failed"))
         }
         Pat::Ref(n) => {
-            let p = schema.defs.get(&n).ok_or_else(|| format!("undefined ref {n}"))?;
-            match_element(schema, p, doc, id)
+            let p = schema.defs.get(&n).ok_or_else(|| other(format!("undefined ref {n}")))?;
+            match_element(schema, p, doc, id, check)
         }
-        other => match_content(schema, &other, doc, id),
+        other => match_content(schema, &other, doc, id, check),
     }
 }
 
-fn deref_pat<'a>(schema: &'a Schema, pat: &'a Pat) -> Result<Pat, String> {
+fn deref_pat<'a>(schema: &'a Schema, pat: &'a Pat) -> Result<Pat, InterruptError<String>> {
     match pat {
         Pat::Ref(n) => schema
             .defs
             .get(n)
             .cloned()
-            .ok_or_else(|| format!("undefined ref {n}")),
+            .ok_or_else(|| other(format!("undefined ref {n}"))),
         p => Ok(p.clone()),
     }
 }
 
-fn match_content(schema: &Schema, pat: &Pat, doc: &XmlDoc, id: NodeId) -> Result<(), String> {
+fn match_content(
+    schema: &Schema,
+    pat: &Pat,
+    doc: &XmlDoc,
+    id: NodeId,
+    check: &mut impl Checker,
+) -> Result<(), InterruptError<String>> {
+    check.tick()?;
     let mut attrs: Vec<(String, String)> = Vec::new();
     let mut a = doc.first_attr(id);
     while let Some(x) = a {
@@ -278,12 +315,12 @@ fn match_content(schema: &Schema, pat: &Pat, doc: &XmlDoc, id: NodeId) -> Result
         }
         c = doc.next_sibling(x);
     }
-    consume(schema, pat, doc, &mut kids, &mut attrs)?;
+    consume(schema, pat, doc, &mut kids, &mut attrs, check)?;
     if !attrs.is_empty() {
-        return Err(format!("undeclared attributes {:?}", attrs));
+        return Err(other(format!("undeclared attributes {:?}", attrs)));
     }
     if kids.iter().any(|&k| doc.kind(k) == NodeKind::Element) {
-        return Err("extra element content".into());
+        return Err(other("extra element content"));
     }
     Ok(())
 }
@@ -294,7 +331,9 @@ fn consume(
     doc: &XmlDoc,
     kids: &mut Vec<NodeId>,
     attrs: &mut Vec<(String, String)>,
-) -> Result<(), String> {
+    check: &mut impl Checker,
+) -> Result<(), InterruptError<String>> {
+    check.tick()?;
     let pat = deref_pat(schema, pat)?;
     match pat {
         Pat::Empty => Ok(()),
@@ -302,18 +341,18 @@ fn consume(
             kids.retain(|&k| doc.kind(k) == NodeKind::Element);
             Ok(())
         }
-        Pat::NotAllowed => Err("notAllowed".into()),
+        Pat::NotAllowed => Err(other("notAllowed")),
         Pat::Attribute { name, inner } => {
             if let Some(i) = attrs.iter().position(|(n, _)| n == &name) {
                 let val = attrs.remove(i).1;
                 match *inner {
                     Pat::Text | Pat::Empty | Pat::Data(_) => Ok(()),
                     Pat::Value(v) if v == val => Ok(()),
-                    Pat::Value(v) => Err(format!("attr {name} expected {v}")),
+                    Pat::Value(v) => Err(other(format!("attr {name} expected {v}"))),
                     _ => Ok(()),
                 }
             } else {
-                Err(format!("missing attribute {name}"))
+                Err(other(format!("missing attribute {name}")))
             }
         }
         Pat::Element { name, inner } => {
@@ -321,14 +360,14 @@ fn consume(
                 doc.kind(k) == NodeKind::Element && doc.name(k) == name
             }) {
                 let n = kids.remove(i);
-                match_content(schema, &inner, doc, n)
+                match_content(schema, &inner, doc, n, check)
             } else {
-                Err(format!("missing element {name}"))
+                Err(other(format!("missing element {name}")))
             }
         }
         Pat::Group(ps) => {
             for p in &ps {
-                consume(schema, p, doc, kids, attrs)?;
+                consume(schema, p, doc, kids, attrs, check)?;
             }
             Ok(())
         }
@@ -336,24 +375,24 @@ fn consume(
             for p in &ps {
                 let mut k2 = kids.clone();
                 let mut a2 = attrs.clone();
-                if consume(schema, p, doc, &mut k2, &mut a2).is_ok() {
+                if branch_ok(consume(schema, p, doc, &mut k2, &mut a2, check))? {
                     *kids = k2;
                     *attrs = a2;
                     return Ok(());
                 }
             }
-            Err("choice failed".into())
+            Err(other("choice failed"))
         }
         Pat::Interleave(ps) => {
             for p in &ps {
-                consume(schema, p, doc, kids, attrs)?;
+                consume(schema, p, doc, kids, attrs, check)?;
             }
             Ok(())
         }
         Pat::Optional(p) => {
             let mut k2 = kids.clone();
             let mut a2 = attrs.clone();
-            if consume(schema, &p, doc, &mut k2, &mut a2).is_ok() {
+            if branch_ok(consume(schema, &p, doc, &mut k2, &mut a2, check))? {
                 *kids = k2;
                 *attrs = a2;
             }
@@ -363,7 +402,7 @@ fn consume(
             loop {
                 let mut k2 = kids.clone();
                 let mut a2 = attrs.clone();
-                if consume(schema, &p, doc, &mut k2, &mut a2).is_ok()
+                if branch_ok(consume(schema, &p, doc, &mut k2, &mut a2, check))?
                     && (k2.len() < kids.len() || a2.len() < attrs.len())
                 {
                     *kids = k2;
@@ -375,8 +414,8 @@ fn consume(
             Ok(())
         }
         Pat::OneOrMore(p) => {
-            consume(schema, &p, doc, kids, attrs)?;
-            consume(schema, &Pat::ZeroOrMore(p), doc, kids, attrs)
+            consume(schema, &p, doc, kids, attrs, check)?;
+            consume(schema, &Pat::ZeroOrMore(p), doc, kids, attrs, check)
         }
         Pat::Value(v) => {
             let text: String = kids
@@ -388,7 +427,7 @@ fn consume(
             if text.trim() == v {
                 Ok(())
             } else {
-                Err(format!("value {v} != {}", text.trim()))
+                Err(other(format!("value {v} != {}", text.trim())))
             }
         }
         Pat::Data(_) | Pat::List(_) => {
@@ -396,8 +435,8 @@ fn consume(
             Ok(())
         }
         Pat::Ref(n) => {
-            let p = schema.defs.get(&n).ok_or_else(|| format!("undefined {n}"))?;
-            consume(schema, p, doc, kids, attrs)
+            let p = schema.defs.get(&n).ok_or_else(|| other(format!("undefined {n}")))?;
+            consume(schema, p, doc, kids, attrs, check)
         }
     }
 }

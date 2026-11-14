@@ -2,19 +2,24 @@
 pub mod golden;
 
 use rusty_xml::{
-    html_read_memory_with_interrupt, xml_ctxt_read_memory_with_interrupt, xml_new_parser_ctxt, xml_read_io_with_interrupt,
-    xml_create_push_parser_ctxt, xml_parse_chunk_with_interrupt, xml_parse_dtd_with_interrupt,
+    html_read_memory_with_interrupt, xml_create_push_parser_ctxt,
+    xml_ctxt_read_memory_with_interrupt, xml_new_parser_ctxt, xml_parse_chunk_with_interrupt,
+    xml_parse_dtd, xml_parse_dtd_with_interrupt, xml_read_io_with_interrupt,
     xml_read_memory_with_interrupt, xml_reader_for_memory_with_interrupt,
-    xml_sax_parse_memory_with_interrupt, xml_xinclude_process_with_interrupt,
-    xml_parse_dtd, xml_validate_document_with_interrupt, xml_validate_dtd_with_interrupt,
-    xml_xpath_eval_with_interrupt, InterruptCheck,    InterruptError, SaxRecorder, XmlError, XmlXPathContext, XML_ERR_USER_STOP,
+    xml_relaxng_validate_doc_with_interrupt, xml_sax_parse_memory_with_interrupt,
+    xml_schema_validate_doc_with_interrupt, xml_schematron_validate_doc_with_interrupt,
+    xml_validate_document_with_interrupt, xml_validate_dtd_with_interrupt,
+    xml_xinclude_process_with_interrupt, xml_xpath_eval_with_interrupt, InterruptCheck,
+    InterruptError, SaxRecorder, XmlError, XmlXPathContext, XML_ERR_USER_STOP,
 };
 use std::path::Path;
 use std::cell::Cell;
 use std::fmt::Debug;
 use std::num::NonZeroU32;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 const ONE: NonZeroU32 = NonZeroU32::new(1).unwrap();
 
@@ -181,6 +186,17 @@ pub fn run_interrupt(dir: &Path, case: &golden::Case) -> String {
             (Err(e), _) => e,
             (_, Err(e)) => golden::render_err(&e),
         },
+        "rng" | "xsd" | "sch" => match golden::parse_fixture(&golden::file(dir, &a[1])) {
+            Ok(doc) => {
+                let schema = golden::file(dir, &a[0]);
+                golden::render_unit(flatten(match case.kind.as_str() {
+                    "rng" => xml_relaxng_validate_doc_with_interrupt(&schema, &doc, &mut check),
+                    "xsd" => xml_schema_validate_doc_with_interrupt(&schema, &doc, &mut check),
+                    _ => xml_schematron_validate_doc_with_interrupt(&schema, &doc, &mut check),
+                }))
+            }
+            Err(e) => e,
+        },
         "dtd" => golden::render_dtd(xml_parse_dtd_with_interrupt(
             &golden::file(dir, &a[0]),
             None,
@@ -190,4 +206,24 @@ pub fn run_interrupt(dir: &Path, case: &golden::Case) -> String {
         _ => return golden::run_default(dir, case),
     };
     golden::finish(text)
+}
+
+/// Runs `run` with an interrupt that another thread sets 100 ms after the call starts, at the
+/// default interval. Returns its result and the time from setting the flag to the return.
+pub fn stop_after_100ms<R>(run: impl FnOnce(&mut InterruptCheck<'_>) -> R) -> (R, Duration) {
+    let flag = Arc::new(AtomicBool::new(false));
+    let flagged_at = Arc::new(Mutex::new(None));
+    let setter = {
+        let (flag, flagged_at) = (Arc::clone(&flag), Arc::clone(&flagged_at));
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            *flagged_at.lock().unwrap() = Some(Instant::now());
+            flag.store(true, Relaxed);
+        })
+    };
+    let result = run(&mut InterruptCheck::new(&*flag));
+    let returned_at = Instant::now();
+    setter.join().unwrap();
+    let flagged_at = flagged_at.lock().unwrap().expect("the flag was set before the call returned");
+    (result, returned_at.duration_since(flagged_at))
 }

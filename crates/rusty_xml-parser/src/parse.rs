@@ -592,7 +592,7 @@ where
 /// Like [`xml_read_io`], but fails with `XML_ERR_USER_STOP` once `check` reports an interrupt;
 /// `check` is consulted before every read call as well as during the parse.
 pub fn xml_read_io_with_interrupt<F>(
-    mut read: F,
+    read: F,
     url: Option<&str>,
     encoding: Option<&str>,
     options: i32,

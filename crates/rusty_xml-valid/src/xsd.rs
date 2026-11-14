@@ -1,7 +1,7 @@
 //! XML Schema (XSD) subset: elements, attributes, sequence, choice, simple types.
 
-use rusty_xml_parser::{default_parse_options, xml_read_memory};
-use rusty_xml_tree::{NodeId, NodeKind, XmlDoc};
+use crate::checker::{other, plain, settle, Checker, NoCheck};
+use rusty_xml_tree::{InterruptCheck, InterruptError, NodeId, NodeKind, XmlDoc};
 use std::collections::HashMap;
 
 const XS: &str = "http://www.w3.org/2001/XMLSchema";
@@ -37,15 +37,34 @@ struct Schema {
 /// `xmlSchemaValidateDoc`.
 #[doc(alias = "xmlSchemaValidateDoc")]
 pub fn xml_schema_validate_doc(xsd: &[u8], doc: &XmlDoc) -> Result<(), String> {
-    let sdoc = xml_read_memory(xsd, None, None, default_parse_options()).map_err(|e| e.to_string())?;
-    let schema = compile(&sdoc)?;
-    let root = doc.xml_doc_get_root_element().ok_or("no root")?;
+    plain(schema_inner(xsd, doc, &mut NoCheck))
+}
+
+/// Like [`xml_schema_validate_doc`], but returns `InterruptError::Interrupted` once `check` reports
+/// an interrupt, also while the schema is being parsed; a stop is never a verdict.
+pub fn xml_schema_validate_doc_with_interrupt(
+    xsd: &[u8],
+    doc: &XmlDoc,
+    check: &mut InterruptCheck<'_>,
+) -> Result<(), InterruptError<String>> {
+    schema_inner(xsd, doc, check)
+}
+
+fn schema_inner<C: Checker>(
+    xsd: &[u8],
+    doc: &XmlDoc,
+    check: &mut C,
+) -> Result<(), InterruptError<String>> {
+    let sdoc = check.read_schema(xsd)?;
+    let schema = compile(&sdoc).map_err(other)?;
+    let root = doc.xml_doc_get_root_element().ok_or_else(|| other("no root"))?;
     let name = doc.name(root);
     let decl = schema
         .elements
         .get(name)
-        .ok_or_else(|| format!("element {name} not declared"))?;
-    check_element(doc, root, decl, &schema)
+        .ok_or_else(|| other(format!("element {name} not declared")))?;
+    let verdict = check_element(doc, root, decl, &schema, check);
+    settle(verdict, check)
 }
 
 fn is_xs(doc: &XmlDoc, id: NodeId, name: &str) -> bool {
@@ -157,10 +176,19 @@ fn find(doc: &XmlDoc, id: NodeId, name: &str) -> Option<NodeId> {
     None
 }
 
-fn check_element(doc: &XmlDoc, id: NodeId, decl: &ElementDecl, schema: &Schema) -> Result<(), String> {
+fn check_element(
+    doc: &XmlDoc,
+    id: NodeId,
+    decl: &ElementDecl,
+    schema: &Schema,
+    check: &mut impl Checker,
+) -> Result<(), InterruptError<String>> {
+    check.tick()?;
     for a in &decl.attrs {
+        // One check per declared attribute: `xml_get_prop` scans the element's attributes.
+        check.tick()?;
         if a.required && doc.xml_get_prop(id, &a.name).is_none() {
-            return Err(format!("required attribute {} missing", a.name));
+            return Err(other(format!("required attribute {} missing", a.name)));
         }
     }
     let kids: Vec<NodeId> = {
@@ -178,7 +206,7 @@ fn check_element(doc: &XmlDoc, id: NodeId, decl: &ElementDecl, schema: &Schema) 
         Content::Any | Content::Text => {}
         Content::Empty => {
             if !kids.is_empty() {
-                return Err(format!("{} must be empty", decl.name));
+                return Err(other(format!("{} must be empty", decl.name)));
             }
         }
         Content::Sequence(seq) => {
@@ -187,7 +215,7 @@ fn check_element(doc: &XmlDoc, id: NodeId, decl: &ElementDecl, schema: &Schema) 
                 let mut seen = 0u32;
                 while i < kids.len() && doc.name(kids[i]) == part.name {
                     let sub = schema.elements.get(&part.name).unwrap_or(part);
-                    check_element(doc, kids[i], sub, schema)?;
+                    check_element(doc, kids[i], sub, schema, check)?;
                     i += 1;
                     seen += 1;
                     if seen == part.max {
@@ -195,21 +223,21 @@ fn check_element(doc: &XmlDoc, id: NodeId, decl: &ElementDecl, schema: &Schema) 
                     }
                 }
                 if seen < part.min {
-                    return Err(format!("need {} of {}", part.min, part.name));
+                    return Err(other(format!("need {} of {}", part.min, part.name)));
                 }
             }
             if i != kids.len() {
-                return Err("extra children in sequence".into());
+                return Err(other("extra children in sequence"));
             }
         }
         Content::Choice(alts) => {
             if kids.len() != 1 {
-                return Err("choice expects one child".into());
+                return Err(other("choice expects one child"));
             }
             let n = doc.name(kids[0]);
-            let part = alts.iter().find(|a| a.name == n).ok_or("choice mismatch")?;
+            let part = alts.iter().find(|a| a.name == n).ok_or_else(|| other("choice mismatch"))?;
             let sub = schema.elements.get(&part.name).unwrap_or(part);
-            check_element(doc, kids[0], sub, schema)?;
+            check_element(doc, kids[0], sub, schema, check)?;
         }
     }
     Ok(())

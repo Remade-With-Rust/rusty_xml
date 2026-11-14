@@ -1304,6 +1304,57 @@ fn nested_entities_expand_and_bombs_are_refused() {
     }
 }
 
+/// The flat variant of the bomb: one large entity with no nesting, referenced
+/// many times. The counts bracket libxml2's 1,000,000-byte expansion allowance
+/// the way the C oracle does: 980 references of a 1,000-byte entity (999,600
+/// counted bytes) are accepted, 1,000 are not.
+#[test]
+fn flat_entity_amplification_is_refused() {
+    let opts = default_parse_options();
+    let flat = |refs: usize| {
+        format!(
+            "<!DOCTYPE r [<!ENTITY e \"{}\">]><r>{}</r>",
+            "x".repeat(1000),
+            "&e;".repeat(refs)
+        )
+    };
+    for refs in [66, 980] {
+        assert!(
+            xml_read_memory(flat(refs).as_bytes(), None, None, opts).is_ok(),
+            "{refs} references stay under the allowance and must parse"
+        );
+    }
+    for refs in [1000, 100_000] {
+        assert!(
+            xml_read_memory(flat(refs).as_bytes(), None, None, opts).is_err(),
+            "{refs} references of a 1000-byte entity must be refused"
+        );
+    }
+}
+
+/// A nested expansion is charged once, not once per level plus once more for
+/// the top-level reference. Four levels of ten references expand 100 bytes to
+/// 100 KB; thirteen of them in attribute values, in a 400 KB document, parse
+/// under libxml2 and must here.
+#[test]
+fn nested_entity_in_attribute_is_charged_once() {
+    let opts = default_parse_options();
+    let level = |from: &str| format!("&{from};").repeat(10);
+    let doc = format!(
+        "<!DOCTYPE r [<!ENTITY d \"{}\"><!ENTITY c \"{}\"><!ENTITY b \"{}\"><!ENTITY a \"{}\">]><r><!--{}-->{}</r>",
+        "x".repeat(100),
+        level("d"),
+        level("c"),
+        level("b"),
+        "p".repeat(400_000),
+        "<e v=\"&a;\"/>".repeat(13)
+    );
+    assert!(
+        xml_read_memory(doc.as_bytes(), None, None, opts).is_ok(),
+        "thirteen 100 KB expansions in a 400 KB document must parse"
+    );
+}
+
 /// Twelve single-byte encodings beyond ISO-8859 and windows-1252. Real corpora
 /// use them -- Cyrillic, Greek, Arabic, Hebrew, Baltic, Turkish, Vietnamese --
 /// and each costs 256 bytes of table. The pinned oracle cannot read any of them

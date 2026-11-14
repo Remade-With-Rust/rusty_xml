@@ -89,6 +89,23 @@ const MAX_TEXT: usize = 10_000_000;
 /// hash sets. The pairwise scan is cheaper on ordinary tags, but quadratic.
 const ATTR_SCAN_MAX: usize = 32;
 
+/// Entity expansion allowed before the ratio to the input applies, as libxml2's
+/// `XML_PARSER_ALLOWED_EXPANSION`.
+const ENTITY_ALLOWANCE: usize = 1_000_000;
+/// Charged on top of the stored replacement text for each entity reference in
+/// content or an attribute value, as libxml2's `XML_ENT_FIXED_COST`, so many
+/// tiny references are not free.
+const ENTITY_FIXED_COST: usize = 20;
+
+/// Bytes of entity expansion a document of `input_len` bytes may produce.
+/// shortcut: one pool for the whole parse at 10 times the input, where libxml2
+/// compares 5 times the input consumed so far, so a bomb followed by padding
+/// is allowed up to 10 times the whole input; tighten when such a document
+/// needs refusing at libxml2's point.
+fn entity_budget_for(input_len: usize) -> usize {
+    input_len.saturating_mul(10).max(ENTITY_ALLOWANCE)
+}
+
 /// Safe defaults: no network, no XXE.
 pub fn default_parse_options() -> i32 {
     XML_PARSE_NONET | XML_PARSE_NO_XXE
@@ -425,7 +442,7 @@ fn fresh_parser<'a>(
         recover: (options & XML_PARSE_RECOVER) != 0,
         // libxml2 bounds entity amplification at a small multiple of the input
         // for the same reason; without a bound, nesting is a bomb.
-        entity_budget: input.len().saturating_mul(10).max(1 << 16),
+        entity_budget: entity_budget_for(input.len()),
         scratch_raw: Vec::new(),
         scratch_sax: Vec::new(),
         started: false,
@@ -1152,7 +1169,16 @@ impl<'a> Parser<'a> {
                     // The replacement was returned VERBATIM, so a nested
                     // reference landed in the tree as literal text and came
                     // back out escaped: `&b;&b;` became `&amp;b;&amp;b;`.
-                    return self.expand_entity(&name, &raw, 0);
+                    //
+                    // expand_entity charges only what a replacement holds in
+                    // references, so the replacement itself is charged here:
+                    // otherwise a large entity with no `&` in it is free to
+                    // reference as often as the input likes. The stored text,
+                    // not the expansion, because the nested expansions are
+                    // already charged.
+                    let out = self.expand_entity(&name, &raw, 0)?;
+                    self.charge_entity_budget(raw.len().saturating_add(ENTITY_FIXED_COST))?;
+                    return Ok(out);
                 }
                 // XML 1.0 4.1: when the subset used a parameter entity
                 // reference the declarations may be incomplete, so an
@@ -1220,15 +1246,7 @@ impl<'a> Parser<'a> {
         // contains '&' stopped being charged at all and expanded freely. It is
         // charged here instead, and the sub-parser inherits and returns what
         // is left so nesting draws on one pool.
-        self.entity_budget = match self.entity_budget.checked_sub(repl.len()) {
-            Some(n) => n,
-            None => {
-                return Err(self.err(
-                    XML_ERR_UNDECLARED_ENTITY,
-                    "Entity expansion budget exceeded",
-                ));
-            }
-        };
+        self.charge_entity_budget(repl.len().saturating_add(ENTITY_FIXED_COST))?;
         let wrapped = format!("<rusty-xml-entity>{repl}</rusty-xml-entity>");
         let mut null = rusty_xml_sax::NullSax;
         let mut sub = Parser {
@@ -1269,6 +1287,21 @@ impl<'a> Parser<'a> {
                 self.flush_chars(Some(parent))
             }
             Err(e) => Err(e),
+        }
+    }
+
+    /// Spends `n` bytes of the expansion budget shared by every entity
+    /// reference in the parse.
+    fn charge_entity_budget(&mut self, n: usize) -> Result<(), XmlError> {
+        match self.entity_budget.checked_sub(n) {
+            Some(left) => {
+                self.entity_budget = left;
+                Ok(())
+            }
+            None => Err(self.err(
+                XML_ERR_INTERNAL_ERROR,
+                "Maximum entity amplification exceeded",
+            )),
         }
     }
 
@@ -1340,13 +1373,7 @@ impl<'a> Parser<'a> {
             };
             match replacement {
                 Some(r) => {
-                    if r.len() > self.entity_budget {
-                        return Err(self.err(
-                            XML_ERR_INTERNAL_ERROR,
-                            "Maximum entity amplification exceeded",
-                        ));
-                    }
-                    self.entity_budget -= r.len();
+                    self.charge_entity_budget(r.len())?;
                     out.push_str(&r);
                 }
                 None if self.recover => out.push_str(&raw[i..=semi]),
@@ -2016,7 +2043,7 @@ impl<'a> Parser<'a> {
             recover: (options & XML_PARSE_RECOVER) != 0,
         // libxml2 bounds entity amplification at a small multiple of the input
         // for the same reason; without a bound, nesting is a bomb.
-        entity_budget: input.len().saturating_mul(10).max(1 << 16),
+        entity_budget: entity_budget_for(input.len()),
             scratch_raw: Vec::new(),
             scratch_sax: Vec::new(),
             started: true,
@@ -2441,7 +2468,7 @@ fn parse_utf8(
         recover: (options & XML_PARSE_RECOVER) != 0,
         // libxml2 bounds entity amplification at a small multiple of the input
         // for the same reason; without a bound, nesting is a bomb.
-        entity_budget: buffer.len().saturating_mul(10).max(1 << 16),
+        entity_budget: entity_budget_for(buffer.len()),
         scratch_raw: Vec::new(),
         scratch_sax: Vec::new(),
         started: false,

@@ -1,7 +1,14 @@
 //! Compile-time switch between a counting interrupt check and no check at all, so the default
 //! parse path carries no counter (the `dyn` shape measured +2.8% Ir on `xml_read_memory`).
 
+use crate::error::{XmlError, XML_ERR_USER_STOP};
 use rusty_xml_tree::{InterruptCheck, Interrupted};
+
+/// The error every stop becomes in this crate; `line` and `col` are 0 where no parser position exists.
+#[cold]
+pub(crate) fn stop_error(line: u32, col: u32) -> XmlError {
+    XmlError::new(XML_ERR_USER_STOP, "Interrupted by caller", line, col)
+}
 
 pub(crate) trait Checker {
     /// False for `NoCheck`: lets callers skip code that only serves a stop.

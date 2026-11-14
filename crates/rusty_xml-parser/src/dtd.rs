@@ -1,6 +1,7 @@
 //! DTD subset parser (internal + caller-supplied external). No network.
 
-use rusty_xml_tree::{AttrDecl, AttrDefault, ElementDecl, XmlDtd};
+use rusty_xml_tree::{AttrDecl, AttrDefault, ElementDecl, InterruptCheck, XmlDtd};
+use crate::checker::{stop_error, Checker, NoCheck};
 use crate::error::XmlError;
 
 /// `xmlParseDTD` — parse a DTD from memory (caller already loaded the bytes).
@@ -10,8 +11,27 @@ pub fn xml_parse_dtd(
     public_id: Option<&str>,
     system_id: Option<&str>,
 ) -> Result<XmlDtd, XmlError> {
+    parse_dtd_inner(buffer, public_id, system_id, &mut NoCheck)
+}
+
+/// Like [`xml_parse_dtd`], but fails with `XML_ERR_USER_STOP` once `check` reports an interrupt.
+pub fn xml_parse_dtd_with_interrupt(
+    buffer: &[u8],
+    public_id: Option<&str>,
+    system_id: Option<&str>,
+    check: &mut InterruptCheck<'_>,
+) -> Result<XmlDtd, XmlError> {
+    parse_dtd_inner(buffer, public_id, system_id, check)
+}
+
+fn parse_dtd_inner<C: Checker>(
+    buffer: &[u8],
+    public_id: Option<&str>,
+    system_id: Option<&str>,
+    check: &mut C,
+) -> Result<XmlDtd, XmlError> {
     let text = String::from_utf8_lossy(buffer);
-    let mut dtd = parse_external_subset(&text, false)?;
+    let mut dtd = parse_subset(&text, false, false, check)?;
     dtd.public_id = public_id.map(str::to_string);
     dtd.system_id = system_id.map(str::to_string);
     Ok(dtd)
@@ -19,17 +39,31 @@ pub fn xml_parse_dtd(
 
 /// Parse a DTD internal/external subset into declarations.
 pub fn parse_dtd_subset(src: &str, old10: bool) -> Result<XmlDtd, XmlError> {
-    parse_subset(src, true, old10)
+    parse_subset(src, true, old10, &mut NoCheck)
+}
+
+/// The internal-subset parse, sharing the caller's interrupt check.
+pub(crate) fn parse_dtd_subset_with<C: Checker>(
+    src: &str,
+    old10: bool,
+    check: &mut C,
+) -> Result<XmlDtd, XmlError> {
+    parse_subset(src, true, old10, check)
 }
 
 /// Parse an external subset, where conditional sections are legal and a
 /// parameter entity may supply part of a declaration.
 pub fn parse_external_subset(src: &str, old10: bool) -> Result<XmlDtd, XmlError> {
-    parse_subset(src, false, old10)
+    parse_subset(src, false, old10, &mut NoCheck)
 }
 
-fn parse_subset(src: &str, internal: bool, old10: bool) -> Result<XmlDtd, XmlError> {
-    let expanded = expand_pe(src, internal)?;
+fn parse_subset<C: Checker>(
+    src: &str,
+    internal: bool,
+    old10: bool,
+    check: &mut C,
+) -> Result<XmlDtd, XmlError> {
+    let expanded = expand_pe(src, internal, check)?;
     let mut dtd = XmlDtd::default();
     dtd.int_subset = Some(src.to_string());
     let mut p = DtdParser {
@@ -39,7 +73,7 @@ fn parse_subset(src: &str, internal: bool, old10: bool) -> Result<XmlDtd, XmlErr
         internal,
         old10,
     };
-    p.parse_markup()?;
+    p.parse_markup(check)?;
     // A parameter entity reference in the subset means the declarations may be
     // incomplete, which changes "Entity Declared" from a well-formedness
     // constraint into a validity one.
@@ -47,17 +81,18 @@ fn parse_subset(src: &str, internal: bool, old10: bool) -> Result<XmlDtd, XmlErr
         || src.chars().zip(src.chars().skip(1)).any(|(a, b)| {
             a == '%' && crate::chvalid::xml_is_name_start_char(b as u32, false)
         });
-    check_entity_graph(&dtd)?;
+    check_entity_graph(&dtd, check)?;
     Ok(dtd)
 }
 
-fn expand_pe(src: &str, internal: bool) -> Result<String, XmlError> {
+fn expand_pe<C: Checker>(src: &str, internal: bool, check: &mut C) -> Result<String, XmlError> {
     // Multi-pass PE expansion so `%percent;` can invent new PE names.
     let mut cur = src.to_string();
     for _ in 0..16 {
+        check.tick().map_err(|_| stop_error(0, 0))?;
         let mut pes: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         harvest_pe(&cur, &mut pes);
-        let next = subst_pe(&cur, &pes, internal)?;
+        let next = subst_pe(&cur, &pes, internal, check)?;
         if next == cur {
             return Ok(cur);
         }
@@ -109,10 +144,11 @@ fn harvest_pe(src: &str, pes: &mut std::collections::HashMap<String, String>) {
     }
 }
 
-fn subst_pe(
+fn subst_pe<C: Checker>(
     src: &str,
     pes: &std::collections::HashMap<String, String>,
     internal: bool,
+    check: &mut C,
 ) -> Result<String, XmlError> {
     let mut out = String::new();
     let mut chars = src.chars().peekable();
@@ -244,6 +280,7 @@ fn subst_pe(
                     0,
                 ));
             }
+            check.tick().map_err(|_| stop_error(0, 0))?;
             if let Some(v) = pes.get(&name) {
                 out.push_str(v);
             } else {
@@ -428,8 +465,9 @@ impl<'a> DtdParser<'a> {
         }
         Ok(())
     }
-    fn parse_markup(&mut self) -> Result<(), XmlError> {
+    fn parse_markup<C: Checker>(&mut self, check: &mut C) -> Result<(), XmlError> {
         loop {
+            check.tick().map_err(|_| stop_error(0, 0))?;
             self.skip_ws_and_comments()?;
             if self.pos >= self.src.len() {
                 break;
@@ -1224,7 +1262,7 @@ pub fn is_pubid_char(c: char) -> bool {
 /// declared, or one declared NDATA (which may not be referenced at all), or
 /// itself by way of a cycle. All three were accepted silently, and the cycle
 /// only surfaced later as a depth-limit error pointing at the wrong entity.
-fn check_entity_graph(dtd: &XmlDtd) -> Result<(), XmlError> {
+fn check_entity_graph<C: Checker>(dtd: &XmlDtd, check: &mut C) -> Result<(), XmlError> {
     const PREDEFINED: &[&str] = &["lt", "gt", "amp", "apos", "quot"];
     let err = |m: String| XmlError::new(crate::error::XML_ERR_UNDECLARED_ENTITY, m, 0, 0);
 
@@ -1260,6 +1298,8 @@ fn check_entity_graph(dtd: &XmlDtd) -> Result<(), XmlError> {
         let mut seen = std::collections::HashSet::new();
         let mut stack = vec![start.as_str()];
         while let Some(cur) = stack.pop() {
+            // One DFS per entity: O(E x reachable) over a long chain.
+            check.tick().map_err(|_| stop_error(0, 0))?;
             if !seen.insert(cur) {
                 continue;
             }

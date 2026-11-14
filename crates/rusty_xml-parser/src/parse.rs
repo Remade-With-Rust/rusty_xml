@@ -3,7 +3,7 @@
 use rusty_xml_sax::{SaxAttr, SaxHandler};
 use rusty_xml_tree::{InterruptCheck, NodeId, NodeKind, XmlDoc};
 
-use crate::checker::{Checker, NoCheck};
+use crate::checker::{stop_error, Checker, NoCheck};
 use crate::chvalid::{xml_is_char, xml_is_name_char, xml_is_name_start_char};
 use crate::error::*;
 
@@ -437,7 +437,7 @@ pub fn xml_parse_chunk(
     }
     let total = ctxt.consumed + ctxt.buf.len();
     let mut doc = p.suspend(open, true).doc;
-    apply_dtd_defaults(&mut doc, total, ctxt.options)?;
+    apply_dtd_defaults(&mut doc, total, ctxt.options, &mut check)?;
     normalize_tokenized_attrs(&mut doc);
     ctxt.buf = Vec::new();
     ctxt.buf.shrink_to_fit();
@@ -1675,9 +1675,12 @@ impl<'a, C: Checker> Parser<'a, C> {
             // entities and ATTLIST defaults it declared just vanished and the
             // failure surfaced later as a bogus "entity not defined". Recovery
             // mode still tolerates it, because that is what recovery is for.
-            match crate::dtd::parse_dtd_subset(subset, self.old10) {
+            match crate::dtd::parse_dtd_subset_with(subset, self.old10, &mut *self.check) {
                 Ok(d) => d,
-                Err(_) if self.recover => rusty_xml_tree::XmlDtd::default(),
+                // A stop must not become an empty DTD, recovery or not.
+                Err(_) if self.recover && !self.check.is_stopped() => {
+                    rusty_xml_tree::XmlDtd::default()
+                }
                 Err(e) => return Err(e),
             }
         } else {
@@ -1937,6 +1940,11 @@ impl<'a, C: Checker> Parser<'a, C> {
                     self.ns_error("Attribute redefined after namespace expansion");
                 }
             } else {
+                // `lookup_ns` above walks every namespace frame entry, so a wide element is
+                // quadratic: check every ATTR_SCAN_MAX attributes, ordinary elements pay nothing.
+                if sax_attrs.len() % ATTR_SCAN_MAX == 0 {
+                    self.tick()?;
+                }
                 use std::hash::BuildHasher;
                 let seen = seen_qnames.get_or_insert_with(|| {
                     let mut set = std::collections::HashSet::with_capacity(raw_attrs.len());
@@ -2500,11 +2508,6 @@ impl<'a, C: Checker> Parser<'a, C> {
     }
 }
 
-#[cold]
-fn stop_error(line: u32, col: u32) -> XmlError {
-    XmlError::new(XML_ERR_USER_STOP, "Interrupted by caller", line, col)
-}
-
 fn parse_doc<C: Checker>(
     buffer: &[u8],
     _url: Option<&str>,
@@ -2564,8 +2567,10 @@ fn parse_utf8<C: Checker>(
         started: false,
     };
     match p.parse_document() {
+        // Backstop: a stop swallowed anywhere below must not end as a document.
+        Ok(()) if p.check.is_stopped() => Err(stop_error(p.line, p.col)),
         Ok(()) => {
-            apply_dtd_defaults(&mut p.doc, buffer.len(), options)?;
+            apply_dtd_defaults(&mut p.doc, buffer.len(), options, &mut *p.check)?;
             normalize_tokenized_attrs(&mut p.doc);
             match (&p.doc.encoding, enc_name) {
                 (None, Some(n)) => {
@@ -2618,10 +2623,11 @@ fn parse_utf8<C: Checker>(
     }
 }
 
-fn apply_dtd_defaults(
+fn apply_dtd_defaults<C: Checker>(
     doc: &mut XmlDoc,
     input_len: usize,
     options: i32,
+    check: &mut C,
 ) -> Result<(), XmlError> {
     // Completing attributes from ATTLIST defaults is opt-in, as it is in C:
     // libxml2 does it for XML_PARSE_DTDATTR (xmllint --dtdattr) and not
@@ -2686,6 +2692,8 @@ fn apply_dtd_defaults(
             continue;
         };
         for (aname, v) in list.iter() {
+            // One check per declared attribute: `xml_get_prop` scans the element's attributes.
+            check.tick().map_err(|_| stop_error(0, 0))?;
             if doc.xml_get_prop(id, aname).is_none() {
                 if budget == 0 {
                     return Err(XmlError::new(

@@ -3,7 +3,8 @@ pub mod golden;
 
 use rusty_xml::{
     xml_ctxt_read_memory_with_interrupt, xml_new_parser_ctxt, xml_read_io_with_interrupt,
-    xml_read_memory_with_interrupt, xml_sax_parse_memory_with_interrupt, InterruptCheck,
+    xml_parse_dtd_with_interrupt, xml_read_memory_with_interrupt,
+    xml_sax_parse_memory_with_interrupt, InterruptCheck,
     InterruptError, SaxRecorder, XmlDoc, XmlError, XML_ERR_USER_STOP,
 };
 use std::path::Path;
@@ -118,6 +119,12 @@ pub fn run_interrupt(dir: &Path, case: &golden::Case) -> String {
             );
             golden::render_sax(&rec, r)
         }
+        "dtd" => golden::render_dtd(xml_parse_dtd_with_interrupt(
+            &golden::file(dir, &a[0]),
+            None,
+            None,
+            &mut check,
+        )),
         _ => return golden::run_default(dir, case),
     };
     golden::finish(text)

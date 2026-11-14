@@ -1,8 +1,13 @@
 //! Canonical XML 1.0 / exclusive C14N. Byte-identity vs `xmllint --c14n`.
 
+use crate::interrupt::{NoPoll, Poll};
+use crate::ValidError;
 use std::rc::Rc;
-use rusty_xml_tree::{NodeId, NodeKind, XmlDoc};
+use rusty_xml_tree::{Interrupt, InterruptPoll, NodeId, NodeKind, XmlDoc};
 use std::cmp::Ordering;
+
+/// A namespace scope: (prefix, URI) pairs, `""` for the default namespace.
+type Scope = Rc<Vec<(String, String)>>;
 
 /// libxml2 `xmlC14NMode`.
 pub const XML_C14N_1_0: i32 = 0;
@@ -18,8 +23,29 @@ pub fn xml_c14n_doc_dump_memory(
     exclusive: bool,
     with_comments: bool,
 ) -> Result<Vec<u8>, String> {
+    c14n(doc, exclusive, with_comments, &mut NoPoll).map_err(ValidError::into_message)
+}
+
+/// [`xml_c14n_doc_dump_memory`], stopping with [`ValidError::Interrupted`]
+/// once `interrupt` fires. It is polled every few hundred nodes written.
+pub fn xml_c14n_doc_dump_memory_interruptible(
+    doc: &XmlDoc,
+    exclusive: bool,
+    with_comments: bool,
+    interrupt: &dyn Interrupt,
+) -> Result<Vec<u8>, ValidError> {
+    c14n(doc, exclusive, with_comments, &mut InterruptPoll::new(interrupt))
+}
+
+fn c14n<P: Poll>(
+    doc: &XmlDoc,
+    exclusive: bool,
+    with_comments: bool,
+    poll: &mut P,
+) -> Result<Vec<u8>, ValidError> {
+    poll.check()?;
     let mut out = String::new();
-    emit_node(doc, NodeId::DOCUMENT, exclusive, with_comments, &[], &[], &mut out)?;
+    emit_node(doc, NodeId::DOCUMENT, exclusive, with_comments, &[], &[], &mut out, poll)?;
     Ok(out.into_bytes())
 }
 
@@ -42,16 +68,22 @@ pub fn xml_exc_c14n_1_0(doc: &XmlDoc) -> Result<Vec<u8>, String> {
 ///
 /// The inherited set is shared by `Rc` rather than cloned per child, which is
 /// what made the recursive form expensive in the first place.
+///
+/// So is the parent's namespace scope. Each element used to rebuild its scope
+/// by walking every ancestor, which cost depth² on a deep document: a
+/// 100,000-deep one took minutes.
 enum Step {
-    /// Emit this element's start tag, then its children and end tag.
-    Open(NodeId, Rc<Vec<(String, String)>>),
+    /// Emit this element's start tag, then its children and end tag. Carries
+    /// the namespaces already rendered and the parent's namespace scope.
+    Open(NodeId, Scope, Scope),
     /// A leaf: text, CDATA, a PI or a comment.
     Inline(NodeId),
     /// Emit the end tag of an element whose children are done.
     Close(String),
 }
 
-fn emit_node(
+#[allow(clippy::too_many_arguments)]
+fn emit_node<P: Poll>(
     doc: &XmlDoc,
     id: NodeId,
     exclusive: bool,
@@ -59,7 +91,8 @@ fn emit_node(
     vis_prefixes: &[&str],
     rendered: &[(String, String)],
     out: &mut String,
-) -> Result<(), String> {
+    poll: &mut P,
+) -> Result<(), ValidError> {
     match doc.kind(id) {
         NodeKind::Document | NodeKind::HtmlDocument => {
             let mut kids = Vec::new();
@@ -75,7 +108,7 @@ fn emit_node(
                 match doc.kind(*kid) {
                     NodeKind::Element => {
                         before_element = false;
-                        emit_node(doc, *kid, exclusive, with_comments, vis_prefixes, rendered, out)?;
+                        emit_node(doc, *kid, exclusive, with_comments, vis_prefixes, rendered, out, poll)?;
                         after_element = true;
                     }
                     NodeKind::Pi => {
@@ -103,7 +136,7 @@ fn emit_node(
             }
         }
         NodeKind::Element => {
-            emit_element(doc, id, exclusive, with_comments, vis_prefixes, rendered, out)?
+            emit_element(doc, id, exclusive, with_comments, vis_prefixes, rendered, out, poll)?
         }
         NodeKind::Text => out.push_str(&escape_text(doc.content(id))),
         NodeKind::CData => out.push_str(&escape_text(doc.content(id))),
@@ -131,7 +164,8 @@ fn emit_comment(doc: &XmlDoc, id: NodeId, out: &mut String) {
     out.push_str("-->");
 }
 
-fn emit_element(
+#[allow(clippy::too_many_arguments)]
+fn emit_element<P: Poll>(
     doc: &XmlDoc,
     id: NodeId,
     exclusive: bool,
@@ -139,10 +173,16 @@ fn emit_element(
     vis_prefixes: &[&str],
     rendered: &[(String, String)],
     out: &mut String,
-) -> Result<(), String> {
-    let mut stack: Vec<Step> = vec![Step::Open(id, Rc::new(rendered.to_vec()))];
+    poll: &mut P,
+) -> Result<(), ValidError> {
+    let outer: Scope = match doc.parent(id) {
+        Some(p) if p != NodeId::DOCUMENT => Rc::new(in_scope_ns(doc, p)),
+        _ => Rc::new(Vec::new()),
+    };
+    let mut stack: Vec<Step> = vec![Step::Open(id, Rc::new(rendered.to_vec()), outer)];
     while let Some(step) = stack.pop() {
-        let (id, rendered) = match step {
+        poll.tick()?;
+        let (id, rendered, outer) = match step {
             Step::Close(qn) => {
                 out.push_str("</");
                 out.push_str(&qn);
@@ -162,14 +202,30 @@ fn emit_element(
                 }
                 continue;
             }
-            Step::Open(id, rendered) => (id, rendered),
+            Step::Open(id, rendered, outer) => (id, rendered, outer),
+        };
+
+        // This element's scope: the parent's, with its own declarations on
+        // top (a later duplicate wins, as the ancestor walk had it).
+        let scope: Scope = if doc.ns_defs(id).is_empty() {
+            outer
+        } else {
+            let mut v: Vec<(String, String)> = outer.as_ref().clone();
+            for (pre, href) in doc.ns_defs(id) {
+                let key = pre.clone().unwrap_or_default();
+                match v.iter_mut().find(|(k, _)| *k == key) {
+                    Some(e) => e.1 = href.clone(),
+                    None => v.push((key, href.clone())),
+                }
+            }
+            Rc::new(v)
         };
 
         let qn = qname(doc.prefix(id), doc.name(id));
         out.push('<');
         out.push_str(&qn);
 
-        let mut ns_attrs = namespaces_to_emit(doc, id, exclusive, vis_prefixes, &rendered);
+        let mut ns_attrs = namespaces_to_emit(doc, id, exclusive, vis_prefixes, &rendered, &scope);
         ns_attrs.sort_by(|a, b| a.0.cmp(&b.0));
         for (pre, href) in &ns_attrs {
             out.push(' ');
@@ -224,7 +280,7 @@ fn emit_element(
         }
         for x in kids.into_iter().rev() {
             if doc.kind(x) == NodeKind::Element {
-                stack.push(Step::Open(x, Rc::clone(&child_rendered)));
+                stack.push(Step::Open(x, Rc::clone(&child_rendered), Rc::clone(&scope)));
             } else {
                 stack.push(Step::Inline(x));
             }
@@ -264,9 +320,10 @@ fn namespaces_to_emit(
     exclusive: bool,
     vis_prefixes: &[&str],
     rendered: &[(String, String)],
+    scope: &[(String, String)],
 ) -> Vec<(String, String)> {
-    let mut map = in_scope_ns(doc, id);
-    map.retain(|(pre, href)| {
+    let mut map: Vec<(String, String)> = Vec::new();
+    map.extend(scope.iter().filter(|(pre, href)| {
         if pre == "xml" && href == XML_NS {
             return false;
         }
@@ -286,7 +343,7 @@ fn namespaces_to_emit(
             return rendered.iter().any(|(p, h)| p.is_empty() && !h.is_empty());
         }
         true
-    });
+    }).cloned());
     map
 }
 

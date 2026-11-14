@@ -1,10 +1,29 @@
 //! RelaxNG (simplified) matching libxml2 `relaxng.h` for the tutorial corpus.
 
+use crate::interrupt::{NoPoll, Poll};
+use crate::ValidError;
 use rusty_xml_parser::{default_parse_options, xml_read_memory};
-use rusty_xml_tree::{NodeId, NodeKind, XmlDoc};
+use rusty_xml_tree::{Interrupt, InterruptPoll, NodeId, NodeKind, XmlDoc};
 use std::collections::HashMap;
 
 const RNG_NS: &str = "http://relaxng.org/ns/structure/1.0";
+
+/// How deeply schema patterns may nest, counted in elements of the schema
+/// document. Compiling recurses once per level.
+const MAX_SCHEMA_DEPTH: usize = 512;
+
+/// How deeply matching may recurse, counting each pattern entered and each
+/// instance element on the current path (a chain of `<ref>`s costs nothing).
+///
+/// The matcher backtracks through choices, so it recurses rather than walking
+/// an explicit stack; without a bound, a deep instance document (the parser
+/// allows 5,000 levels, a million under `XML_PARSE_HUGE`) overflowed the
+/// stack, which aborts the process. Past this depth validation fails with an
+/// error instead. A typical recursive grammar spends two to four of these per
+/// level of the instance, so this admits 320 to 640 levels, more than the 256
+/// libxml2's parser allows by default, while a release build stays inside a
+/// 1 MB stack.
+const MAX_MATCH_DEPTH: usize = 1280;
 
 #[derive(Clone, Debug)]
 enum Pat {
@@ -20,7 +39,7 @@ enum Pat {
     ZeroOrMore(Box<Pat>),
     OneOrMore(Box<Pat>),
     Value(String),
-    Data(String),
+    Data,
     Ref(String),
     List(Box<Pat>),
 }
@@ -33,16 +52,45 @@ struct Schema {
 /// `xmlRelaxNGParse` + `xmlRelaxNGValidateDoc`.
 #[doc(alias = "xmlRelaxNGValidateDoc")]
 pub fn xml_relaxng_validate_doc(rng_xml: &[u8], doc: &XmlDoc) -> Result<(), String> {
+    relaxng_validate(rng_xml, doc, &mut NoPoll).map_err(ValidError::into_message)
+}
+
+/// [`xml_relaxng_validate_doc`], stopping with [`ValidError::Interrupted`]
+/// once `interrupt` fires. It is polled before and after the schema is
+/// parsed, and every few hundred elements matched, including elements
+/// re-matched while trying alternatives.
+pub fn xml_relaxng_validate_doc_interruptible(
+    rng_xml: &[u8],
+    doc: &XmlDoc,
+    interrupt: &dyn Interrupt,
+) -> Result<(), ValidError> {
+    relaxng_validate(rng_xml, doc, &mut InterruptPoll::new(interrupt))
+}
+
+fn relaxng_validate<P: Poll>(rng_xml: &[u8], doc: &XmlDoc, poll: &mut P) -> Result<(), ValidError> {
+    poll.check()?;
     let rng_doc = xml_read_memory(rng_xml, None, None, default_parse_options())
         .map_err(|e| e.to_string())?;
+    poll.check()?;
     let schema = compile(&rng_doc)?;
     let root = doc.xml_doc_get_root_element().ok_or("no root")?;
-    match_element(&schema, &schema.start, doc, root)?;
-    Ok(())
+    let mut cx = Cx {
+        schema: &schema,
+        doc,
+        poll,
+        depth: 0,
+        aborted: false,
+    };
+    cx.match_element(&schema.start, root)
 }
 
 fn compile(doc: &XmlDoc) -> Result<Schema, String> {
     let root = doc.xml_doc_get_root_element().ok_or("empty rng")?;
+    if max_depth(doc, root) > MAX_SCHEMA_DEPTH {
+        return Err(format!(
+            "RelaxNG schema nested deeper than {MAX_SCHEMA_DEPTH} levels"
+        ));
+    }
     let mut defs = HashMap::new();
     harvest_defs(doc, root, &mut defs);
     let start = if is_rng(doc, root, "grammar") {
@@ -61,6 +109,23 @@ fn compile(doc: &XmlDoc) -> Result<Schema, String> {
     Ok(schema)
 }
 
+/// The deepest element nesting under `root`, walked iteratively.
+fn max_depth(doc: &XmlDoc, root: NodeId) -> usize {
+    let mut deepest = 0;
+    let mut stack = vec![(root, 1usize)];
+    while let Some((id, d)) = stack.pop() {
+        deepest = deepest.max(d);
+        let mut c = doc.first_child(id);
+        while let Some(x) = c {
+            if doc.kind(x) == NodeKind::Element {
+                stack.push((x, d + 1));
+            }
+            c = doc.next_sibling(x);
+        }
+    }
+    deepest
+}
+
 /// Reject a schema whose definitions reference each other in a cycle without
 /// consuming an element.
 ///
@@ -70,64 +135,88 @@ fn compile(doc: &XmlDoc) -> Result<Schema, String> {
 /// same. Such a grammar can never match anything, so refusing it at compile
 /// time loses nothing and is decidable here, unlike a depth limit in the
 /// matcher which would only move the cliff.
+///
+/// Each definition is walked once: one that has been walked without finding a
+/// cycle is not walked again. Walking every definition afresh made a chain of
+/// n references cost n² steps, and the walk itself recursed once per link.
 fn check_no_ref_cycle(schema: &Schema) -> Result<(), String> {
-    fn walk(
-        schema: &Schema,
-        pat: &Pat,
-        stack: &mut Vec<String>,
+    #[derive(Clone, Copy, PartialEq)]
+    enum Mark {
+        Active,
+        Done,
+    }
+    fn walk<'a>(
+        schema: &'a Schema,
+        pat: &'a Pat,
+        marks: &mut HashMap<&'a str, Mark>,
+        depth: usize,
     ) -> Result<(), String> {
+        if depth > MAX_MATCH_DEPTH {
+            return Err(format!(
+                "RelaxNG references nested deeper than {MAX_MATCH_DEPTH} levels"
+            ));
+        }
         match pat {
             // An Element consumes input, so a reference under it cannot loop
             // forever; that is where recursive grammars are legitimate.
             Pat::Element { .. } => Ok(()),
             Pat::Ref(n) => {
-                if stack.iter().any(|s| s == n) {
-                    return Err(format!("cyclic ref {n} in schema"));
+                match marks.get(n.as_str()) {
+                    Some(Mark::Active) => return Err(format!("cyclic ref {n} in schema")),
+                    Some(Mark::Done) => return Ok(()),
+                    None => {}
                 }
-                let Some(next) = schema.defs.get(n) else {
+                let Some((name, next)) = schema.defs.get_key_value(n) else {
                     return Ok(()); // undefined refs are reported while matching
                 };
-                stack.push(n.clone());
-                let r = walk(schema, next, stack);
-                stack.pop();
-                r
+                marks.insert(name, Mark::Active);
+                walk(schema, next, marks, depth + 1)?;
+                marks.insert(name, Mark::Done);
+                Ok(())
             }
             Pat::Attribute { inner, .. }
             | Pat::Optional(inner)
             | Pat::ZeroOrMore(inner)
             | Pat::OneOrMore(inner)
-            | Pat::List(inner) => walk(schema, inner, stack),
+            | Pat::List(inner) => walk(schema, inner, marks, depth + 1),
             Pat::Group(v) | Pat::Choice(v) | Pat::Interleave(v) => {
                 for p in v {
-                    walk(schema, p, stack)?;
+                    walk(schema, p, marks, depth + 1)?;
                 }
                 Ok(())
             }
             _ => Ok(()),
         }
     }
-    let mut stack = Vec::new();
-    walk(schema, &schema.start, &mut stack)?;
+    let mut marks: HashMap<&str, Mark> = HashMap::new();
+    walk(schema, &schema.start, &mut marks, 0)?;
     for (name, pat) in &schema.defs {
-        stack.clear();
-        stack.push(name.clone());
-        walk(schema, pat, &mut stack)?;
+        if marks.contains_key(name.as_str()) {
+            continue;
+        }
+        marks.insert(name, Mark::Active);
+        walk(schema, pat, &mut marks, 0)?;
+        marks.insert(name, Mark::Done);
     }
     Ok(())
 }
 
-fn harvest_defs(doc: &XmlDoc, id: NodeId, defs: &mut HashMap<String, Pat>) {
-    if is_rng(doc, id, "define") {
-        if let Some(name) = doc.xml_get_prop(id, "name") {
-            if let Some(ch) = first_pat_child(doc, id) {
-                defs.insert(name, compile_pat(doc, ch));
+/// Collect every `<define>`, walking the schema document iteratively.
+fn harvest_defs(doc: &XmlDoc, root: NodeId, defs: &mut HashMap<String, Pat>) {
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        if is_rng(doc, id, "define") {
+            if let Some(name) = doc.xml_get_prop(id, "name") {
+                if let Some(ch) = first_pat_child(doc, id) {
+                    defs.insert(name, compile_pat(doc, ch));
+                }
             }
         }
-    }
-    let mut c = doc.first_child(id);
-    while let Some(x) = c {
-        harvest_defs(doc, x, defs);
-        c = doc.next_sibling(x);
+        let mut c = doc.last_child(id);
+        while let Some(x) = c {
+            stack.push(x);
+            c = doc.prev_sibling(x);
+        }
     }
 }
 
@@ -159,6 +248,8 @@ fn find_child_named(doc: &XmlDoc, id: NodeId, name: &str) -> Option<NodeId> {
     None
 }
 
+/// Compile one pattern. It recurses once per level of the schema document,
+/// which [`compile`] bounds before calling it.
 fn compile_pat(doc: &XmlDoc, id: NodeId) -> Pat {
     let name = doc.name(id);
     match name {
@@ -186,7 +277,7 @@ fn compile_pat(doc: &XmlDoc, id: NodeId) -> Pat {
         "group" => Pat::Group(compile_child_pats(doc, id)),
         "interleave" => Pat::Interleave(compile_child_pats(doc, id)),
         "value" => Pat::Value(doc.xml_node_get_content(id).trim().to_string()),
-        "data" => Pat::Data(doc.xml_get_prop(id, "type").unwrap_or_else(|| "string".into())),
+        "data" => Pat::Data,
         "ref" => Pat::Ref(doc.xml_get_prop(id, "name").unwrap_or_default()),
         "list" => Pat::List(Box::new(compile_group_children(doc, id))),
         "mixed" => Pat::Interleave(vec![Pat::Text, compile_group_children(doc, id)]),
@@ -211,51 +302,61 @@ fn compile_child_pats(doc: &XmlDoc, id: NodeId) -> Vec<Pat> {
 }
 
 fn compile_group_children(doc: &XmlDoc, id: NodeId) -> Pat {
-    let v = compile_child_pats(doc, id);
+    let mut v = compile_child_pats(doc, id);
     match v.len() {
         0 => Pat::Empty,
-        1 => v.into_iter().next().unwrap(),
+        1 => v.pop().unwrap_or(Pat::Empty),
         _ => Pat::Group(v),
     }
 }
 
-fn match_element(schema: &Schema, pat: &Pat, doc: &XmlDoc, id: NodeId) -> Result<(), String> {
-    let pat = deref_pat(schema, pat)?;
-    match pat {
-        Pat::Element { name, inner } => {
-            if doc.name(id) != name {
-                return Err(format!("expected element {name}, got {}", doc.name(id)));
-            }
-            match_content(schema, &inner, doc, id)
-        }
-        Pat::Choice(alts) => {
-            for a in &alts {
-                if match_element(schema, a, doc, id).is_ok() {
-                    return Ok(());
-                }
-            }
-            Err("choice failed".into())
-        }
-        Pat::Ref(n) => {
-            let p = schema.defs.get(&n).ok_or_else(|| format!("undefined ref {n}"))?;
-            match_element(schema, p, doc, id)
-        }
-        other => match_content(schema, &other, doc, id),
-    }
+
+/// One validation: the schema, the instance, the interrupt poll and the
+/// current recursion depth.
+struct Cx<'a, P: Poll> {
+    schema: &'a Schema,
+    doc: &'a XmlDoc,
+    poll: &'a mut P,
+    depth: usize,
+    /// Set once the depth bound is hit. Like an interrupt, that failure is
+    /// final: an `<optional>` or a `<choice>` must not take it for a
+    /// mismatch and carry on to report some other error.
+    aborted: bool,
 }
 
-fn deref_pat<'a>(schema: &'a Schema, pat: &'a Pat) -> Result<Pat, String> {
-    match pat {
-        Pat::Ref(n) => schema
-            .defs
-            .get(n)
-            .cloned()
-            .ok_or_else(|| format!("undefined ref {n}")),
-        p => Ok(p.clone()),
-    }
+/// The result of one matching step. An interrupt is never an ordinary
+/// failure: a choice that sees one stops instead of trying the next
+/// alternative.
+type Step = Result<(), ValidError>;
+
+// The matcher recurses once per pattern and once per instance element, so
+// every byte of its frames is multiplied by the document's depth. Everything
+// that is not recursion (building messages, gathering children, checking
+// leaves) lives in the out-of-line helpers below, which keeps the recursive
+// frames small.
+
+#[cold]
+#[inline(never)]
+fn fail(what: &str, name: &str) -> ValidError {
+    ValidError::Failed(format!("{what}{name}"))
 }
 
-fn match_content(schema: &Schema, pat: &Pat, doc: &XmlDoc, id: NodeId) -> Result<(), String> {
+#[cold]
+#[inline(never)]
+fn too_deep() -> ValidError {
+    ValidError::Failed(format!(
+        "RelaxNG validation nested deeper than {MAX_MATCH_DEPTH} patterns and elements"
+    ))
+}
+
+#[cold]
+#[inline(never)]
+fn mismatch(name: &str, got: &str) -> ValidError {
+    ValidError::Failed(format!("expected element {name}, got {got}"))
+}
+
+#[inline(never)]
+fn element_kids(doc: &XmlDoc, id: NodeId) -> (Vec<(String, String)>, Vec<NodeId>) {
     let mut attrs: Vec<(String, String)> = Vec::new();
     let mut a = doc.first_attr(id);
     while let Some(x) = a {
@@ -269,18 +370,18 @@ fn match_content(schema: &Schema, pat: &Pat, doc: &XmlDoc, id: NodeId) -> Result
     while let Some(x) = c {
         match doc.kind(x) {
             NodeKind::Element => kids.push(x),
-            NodeKind::Text | NodeKind::CData => {
-                if !doc.xml_is_blank_node(x) {
-                    kids.push(x);
-                }
-            }
+            NodeKind::Text | NodeKind::CData if !doc.xml_is_blank_node(x) => kids.push(x),
             _ => {}
         }
         c = doc.next_sibling(x);
     }
-    consume(schema, pat, doc, &mut kids, &mut attrs)?;
+    (attrs, kids)
+}
+
+#[inline(never)]
+fn content_left(doc: &XmlDoc, kids: &[NodeId], attrs: &[(String, String)]) -> Step {
     if !attrs.is_empty() {
-        return Err(format!("undeclared attributes {:?}", attrs));
+        return Err(format!("undeclared attributes {:?}", attrs).into());
     }
     if kids.iter().any(|&k| doc.kind(k) == NodeKind::Element) {
         return Err("extra element content".into());
@@ -288,116 +389,258 @@ fn match_content(schema: &Schema, pat: &Pat, doc: &XmlDoc, id: NodeId) -> Result
     Ok(())
 }
 
-fn consume(
-    schema: &Schema,
-    pat: &Pat,
-    doc: &XmlDoc,
-    kids: &mut Vec<NodeId>,
-    attrs: &mut Vec<(String, String)>,
-) -> Result<(), String> {
-    let pat = deref_pat(schema, pat)?;
-    match pat {
-        Pat::Empty => Ok(()),
-        Pat::Text => {
-            kids.retain(|&k| doc.kind(k) == NodeKind::Element);
-            Ok(())
+#[inline(never)]
+fn drop_text(doc: &XmlDoc, kids: &mut Vec<NodeId>) {
+    kids.retain(|&k| doc.kind(k) == NodeKind::Element);
+}
+
+#[inline(never)]
+fn consume_attribute(name: &str, inner: &Pat, attrs: &mut Vec<(String, String)>) -> Step {
+    let Some(i) = attrs.iter().position(|(n, _)| n == name) else {
+        return Err(fail("missing attribute ", name));
+    };
+    let val = attrs.remove(i).1;
+    match inner {
+        Pat::Value(v) if *v != val => Err(format!("attr {name} expected {v}").into()),
+        _ => Ok(()),
+    }
+}
+
+#[inline(never)]
+fn consume_value(doc: &XmlDoc, v: &str, kids: &mut Vec<NodeId>) -> Step {
+    let text: String = kids
+        .iter()
+        .filter(|k| doc.kind(**k) != NodeKind::Element)
+        .map(|k| doc.content(*k))
+        .collect();
+    drop_text(doc, kids);
+    if text.trim() == v {
+        Ok(())
+    } else {
+        Err(format!("value {v} != {}", text.trim()).into())
+    }
+}
+
+#[inline(never)]
+fn take_element(doc: &XmlDoc, name: &str, kids: &mut Vec<NodeId>) -> Option<NodeId> {
+    let i = kids
+        .iter()
+        .position(|&k| doc.kind(k) == NodeKind::Element && doc.name(k) == name)?;
+    Some(kids.remove(i))
+}
+
+impl<'a, P: Poll> Cx<'a, P> {
+    /// Whether a failed step ends the validation rather than letting a
+    /// choice, an option or a repetition try something else.
+    fn fatal(&self, e: &ValidError) -> bool {
+        self.aborted || e.is_interrupted()
+    }
+
+    fn def(&self, n: &str) -> Result<&'a Pat, ValidError> {
+        self.schema.defs.get(n).ok_or_else(|| fail("undefined ref ", n))
+    }
+
+    fn match_element(&mut self, pat: &'a Pat, id: NodeId) -> Step {
+        self.depth += 1;
+        if self.depth > MAX_MATCH_DEPTH {
+            self.aborted = true;
+            return Err(too_deep());
         }
-        Pat::NotAllowed => Err("notAllowed".into()),
-        Pat::Attribute { name, inner } => {
-            if let Some(i) = attrs.iter().position(|(n, _)| n == &name) {
-                let val = attrs.remove(i).1;
-                match *inner {
-                    Pat::Text | Pat::Empty | Pat::Data(_) => Ok(()),
-                    Pat::Value(v) if v == val => Ok(()),
-                    Pat::Value(v) => Err(format!("attr {name} expected {v}")),
-                    _ => Ok(()),
+        let mut pat = pat;
+        while let Pat::Ref(n) = pat {
+            match self.def(n) {
+                Ok(p) => pat = p,
+                Err(e) => {
+                    self.depth -= 1;
+                    return Err(e);
                 }
-            } else {
-                Err(format!("missing attribute {name}"))
             }
         }
-        Pat::Element { name, inner } => {
-            if let Some(i) = kids.iter().position(|&k| {
-                doc.kind(k) == NodeKind::Element && doc.name(k) == name
-            }) {
-                let n = kids.remove(i);
-                match_content(schema, &inner, doc, n)
-            } else {
-                Err(format!("missing element {name}"))
-            }
-        }
-        Pat::Group(ps) => {
-            for p in &ps {
-                consume(schema, p, doc, kids, attrs)?;
-            }
-            Ok(())
-        }
-        Pat::Choice(ps) => {
-            for p in &ps {
-                let mut k2 = kids.clone();
-                let mut a2 = attrs.clone();
-                if consume(schema, p, doc, &mut k2, &mut a2).is_ok() {
-                    *kids = k2;
-                    *attrs = a2;
-                    return Ok(());
+        let r = match pat {
+            Pat::Element { name, inner } => {
+                if self.doc.name(id) != name {
+                    Err(mismatch(name, self.doc.name(id)))
+                } else {
+                    self.match_content(inner, id)
                 }
             }
-            Err("choice failed".into())
-        }
-        Pat::Interleave(ps) => {
-            for p in &ps {
-                consume(schema, p, doc, kids, attrs)?;
+            Pat::Choice(alts) => {
+                let mut r = Err(ValidError::Failed("choice failed".into()));
+                for a in alts {
+                    match self.match_element(a, id) {
+                        Err(e) if !self.fatal(&e) => {}
+                        other => {
+                            r = other;
+                            break;
+                        }
+                    }
+                }
+                r
             }
-            Ok(())
+            other => self.match_content(other, id),
+        };
+        self.depth -= 1;
+        r
+    }
+
+    fn match_content(&mut self, pat: &'a Pat, id: NodeId) -> Step {
+        self.poll.tick()?;
+        self.depth += 1;
+        if self.depth > MAX_MATCH_DEPTH {
+            self.aborted = true;
+            return Err(too_deep());
         }
-        Pat::Optional(p) => {
+        let (mut attrs, mut kids) = element_kids(self.doc, id);
+        let r = match self.consume(pat, &mut kids, &mut attrs) {
+            Ok(()) => content_left(self.doc, &kids, &attrs),
+            e => e,
+        };
+        self.depth -= 1;
+        r
+    }
+
+    fn consume(
+        &mut self,
+        pat: &'a Pat,
+        kids: &mut Vec<NodeId>,
+        attrs: &mut Vec<(String, String)>,
+    ) -> Step {
+        self.depth += 1;
+        if self.depth > MAX_MATCH_DEPTH {
+            self.aborted = true;
+            return Err(too_deep());
+        }
+        // A chain of references is followed in a loop, not a frame per link;
+        // check_no_ref_cycle has ruled out a cycle without an element.
+        let mut pat = pat;
+        while let Pat::Ref(n) = pat {
+            match self.def(n) {
+                Ok(p) => pat = p,
+                Err(e) => {
+                    self.depth -= 1;
+                    return Err(e);
+                }
+            }
+        }
+        // The arms that recurse each live in their own function, so this
+        // frame, which every level of the document pays for, stays small.
+        let r = match pat {
+            Pat::Empty => Ok(()),
+            Pat::Text | Pat::Data | Pat::List(_) => {
+                drop_text(self.doc, kids);
+                Ok(())
+            }
+            Pat::NotAllowed => Err(fail("notAllowed", "")),
+            Pat::Attribute { name, inner } => consume_attribute(name, inner, attrs),
+            Pat::Value(v) => consume_value(self.doc, v, kids),
+            Pat::Element { name, inner } => self.element(name, inner, kids),
+            Pat::Group(ps) | Pat::Interleave(ps) => self.group(ps, kids, attrs),
+            Pat::Choice(ps) => self.choice(ps, kids, attrs),
+            Pat::Optional(p) => self.optional(p, kids, attrs),
+            Pat::ZeroOrMore(p) => self.zero_or_more(p, kids, attrs),
+            Pat::OneOrMore(p) => self.one_or_more(p, kids, attrs),
+            Pat::Ref(_) => Ok(()), // resolved above
+        };
+        self.depth -= 1;
+        r
+    }
+
+    #[inline(never)]
+    fn element(&mut self, name: &'a str, inner: &'a Pat, kids: &mut Vec<NodeId>) -> Step {
+        match take_element(self.doc, name, kids) {
+            Some(n) => self.match_content(inner, n),
+            None => Err(fail("missing element ", name)),
+        }
+    }
+
+    #[inline(never)]
+    fn group(
+        &mut self,
+        ps: &'a [Pat],
+        kids: &mut Vec<NodeId>,
+        attrs: &mut Vec<(String, String)>,
+    ) -> Step {
+        for p in ps {
+            self.consume(p, kids, attrs)?;
+        }
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn choice(
+        &mut self,
+        ps: &'a [Pat],
+        kids: &mut Vec<NodeId>,
+        attrs: &mut Vec<(String, String)>,
+    ) -> Step {
+        for p in ps {
+            match self.attempt(p, kids, attrs) {
+                Err(e) if !self.fatal(&e) => {}
+                other => return other,
+            }
+        }
+        Err(fail("choice failed", ""))
+    }
+
+    #[inline(never)]
+    fn optional(
+        &mut self,
+        p: &'a Pat,
+        kids: &mut Vec<NodeId>,
+        attrs: &mut Vec<(String, String)>,
+    ) -> Step {
+        match self.attempt(p, kids, attrs) {
+            Err(e) if self.fatal(&e) => Err(e),
+            _ => Ok(()),
+        }
+    }
+
+    #[inline(never)]
+    fn one_or_more(
+        &mut self,
+        p: &'a Pat,
+        kids: &mut Vec<NodeId>,
+        attrs: &mut Vec<(String, String)>,
+    ) -> Step {
+        self.consume(p, kids, attrs)?;
+        self.zero_or_more(p, kids, attrs)
+    }
+
+    /// Try `p` on copies, keeping what it consumed only if it matched.
+    #[inline(never)]
+    fn attempt(
+        &mut self,
+        p: &'a Pat,
+        kids: &mut Vec<NodeId>,
+        attrs: &mut Vec<(String, String)>,
+    ) -> Step {
+        let mut k2 = kids.clone();
+        let mut a2 = attrs.clone();
+        self.consume(p, &mut k2, &mut a2)?;
+        *kids = k2;
+        *attrs = a2;
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn zero_or_more(
+        &mut self,
+        p: &'a Pat,
+        kids: &mut Vec<NodeId>,
+        attrs: &mut Vec<(String, String)>,
+    ) -> Step {
+        loop {
             let mut k2 = kids.clone();
             let mut a2 = attrs.clone();
-            if consume(schema, &p, doc, &mut k2, &mut a2).is_ok() {
-                *kids = k2;
-                *attrs = a2;
-            }
-            Ok(())
-        }
-        Pat::ZeroOrMore(p) => {
-            loop {
-                let mut k2 = kids.clone();
-                let mut a2 = attrs.clone();
-                if consume(schema, &p, doc, &mut k2, &mut a2).is_ok()
-                    && (k2.len() < kids.len() || a2.len() < attrs.len())
-                {
+            match self.consume(p, &mut k2, &mut a2) {
+                Ok(()) if k2.len() < kids.len() || a2.len() < attrs.len() => {
                     *kids = k2;
                     *attrs = a2;
-                } else {
-                    break;
                 }
+                Ok(()) => return Ok(()),
+                Err(e) if self.fatal(&e) => return Err(e),
+                Err(_) => return Ok(()),
             }
-            Ok(())
-        }
-        Pat::OneOrMore(p) => {
-            consume(schema, &p, doc, kids, attrs)?;
-            consume(schema, &Pat::ZeroOrMore(p), doc, kids, attrs)
-        }
-        Pat::Value(v) => {
-            let text: String = kids
-                .iter()
-                .filter(|k| doc.kind(**k) != NodeKind::Element)
-                .map(|k| doc.content(*k))
-                .collect();
-            kids.retain(|&k| doc.kind(k) == NodeKind::Element);
-            if text.trim() == v {
-                Ok(())
-            } else {
-                Err(format!("value {v} != {}", text.trim()))
-            }
-        }
-        Pat::Data(_) | Pat::List(_) => {
-            kids.retain(|&k| doc.kind(k) == NodeKind::Element);
-            Ok(())
-        }
-        Pat::Ref(n) => {
-            let p = schema.defs.get(&n).ok_or_else(|| format!("undefined {n}"))?;
-            consume(schema, p, doc, kids, attrs)
         }
     }
 }

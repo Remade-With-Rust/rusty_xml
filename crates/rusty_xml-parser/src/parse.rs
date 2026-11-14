@@ -62,26 +62,16 @@ const XMLNS_NS: &str = "http://www.w3.org/2000/xmlns/";
 /// content loop is iterative now and document depth costs no stack, so the cap
 /// is a POLICY limit again rather than a crash guard.
 ///
-/// 5000 matches what libxml2 permits by default and is beyond any real markup;
-/// `XML_PARSE_HUGE` lifts it, which it can now do safely.
+/// 5000 is deliberately above libxml2's default of 256 (2048 under
+/// `XML_PARSE_HUGE`; `xmllint` 2.15.3 fails at 257 and 2049 with "Excessive
+/// depth in document") and beyond any real markup. `XML_PARSE_HUGE` raises it
+/// to [`MAX_DEPTH_HUGE`], which is safe because no walk over a parsed tree
+/// recurses per level of nesting.
 const MAX_DEPTH: u32 = 5_000;
 
 /// The ceiling `XML_PARSE_HUGE` raises the nesting limit to. Bounded rather
 /// than unlimited so a hostile document cannot make the arena grow without end.
 const MAX_DEPTH_HUGE: u32 = 1_000_000;
-
-/// `XML_PARSE_HUGE` deliberately does **not** lift the nesting limit.
-///
-/// A depth cap only protects you when the cap is BELOW the stack limit. The
-/// element parser is recursive descent, and a debug build overflows around 95
-/// levels, so any cap above that is not a limit at all -- the process aborts
-/// before the check fires, and a stack overflow cannot be caught. Raising the
-/// cap to 256 or 512 therefore did not give callers deeper documents, it gave
-/// them a crash instead of an error.
-///
-/// HUGE still lifts the other limits it guards (name length, text length).
-/// Genuinely deeper nesting requires an iterative parser; that is the fix, and
-/// a larger constant is not a substitute for it.
 
 const MAX_NAME: usize = 50_000;
 const MAX_TEXT: usize = 10_000_000;

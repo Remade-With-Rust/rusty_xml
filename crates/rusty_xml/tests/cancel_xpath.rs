@@ -5,7 +5,7 @@ use rusty_xml::{
     XPathObject, XmlDoc, XmlXPathContext,
 };
 use std::time::{Duration, Instant};
-use support::{is_interrupted, sweep};
+use support::{count_checks, is_interrupted, sweep};
 
 fn parse(xml: &str) -> XmlDoc {
     xml_read_memory(xml.as_bytes(), None, None, 0).expect("fixture parses")
@@ -125,4 +125,49 @@ fn latency_id() {
         let children: String = ids.iter().map(|i| format!("<c id=\"{i}\"/>")).collect();
         format!("<r><ids>{}</ids>{children}</r>", ids.join(" "))
     });
+}
+
+fn checks(xml: &str, expr: &str) -> u32 {
+    let doc = parse(xml);
+    count_checks(|c| {
+        let _ = eval(&doc, expr, c);
+    })
+}
+
+#[test]
+fn sum_checks_every_node() {
+    let nested = format!("<r>{}{}</r>", "<a>1".repeat(20), "</a>".repeat(20));
+    let delta = checks(&nested, "sum(//a)") - checks(&nested, "count(//a)");
+    assert_eq!(delta, 20);
+}
+
+#[test]
+fn predicate_checks_every_candidate() {
+    let xml = format!("<r>{}</r>", "<x/>".repeat(40));
+    let delta = checks(&xml, "//x[true()]") - checks(&xml, "//x");
+    assert!(delta >= 40, "delta {delta}");
+}
+
+#[test]
+fn id_checks_every_element_per_token() {
+    let tokens: Vec<String> = (0..50).map(|i| format!("k{i}")).collect();
+    let elements: String = tokens.iter().map(|t| format!("<e id=\"{t}\"/>")).collect();
+    let xml = format!("<r><t>{}</t>{elements}</r>", tokens.join(" "));
+    let delta = checks(&xml, "id(//t)") - checks(&xml, "string(//t)");
+    assert!(delta >= 50 * 100, "delta {delta}");
+}
+
+#[test]
+fn sort_unique_checks_every_key() {
+    let xml = format!("<r>{}</r>", "<a/>".repeat(500));
+    // 500 axis nodes filtered plus 500 ranks computed.
+    let total = checks(&xml, "/r/a");
+    assert!(total >= 1000, "total {total}");
+}
+
+#[test]
+fn preceding_checks_every_earlier_node() {
+    let xml = format!("<r>{}</r>", "<x/>".repeat(60));
+    let delta = checks(&xml, "/descendant::x/preceding::*") - checks(&xml, "/descendant::x");
+    assert!(delta >= 5000, "delta {delta}");
 }

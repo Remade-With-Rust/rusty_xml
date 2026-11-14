@@ -21,7 +21,7 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 
-use rusty_xml_tree::{NodeId, NodeKind, XmlDoc};
+use rusty_xml_tree::{Interrupt, InterruptPoll, NodeId, NodeKind, XmlDoc};
 
 use crate::error::XmlError;
 use crate::html_entities::{decode_html, Nul};
@@ -100,7 +100,34 @@ pub fn html_read_memory(
     encoding: Option<&str>,
     options: i32,
 ) -> Result<XmlDoc, XmlError> {
+    html_read(buffer, url, encoding, options, None)
+}
+
+/// [`html_read_memory`] that polls `interrupt` at token boundaries and fails
+/// with `XML_ERR_USER_STOP` (111) once it fires. Not interrupted, it returns
+/// exactly what [`html_read_memory`] returns.
+pub fn html_read_memory_interruptible(
+    buffer: &[u8],
+    url: Option<&str>,
+    encoding: Option<&str>,
+    options: i32,
+    interrupt: &dyn Interrupt,
+) -> Result<XmlDoc, XmlError> {
+    html_read(buffer, url, encoding, options, Some(interrupt))
+}
+
+fn html_read(
+    buffer: &[u8],
+    url: Option<&str>,
+    encoding: Option<&str>,
+    options: i32,
+    interrupt: Option<&dyn Interrupt>,
+) -> Result<XmlDoc, XmlError> {
     let _ = url;
+    // Decoding is one linear pass and is not polled; check either side.
+    if interrupt.is_some_and(|i| i.is_interrupted()) {
+        return Err(interrupted());
+    }
     // A BOM, the `encoding` argument or a leading `<?xm` decide the encoding
     // up front. Otherwise libxml2 decides as it parses: a `<meta>` charset, or
     // a guess at the first non-ASCII byte (`html_encoding`, #27).
@@ -121,7 +148,11 @@ pub fn html_read_memory(
     } else {
         text
     };
-    Ok(html_parse_str(&text, options, has_nul))
+    html_parse_str(&text, options, has_nul, interrupt)
+}
+
+fn interrupted() -> XmlError {
+    XmlError::new(crate::error::XML_ERR_USER_STOP, "Parser interrupted", 0, 0)
 }
 
 /// Does the input contain a CR, a NUL? Fixed 64-byte blocks with no exit
@@ -212,7 +243,12 @@ fn normalize_newlines(s: Cow<'_, str>) -> Cow<'_, str> {
     Cow::Owned(out)
 }
 
-fn html_parse_str(text: &str, options: i32, has_nul: bool) -> XmlDoc {
+fn html_parse_str(
+    text: &str,
+    options: i32,
+    has_nul: bool,
+    interrupt: Option<&dyn Interrupt>,
+) -> Result<XmlDoc, XmlError> {
     // Sized for the densest markup measured, about one node per 10 input
     // bytes, so the arena never doubles and copies its way up; the slack
     // this leaves on lighter pages is released once the tree is built (#22).
@@ -233,10 +269,20 @@ fn html_parse_str(text: &str, options: i32, has_nul: bool) -> XmlDoc {
         noimplied: (options & HTML_PARSE_NOIMPLIED) != 0,
         attrs: Vec::new(),
         has_nul,
+        interrupt: interrupt.map(InterruptPoll::new),
+        stopped: false,
     };
-    p.document();
+    // Monomorphized: the plain parse has no poll in its loops at all.
+    if p.interrupt.is_some() {
+        p.document::<true>();
+    } else {
+        p.document::<false>();
+    }
+    if p.stopped {
+        return Err(interrupted());
+    }
     p.doc.shrink_nodes();
-    p.doc
+    Ok(p.doc)
 }
 
 #[derive(Clone, Copy)]
@@ -263,6 +309,9 @@ struct Parser<'a> {
     attrs: Vec<(Cow<'a, str>, Option<Cow<'a, str>>)>,
     /// The input has a NUL somewhere; without one, no run needs scanning.
     has_nul: bool,
+    interrupt: Option<InterruptPoll<'a>>,
+    /// The interrupt fired.
+    stopped: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -303,9 +352,24 @@ impl<'a> Parser<'a> {
 
     // ---- document and content (htmlParseDocument, htmlParseContent) ----
 
-    fn document(&mut self) {
+    /// Count one token; true once the interrupt has fired.
+    #[cold]
+    #[inline(never)]
+    fn poll(&mut self) -> bool {
+        if let Some(p) = self.interrupt.as_mut() {
+            if p.tick().is_err() {
+                self.stopped = true;
+            }
+        }
+        self.stopped
+    }
+
+    fn document<const W: bool>(&mut self) {
         self.skip_blanks();
         while self.peek(0) == Some(b'<') {
+            if W && self.poll() {
+                return;
+            }
             match self.peek(1) {
                 Some(b'!') => {
                     if self.b[self.pos..].starts_with(b"<!--") {
@@ -326,11 +390,14 @@ impl<'a> Parser<'a> {
             }
             self.skip_blanks();
         }
-        self.content();
+        self.content::<W>();
     }
 
-    fn content(&mut self) {
+    fn content<const W: bool>(&mut self) {
         while self.pos < self.b.len() {
+            if W && self.poll() {
+                return;
+            }
             if self.mode != 0 || self.b[self.pos] != b'<' {
                 self.char_data();
                 continue;

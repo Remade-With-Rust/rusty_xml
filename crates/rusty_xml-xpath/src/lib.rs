@@ -1,9 +1,19 @@
 //! XPath 1.0 compile + eval matching libxml2 `xpath.h` (M4).
+//!
+//! Nothing here recurses once per level of document nesting: axis walks,
+//! document-order indexing, node comparison and string values all follow the
+//! first-child / next-sibling / parent links, so a document parsed with
+//! `XML_PARSE_HUGE` (a million levels) cannot exhaust the stack (#34).
+//! Recursion follows only the expression, whose nesting the parser bounds.
 
 #![forbid(unsafe_code)]
 
-use rusty_xml_tree::{NodeId, NodeKind, XmlDoc};
+use rusty_xml_tree::{Interrupt, Interrupted, NodeId, NodeKind, XmlDoc};
+use std::cell::Cell;
 use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
+use std::fmt;
+use std::sync::OnceLock;
 
 /// libxml2 `xmlXPathObjectType`.
 pub const XPATH_UNDEFINED: i32 = 0;
@@ -11,6 +21,10 @@ pub const XPATH_NODESET: i32 = 1;
 pub const XPATH_BOOLEAN: i32 = 2;
 pub const XPATH_NUMBER: i32 = 3;
 pub const XPATH_STRING: i32 = 4;
+
+/// libxml2 `xmlXPathError` `XPATH_OP_LIMIT_EXCEEDED`: the evaluation passed
+/// the context's [operation limit](XmlXPathContext::set_op_limit).
+pub const XPATH_OP_LIMIT_EXCEEDED: i32 = 25;
 
 #[derive(Clone, Debug)]
 pub enum XPathObject {
@@ -33,12 +47,76 @@ impl XPathObject {
     }
 }
 
+/// Why an evaluation failed, as the typed entry points report it
+/// ([`xml_xpath_eval_interruptible`]). The plain entry points report the
+/// same failures as their `Display` text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum XPathError {
+    /// The expression could not be compiled or evaluated; the text is the
+    /// message the plain entry points return.
+    Eval(String),
+    /// The evaluation passed the context's operation limit
+    /// (libxml2 `XPATH_OP_LIMIT_EXCEEDED`).
+    OpLimitExceeded,
+    /// The caller's [`Interrupt`] fired.
+    Interrupted,
+}
+
+impl XPathError {
+    /// The libxml2 `xmlXPathError` value closest to this error.
+    pub fn code(&self) -> i32 {
+        match self {
+            // XPATH_EXPR_ERROR
+            XPathError::Eval(_) => 7,
+            XPathError::OpLimitExceeded => XPATH_OP_LIMIT_EXCEEDED,
+            // No libxml2 counterpart: XML_ERR_USER_STOP, as the parsers report.
+            XPathError::Interrupted => 111,
+        }
+    }
+}
+
+impl fmt::Display for XPathError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            XPathError::Eval(s) => f.write_str(s),
+            XPathError::OpLimitExceeded => f.write_str("XPath operation limit exceeded"),
+            XPathError::Interrupted => f.write_str("XPath evaluation interrupted"),
+        }
+    }
+}
+
+impl std::error::Error for XPathError {}
+
+impl From<Interrupted> for XPathError {
+    fn from(_: Interrupted) -> Self {
+        XPathError::Interrupted
+    }
+}
+
+impl From<String> for XPathError {
+    fn from(s: String) -> Self {
+        XPathError::Eval(s)
+    }
+}
+
+impl From<&str> for XPathError {
+    fn from(s: &str) -> Self {
+        XPathError::Eval(s.to_string())
+    }
+}
+
 pub struct XmlXPathContext<'a> {
     pub doc: &'a XmlDoc,
     pub node: NodeId,
     pub position: usize,
     pub size: usize,
     ns: Vec<(String, String)>,
+    op_limit: u64,
+    /// Document-order index, built on first need and kept for the life of
+    /// the context: the context borrows the document immutably, so it cannot
+    /// change underneath (libxml2's `xmlXPathOrderDocElems`, done lazily).
+    index: OnceLock<DocIndex>,
 }
 
 impl<'a> XmlXPathContext<'a> {
@@ -51,6 +129,8 @@ impl<'a> XmlXPathContext<'a> {
             position: 1,
             size: 1,
             ns: Vec::new(),
+            op_limit: 0,
+            index: OnceLock::new(),
         }
     }
 
@@ -62,6 +142,48 @@ impl<'a> XmlXPathContext<'a> {
 
     pub fn register_ns(&mut self, prefix: &str, href: &str) {
         self.ns.push((prefix.to_string(), href.to_string()));
+    }
+
+    /// Caps the operations one evaluation may perform; 0, the default, means
+    /// no cap (libxml2's `xmlXPathContext.opLimit`).
+    ///
+    /// An operation is counted, as libxml2 counts them, for each expression
+    /// node evaluated, each node an axis visits, each node merged by a union,
+    /// and for `translate()` by the product of its string lengths. A plain
+    /// evaluation that passes the cap fails with a message; the typed
+    /// [`xml_xpath_eval_interruptible`] fails with
+    /// [`XPathError::OpLimitExceeded`]. Unlike libxml2, whose `opCount`
+    /// accumulates until the caller resets it, the count starts at zero for
+    /// every evaluation.
+    pub fn set_op_limit(&mut self, limit: u64) {
+        self.op_limit = limit;
+    }
+
+    /// The operation cap set by [`XmlXPathContext::set_op_limit`] (0: none).
+    pub fn op_limit(&self) -> u64 {
+        self.op_limit
+    }
+
+    /// [`xml_xpath_cmp_nodes`] through this context's document-order index:
+    /// O(1) per call once the index exists (the first call, or any
+    /// evaluation that needed it, builds it in one pass). libxml2 gets the
+    /// same from `xmlXPathOrderDocElems`. Same results, including -2.
+    pub fn cmp_nodes(&self, a: NodeId, b: NodeId) -> i32 {
+        let idx = self.index();
+        let (pa, pb) = (idx.pos(a), idx.pos(b));
+        if pa == u32::MAX || pb == u32::MAX {
+            // Outside the document tree: only the walk can tell.
+            return xml_xpath_cmp_nodes(self.doc, a, b);
+        }
+        match pa.cmp(&pb) {
+            Ordering::Less => 1,
+            Ordering::Equal => 0,
+            Ordering::Greater => -1,
+        }
+    }
+
+    fn index(&self) -> &DocIndex {
+        self.index.get_or_init(|| DocIndex::build(self.doc))
     }
 }
 
@@ -81,42 +203,183 @@ pub fn xml_xpath_is_inf(v: f64) -> i32 {
     }
 }
 
+/// Visits every node reachable from `doc`'s document node in document order:
+/// each node, then its attributes, then its children. Iterative, so depth
+/// costs no stack. `leave(id, last)` runs once a node's subtree is done, with
+/// the last value `enter` returned inside it.
+fn walk_doc_order(doc: &XmlDoc, mut enter: impl FnMut(NodeId), mut leave: impl FnMut(NodeId)) {
+    let mut cur = NodeId::DOCUMENT;
+    loop {
+        enter(cur);
+        let mut a = doc.first_attr(cur);
+        while let Some(x) = a {
+            enter(x);
+            leave(x);
+            a = doc.next_sibling(x);
+        }
+        if let Some(c) = doc.first_child(cur) {
+            cur = c;
+            continue;
+        }
+        loop {
+            leave(cur);
+            if cur == NodeId::DOCUMENT {
+                return;
+            }
+            if let Some(s) = doc.next_sibling(cur) {
+                cur = s;
+                break;
+            }
+            match doc.parent(cur) {
+                Some(p) => cur = p,
+                None => return,
+            }
+        }
+    }
+}
+
 /// `xmlXPathOrderDocElems` — walk document order (preorder).
 #[doc(alias = "xmlXPathOrderDocElems")]
 pub fn xml_xpath_order_doc_elems(doc: &XmlDoc) -> Vec<NodeId> {
     let mut out = Vec::new();
-    fn walk(doc: &XmlDoc, id: NodeId, out: &mut Vec<NodeId>) {
-        out.push(id);
-        let mut a = doc.first_attr(id);
-        while let Some(x) = a {
-            out.push(x);
-            a = doc.next_sibling(x);
-        }
-        let mut c = doc.first_child(id);
-        while let Some(x) = c {
-            walk(doc, x, out);
-            c = doc.next_sibling(x);
-        }
-    }
-    walk(doc, NodeId::DOCUMENT, &mut out);
+    walk_doc_order(doc, |id| out.push(id), |_| {});
     out
 }
 
-/// `xmlXPathCmpNodes`.
-#[doc(alias = "xmlXPathCmpNodes")]
-pub fn xml_xpath_cmp_nodes(doc: &XmlDoc, a: NodeId, b: NodeId) -> i32 {
-    let order = xml_xpath_order_doc_elems(doc);
-    let ia = order.iter().position(|n| *n == a);
-    let ib = order.iter().position(|n| *n == b);
-    match (ia, ib) {
-        (Some(x), Some(y)) => x.cmp(&y) as i32,
-        _ => a.0.cmp(&b.0) as i32,
+/// Document-order position of every node reachable from the document node,
+/// and the position of the last node in its subtree; `u32::MAX` for a node
+/// the walk does not reach.
+struct DocIndex {
+    pos: Vec<u32>,
+    end: Vec<u32>,
+}
+
+impl DocIndex {
+    fn build(doc: &XmlDoc) -> DocIndex {
+        let n = doc.len();
+        let mut pos = vec![u32::MAX; n];
+        let mut end = vec![u32::MAX; n];
+        let next = Cell::new(0u32);
+        walk_doc_order(
+            doc,
+            |id| {
+                pos[id.index()] = next.get();
+                next.set(next.get() + 1);
+            },
+            |id| end[id.index()] = next.get() - 1,
+        );
+        DocIndex { pos, end }
+    }
+
+    #[inline]
+    fn pos(&self, id: NodeId) -> u32 {
+        self.pos.get(id.index()).copied().unwrap_or(u32::MAX)
+    }
+
+    #[inline]
+    fn end(&self, id: NodeId) -> u32 {
+        self.end.get(id.index()).copied().unwrap_or(u32::MAX)
+    }
+
+    /// Sorts `v` into document order and drops duplicates. The sort is
+    /// adaptive, so input already in order costs one pass.
+    fn sort_unique(&self, v: &mut Vec<NodeId>) {
+        v.sort_by_key(|n| (self.pos(*n), n.0));
+        v.dedup();
     }
 }
 
-/// `xmlXPathEval` / `xmlXPathEvalExpression`.
-#[doc(alias = "xmlXPathEval")]
-pub fn xml_xpath_eval(expr: &str, ctx: &XmlXPathContext<'_>) -> Result<XPathObject, String> {
+/// `xmlXPathCmpNodes`: 1 if `a` comes before `b` in document order, 0 if they
+/// are the same node, -1 if `a` comes after `b`, and -2 if they cannot be
+/// compared (an id outside the document, or nodes in different trees, such
+/// as one in a detached subtree).
+///
+/// As in libxml2, it walks up to the common ancestor and then along one
+/// sibling list (an element's attributes come before its children), so it
+/// costs O(depth + siblings) and allocates nothing.
+///
+/// Before 0.9.1 this returned the opposite sign (-1 when `a` came first) and
+/// walked the whole document on every call.
+#[doc(alias = "xmlXPathCmpNodes")]
+pub fn xml_xpath_cmp_nodes(doc: &XmlDoc, a: NodeId, b: NodeId) -> i32 {
+    let n = doc.len();
+    if a.index() >= n || b.index() >= n {
+        return -2;
+    }
+    if a == b {
+        return 0;
+    }
+    let depth_root = |mut x: NodeId| {
+        let mut d = 0usize;
+        while let Some(p) = doc.parent(x) {
+            if p == x {
+                break;
+            }
+            d += 1;
+            x = p;
+        }
+        (d, x)
+    };
+    let (mut da, ra) = depth_root(a);
+    let (mut db, rb) = depth_root(b);
+    if ra != rb {
+        return -2;
+    }
+    let (mut x, mut y) = (a, b);
+    while da > db {
+        x = doc.parent(x).unwrap_or(x);
+        da -= 1;
+    }
+    if x == b {
+        // b is an ancestor of a (or a's element, for an attribute)
+        return -1;
+    }
+    while db > da {
+        y = doc.parent(y).unwrap_or(y);
+        db -= 1;
+    }
+    if y == a {
+        return 1;
+    }
+    loop {
+        let (px, py) = (doc.parent(x), doc.parent(y));
+        if px == py {
+            break;
+        }
+        match (px, py) {
+            (Some(p), Some(q)) => {
+                x = p;
+                y = q;
+            }
+            _ => return -2,
+        }
+    }
+    let ax = doc.kind(x) == NodeKind::Attribute;
+    let ay = doc.kind(y) == NodeKind::Attribute;
+    if ax != ay {
+        return if ax { 1 } else { -1 };
+    }
+    // Search both ways from x at once, so the cost is the distance between
+    // the two, whichever comes first.
+    let (mut fwd, mut back) = (doc.next_sibling(x), doc.prev_sibling(x));
+    while fwd.is_some() || back.is_some() {
+        if let Some(s) = fwd {
+            if s == y {
+                return 1;
+            }
+            fwd = doc.next_sibling(s);
+        }
+        if let Some(s) = back {
+            if s == y {
+                return -1;
+            }
+            back = doc.prev_sibling(s);
+        }
+    }
+    -2
+}
+
+fn parse_xpath(expr: &str) -> Result<Expr, String> {
     let mut p = Parser {
         src: expr.trim(),
         pos: 0,
@@ -127,7 +390,34 @@ pub fn xml_xpath_eval(expr: &str, ctx: &XmlXPathContext<'_>) -> Result<XPathObje
     if p.pos < p.src.len() && !p.src[p.pos..].chars().all(|c| c.is_whitespace()) {
         return Err(format!("trailing junk in XPath: {}", &p.src[p.pos..]));
     }
-    eval(&ast, ctx)
+    Ok(ast)
+}
+
+/// `xmlXPathEval` / `xmlXPathEvalExpression`.
+#[doc(alias = "xmlXPathEval")]
+pub fn xml_xpath_eval(expr: &str, ctx: &XmlXPathContext<'_>) -> Result<XPathObject, String> {
+    let ast = parse_xpath(expr)?;
+    eval_root(&ast, ctx, None).map_err(|e| e.to_string())
+}
+
+/// [`xml_xpath_eval`], stoppable from another thread (#39).
+///
+/// `interrupt` is polled about every [`rusty_xml_tree::INTERRUPT_POLL_EVERY`]
+/// operations (the units [`XmlXPathContext::set_op_limit`] counts); once it
+/// fires the evaluation returns [`XPathError::Interrupted`]. An evaluation
+/// that is not interrupted returns exactly what [`xml_xpath_eval`] returns,
+/// with its error text in [`XPathError::Eval`]. Pass
+/// [`rusty_xml_tree::NeverInterrupt`] to get typed errors only.
+pub fn xml_xpath_eval_interruptible(
+    expr: &str,
+    ctx: &XmlXPathContext<'_>,
+    interrupt: &dyn Interrupt,
+) -> Result<XPathObject, XPathError> {
+    if interrupt.is_interrupted() {
+        return Err(XPathError::Interrupted);
+    }
+    let ast = parse_xpath(expr)?;
+    eval_root(&ast, ctx, Some(interrupt))
 }
 
 /// `xmlXPathCastToBoolean`.
@@ -270,7 +560,7 @@ fn xpath_number(s: &str) -> f64 {
 
 fn string_val(ctx: &XmlXPathContext<'_>, nodes: &[NodeId]) -> String {
     let Some(&id) = nodes.first() else { return String::new() };
-    ctx.doc.xml_node_get_content(id)
+    string_value(ctx.doc, id)
 }
 
 /// Dump matching libxml2 `xmlXPathDebugDumpObject` used by `xmllint --xpath` / testXPath.
@@ -415,14 +705,15 @@ pub fn xml_xpath_compiled_eval(
 
 #[derive(Clone, Debug)]
 enum Expr {
-    Or(Box<Expr>, Box<Expr>),
-    And(Box<Expr>, Box<Expr>),
-    Eq(Box<Expr>, Box<Expr>, bool),
-    Rel(Box<Expr>, Box<Expr>, Ordering, bool),
-    Add(Box<Expr>, Box<Expr>, bool),
-    Mul(Box<Expr>, Box<Expr>, char),
+    // A chain of one operator is kept flat (`a or b or c` is one `Or` of
+    // three arms, `1+2-3` one `Bin`), and evaluated left to right in a loop.
+    // As nested boxes a long chain made a tree as deep as the chain was
+    // long, and both evaluating it and dropping it recursed that deep.
+    Or(Vec<Expr>),
+    And(Vec<Expr>),
+    Bin(Box<Expr>, Vec<(BinOp, Expr)>),
     Neg(Box<Expr>),
-    Union(Box<Expr>, Box<Expr>),
+    Union(Vec<Expr>),
     Path(PathExpr),
     Steps { base: Box<Expr>, steps: Vec<Step> },
     Filter(Box<Expr>, Vec<Expr>),
@@ -430,6 +721,21 @@ enum Expr {
     Number(f64),
     Var(String),
     Fun { name: String, args: Vec<Expr> },
+}
+
+#[derive(Clone, Copy, Debug)]
+enum BinOp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
 }
 
 #[derive(Clone, Debug)]
@@ -529,115 +835,115 @@ impl<'a> Parser<'a> {
         r
     }
     fn parse_or(&mut self) -> Result<Expr, String> {
-        let mut e = self.parse_and()?;
+        let mut arms = vec![self.parse_and()?];
         loop {
             self.skip_ws();
             if self.keyword("or") {
-                let r = self.parse_and()?;
-                e = Expr::Or(Box::new(e), Box::new(r));
+                arms.push(self.parse_and()?);
             } else {
                 break;
             }
         }
-        Ok(e)
+        Ok(if arms.len() == 1 {
+            arms.pop().unwrap_or(Expr::Number(0.0))
+        } else {
+            Expr::Or(arms)
+        })
     }
     fn parse_and(&mut self) -> Result<Expr, String> {
-        let mut e = self.parse_eq()?;
+        let mut arms = vec![self.parse_eq()?];
         loop {
             self.skip_ws();
             if self.keyword("and") {
-                let r = self.parse_eq()?;
-                e = Expr::And(Box::new(e), Box::new(r));
+                arms.push(self.parse_eq()?);
             } else {
                 break;
             }
         }
-        Ok(e)
+        Ok(if arms.len() == 1 {
+            arms.pop().unwrap_or(Expr::Number(0.0))
+        } else {
+            Expr::And(arms)
+        })
     }
     fn parse_eq(&mut self) -> Result<Expr, String> {
-        let mut e = self.parse_rel()?;
+        let first = self.parse_rel()?;
+        let mut rest = Vec::new();
         loop {
             self.skip_ws();
             if self.starts("=") {
                 self.bump(1);
-                let r = self.parse_rel()?;
-                e = Expr::Eq(Box::new(e), Box::new(r), true);
+                rest.push((BinOp::Eq, self.parse_rel()?));
             } else if self.starts("!=") {
                 self.bump(2);
-                let r = self.parse_rel()?;
-                e = Expr::Eq(Box::new(e), Box::new(r), false);
+                rest.push((BinOp::Ne, self.parse_rel()?));
             } else {
                 break;
             }
         }
-        Ok(e)
+        Ok(chain(first, rest))
     }
     fn parse_rel(&mut self) -> Result<Expr, String> {
-        let mut e = self.parse_add()?;
+        let first = self.parse_add()?;
+        let mut rest = Vec::new();
         loop {
             self.skip_ws();
-            if self.starts("<=") {
+            let op = if self.starts("<=") {
                 self.bump(2);
-                let r = self.parse_add()?;
-                e = Expr::Rel(Box::new(e), Box::new(r), Ordering::Less, true);
+                BinOp::Le
             } else if self.starts(">=") {
                 self.bump(2);
-                let r = self.parse_add()?;
-                e = Expr::Rel(Box::new(e), Box::new(r), Ordering::Greater, true);
+                BinOp::Ge
             } else if self.starts("<") {
                 self.bump(1);
-                let r = self.parse_add()?;
-                e = Expr::Rel(Box::new(e), Box::new(r), Ordering::Less, false);
+                BinOp::Lt
             } else if self.starts(">") {
                 self.bump(1);
-                let r = self.parse_add()?;
-                e = Expr::Rel(Box::new(e), Box::new(r), Ordering::Greater, false);
+                BinOp::Gt
             } else {
                 break;
-            }
+            };
+            rest.push((op, self.parse_add()?));
         }
-        Ok(e)
+        Ok(chain(first, rest))
     }
     fn parse_add(&mut self) -> Result<Expr, String> {
-        let mut e = self.parse_mul()?;
+        let first = self.parse_mul()?;
+        let mut rest = Vec::new();
         loop {
             self.skip_ws();
             if self.starts("+") {
                 self.bump(1);
-                let r = self.parse_mul()?;
-                e = Expr::Add(Box::new(e), Box::new(r), true);
+                rest.push((BinOp::Add, self.parse_mul()?));
             } else if self.starts("-") && !self.is_name_start_after_minus() {
                 self.bump(1);
-                let r = self.parse_mul()?;
-                e = Expr::Add(Box::new(e), Box::new(r), false);
+                rest.push((BinOp::Sub, self.parse_mul()?));
             } else {
                 break;
             }
         }
-        Ok(e)
+        Ok(chain(first, rest))
     }
     fn is_name_start_after_minus(&self) -> bool {
         false
     }
     fn parse_mul(&mut self) -> Result<Expr, String> {
-        let mut e = self.parse_unary()?;
+        let first = self.parse_unary()?;
+        let mut rest = Vec::new();
         loop {
             self.skip_ws();
             if self.starts("*") && !self.looks_like_nametest_star() {
                 self.bump(1);
-                let r = self.parse_unary()?;
-                e = Expr::Mul(Box::new(e), Box::new(r), '*');
+                rest.push((BinOp::Mul, self.parse_unary()?));
             } else if self.keyword("div") {
-                let r = self.parse_unary()?;
-                e = Expr::Mul(Box::new(e), Box::new(r), 'd');
+                rest.push((BinOp::Div, self.parse_unary()?));
             } else if self.keyword("mod") {
-                let r = self.parse_unary()?;
-                e = Expr::Mul(Box::new(e), Box::new(r), 'm');
+                rest.push((BinOp::Mod, self.parse_unary()?));
             } else {
                 break;
             }
         }
-        Ok(e)
+        Ok(chain(first, rest))
     }
     fn looks_like_nametest_star(&self) -> bool {
         false
@@ -655,25 +961,22 @@ impl<'a> Parser<'a> {
         }
     }
     fn parse_union(&mut self) -> Result<Expr, String> {
-        let mut e = self.parse_path()?;
-        // The loop is iterative but each step adds a Box level, so the tree it
-        // builds is as deep as the chain is long -- and dropping it recurses.
-        let mut arms = 0u32;
+        // Flat, like the operator chains: any number of arms, no depth.
+        let mut arms = vec![self.parse_path()?];
         loop {
             self.skip_ws();
             if self.starts("|") {
                 self.bump(1);
-                arms += 1;
-                if arms > MAX_XPATH_DEPTH {
-                    return Err("expression nested too deeply".into());
-                }
-                let r = self.parse_path()?;
-                e = Expr::Union(Box::new(e), Box::new(r));
+                arms.push(self.parse_path()?);
             } else {
                 break;
             }
         }
-        Ok(e)
+        Ok(if arms.len() == 1 {
+            arms.pop().unwrap_or(Expr::Number(0.0))
+        } else {
+            Expr::Union(arms)
+        })
     }
     fn parse_path(&mut self) -> Result<Expr, String> {
         self.skip_ws();
@@ -1040,6 +1343,14 @@ impl<'a> Parser<'a> {
     }
 }
 
+fn chain(first: Expr, rest: Vec<(BinOp, Expr)>) -> Expr {
+    if rest.is_empty() {
+        first
+    } else {
+        Expr::Bin(Box::new(first), rest)
+    }
+}
+
 fn split_qname(n: &str) -> (Option<String>, String) {
     if let Some((p, l)) = n.split_once(':') {
         (Some(p.to_string()), l.to_string())
@@ -1050,93 +1361,283 @@ fn split_qname(n: &str) -> (Option<String>, String) {
 
 /* ---------------- eval ---------------- */
 
-fn eval(expr: &Expr, ctx: &XmlXPathContext<'_>) -> Result<XPathObject, String> {
+/// Work units between two polls of an [`Interrupt`].
+const POLL_EVERY: u64 = rusty_xml_tree::INTERRUPT_POLL_EVERY as u64;
+
+/// State for one evaluation: the context, the operation count, and the
+/// interrupt. The count is kept even when nothing limits it; with no limit
+/// and no interrupt `next_check` is `u64::MAX`, so a charge is an add and a
+/// compare that never fires.
+struct Env<'e, 'a> {
+    ctx: &'e XmlXPathContext<'a>,
+    doc: &'a XmlDoc,
+    ops: Cell<u64>,
+    next_check: Cell<u64>,
+    limit: u64,
+    interrupt: Option<&'e dyn Interrupt>,
+}
+
+impl<'e, 'a> Env<'e, 'a> {
+    fn new(ctx: &'e XmlXPathContext<'a>, interrupt: Option<&'e dyn Interrupt>) -> Self {
+        let env = Env {
+            ctx,
+            doc: ctx.doc,
+            ops: Cell::new(0),
+            next_check: Cell::new(u64::MAX),
+            limit: ctx.op_limit,
+            interrupt,
+        };
+        env.next_check.set(env.next_after(0));
+        env
+    }
+
+    fn next_after(&self, count: u64) -> u64 {
+        let mut n = u64::MAX;
+        if self.limit != 0 {
+            n = n.min(self.limit.saturating_add(1));
+        }
+        if self.interrupt.is_some() {
+            n = n.min(count.saturating_add(POLL_EVERY));
+        }
+        n
+    }
+
+    /// Counts `n` operations, failing once the count passes the limit or the
+    /// interrupt has fired.
+    #[inline]
+    fn charge(&self, n: u64) -> Result<(), XPathError> {
+        let c = self.ops.get().saturating_add(n);
+        self.ops.set(c);
+        if c >= self.next_check.get() {
+            self.checkpoint(c)
+        } else {
+            Ok(())
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn checkpoint(&self, count: u64) -> Result<(), XPathError> {
+        if self.limit != 0 && count > self.limit {
+            return Err(XPathError::OpLimitExceeded);
+        }
+        if let Some(i) = self.interrupt {
+            if i.is_interrupted() {
+                return Err(XPathError::Interrupted);
+            }
+        }
+        self.next_check.set(self.next_after(count));
+        Ok(())
+    }
+}
+
+/// The context node, position and size an expression is evaluated against.
+#[derive(Clone, Copy)]
+struct Focus {
+    node: NodeId,
+    position: usize,
+    size: usize,
+}
+
+fn eval_root(
+    expr: &Expr,
+    ctx: &XmlXPathContext<'_>,
+    interrupt: Option<&dyn Interrupt>,
+) -> Result<XPathObject, XPathError> {
+    let env = Env::new(ctx, interrupt);
+    let focus = Focus {
+        node: ctx.node,
+        position: ctx.position,
+        size: ctx.size,
+    };
+    eval(expr, &env, focus)
+}
+
+fn eval(expr: &Expr, env: &Env<'_, '_>, f: Focus) -> Result<XPathObject, XPathError> {
+    env.charge(1)?;
     match expr {
-        Expr::Or(a, b) => {
-            let x = xml_xpath_cast_to_boolean(&eval(a, ctx)?);
-            if x {
-                Ok(XPathObject::Boolean(true))
-            } else {
-                Ok(XPathObject::Boolean(xml_xpath_cast_to_boolean(&eval(b, ctx)?)))
-            }
-        }
-        Expr::And(a, b) => {
-            let x = xml_xpath_cast_to_boolean(&eval(a, ctx)?);
-            if !x {
-                Ok(XPathObject::Boolean(false))
-            } else {
-                Ok(XPathObject::Boolean(xml_xpath_cast_to_boolean(&eval(b, ctx)?)))
-            }
-        }
-        Expr::Eq(a, b, eq) => {
-            let l = eval(a, ctx)?;
-            let r = eval(b, ctx)?;
-            Ok(XPathObject::Boolean(compare_eq(&l, &r, ctx) == *eq))
-        }
-        Expr::Rel(a, b, ord, or_eq) => {
-            let ln = xml_xpath_cast_to_number(&eval(a, ctx)?, ctx);
-            let rn = xml_xpath_cast_to_number(&eval(b, ctx)?, ctx);
-            let c = ln.partial_cmp(&rn);
-            let ok = match c {
-                Some(o) if o == *ord => true,
-                Some(Ordering::Equal) if *or_eq => true,
-                _ => false,
-            };
-            Ok(XPathObject::Boolean(ok))
-        }
-        Expr::Add(a, b, plus) => {
-            let ln = xml_xpath_cast_to_number(&eval(a, ctx)?, ctx);
-            let rn = xml_xpath_cast_to_number(&eval(b, ctx)?, ctx);
-            Ok(XPathObject::Number(if *plus { ln + rn } else { ln - rn }))
-        }
-        Expr::Mul(a, b, op) => {
-            let ln = xml_xpath_cast_to_number(&eval(a, ctx)?, ctx);
-            let rn = xml_xpath_cast_to_number(&eval(b, ctx)?, ctx);
-            Ok(XPathObject::Number(match op {
-                '*' => ln * rn,
-                'd' => ln / rn,
-                _ => ln % rn,
-            }))
-        }
-        Expr::Neg(a) => Ok(XPathObject::Number(-xml_xpath_cast_to_number(&eval(a, ctx)?, ctx))),
-        Expr::Union(a, b) => {
-            let mut ns = nodeset(eval(a, ctx)?);
-            ns.extend(nodeset(eval(b, ctx)?));
-            Ok(XPathObject::NodeSet(sort_unique(ctx.doc, ns)))
-        }
-        Expr::Path(p) => eval_path(p, ctx),
-        Expr::Steps { base, steps } => {
-            let mut nodes = nodeset(eval(base, ctx)?);
-            for step in steps {
-                let mut next = Vec::new();
-                for n in nodes {
-                    next.extend(axis_nodes(ctx.doc, n, step.axis, &step.test, &ctx.ns));
+        Expr::Or(arms) => {
+            for a in arms {
+                if xml_xpath_cast_to_boolean(&eval(a, env, f)?) {
+                    return Ok(XPathObject::Boolean(true));
                 }
-                nodes = filter_preds(ctx, sort_unique(ctx.doc, next), &step.preds)?;
             }
-            Ok(XPathObject::NodeSet(nodes))
+            Ok(XPathObject::Boolean(false))
+        }
+        Expr::And(arms) => {
+            for a in arms {
+                if !xml_xpath_cast_to_boolean(&eval(a, env, f)?) {
+                    return Ok(XPathObject::Boolean(false));
+                }
+            }
+            Ok(XPathObject::Boolean(true))
+        }
+        Expr::Bin(first, rest) => {
+            let mut acc = eval(first, env, f)?;
+            for (op, e) in rest {
+                let r = eval(e, env, f)?;
+                acc = apply_bin(*op, &acc, &r, env.ctx);
+            }
+            Ok(acc)
+        }
+        Expr::Neg(a) => Ok(XPathObject::Number(-xml_xpath_cast_to_number(
+            &eval(a, env, f)?,
+            env.ctx,
+        ))),
+        Expr::Union(arms) => {
+            let mut ns = Vec::new();
+            for a in arms {
+                let s = nodeset(eval(a, env, f)?);
+                env.charge(s.len() as u64)?;
+                ns.extend(s);
+            }
+            env.ctx.index().sort_unique(&mut ns);
+            Ok(XPathObject::NodeSet(ns))
+        }
+        Expr::Path(p) => {
+            let start = if p.abs { NodeId::DOCUMENT } else { f.node };
+            Ok(XPathObject::NodeSet(eval_steps(
+                env,
+                vec![start],
+                &p.steps,
+            )?))
+        }
+        Expr::Steps { base, steps } => {
+            let nodes = nodeset(eval(base, env, f)?);
+            Ok(XPathObject::NodeSet(eval_steps(env, nodes, steps)?))
         }
         Expr::Filter(e, preds) => {
-            let o = eval(e, ctx)?;
-            let ns = nodeset(o);
-            Ok(XPathObject::NodeSet(filter_preds(ctx, ns, preds)?))
+            let ns = nodeset(eval(e, env, f)?);
+            Ok(XPathObject::NodeSet(filter_preds(env, ns, preds)?))
         }
         Expr::Literal(s) => Ok(XPathObject::String(s.clone())),
         Expr::Number(n) => Ok(XPathObject::Number(*n)),
         Expr::Var(_) => Err("variables not bound".into()),
-        Expr::Fun { name, args } => eval_fun(name, args, ctx),
+        Expr::Fun { name, args } => eval_fun(name, args, env, f),
     }
 }
 
-fn compare_eq(l: &XPathObject, r: &XPathObject, ctx: &XmlXPathContext<'_>) -> bool {
+fn apply_bin(
+    op: BinOp,
+    l: &XPathObject,
+    r: &XPathObject,
+    ctx: &XmlXPathContext<'_>,
+) -> XPathObject {
+    let num = |g: fn(f64, f64) -> f64| {
+        XPathObject::Number(g(
+            xml_xpath_cast_to_number(l, ctx),
+            xml_xpath_cast_to_number(r, ctx),
+        ))
+    };
+    match op {
+        BinOp::Eq => XPathObject::Boolean(compare_equal(l, r, ctx, true)),
+        BinOp::Ne => XPathObject::Boolean(compare_equal(l, r, ctx, false)),
+        BinOp::Lt => XPathObject::Boolean(compare_rel(l, r, ctx, Ordering::Less, false)),
+        BinOp::Le => XPathObject::Boolean(compare_rel(l, r, ctx, Ordering::Less, true)),
+        BinOp::Gt => XPathObject::Boolean(compare_rel(l, r, ctx, Ordering::Greater, false)),
+        BinOp::Ge => XPathObject::Boolean(compare_rel(l, r, ctx, Ordering::Greater, true)),
+        BinOp::Add => num(|a, b| a + b),
+        BinOp::Sub => num(|a, b| a - b),
+        BinOp::Mul => num(|a, b| a * b),
+        BinOp::Div => num(|a, b| a / b),
+        BinOp::Mod => num(|a, b| a % b),
+    }
+}
+
+/// `=` (`eq`) or `!=` per XPath 1.0, 3.4 (libxml2 `xmlXPathEqualValues`): a
+/// node-set compares true if SOME member's string-value does, so
+/// `//b = 'x'` asks whether any `b` is `x`, not whether the first one is.
+fn compare_equal(l: &XPathObject, r: &XPathObject, ctx: &XmlXPathContext<'_>, eq: bool) -> bool {
+    use XPathObject::{Boolean, NodeSet, Number, String as Str};
+    let doc = ctx.doc;
     match (l, r) {
-        (XPathObject::Boolean(_), _) | (_, XPathObject::Boolean(_)) => {
-            xml_xpath_cast_to_boolean(l) == xml_xpath_cast_to_boolean(r)
+        (NodeSet(a), NodeSet(b)) => {
+            if a.is_empty() || b.is_empty() {
+                return false;
+            }
+            // One set of strings, then one lookup per member of the other:
+            // linear, where pairwise would be quadratic.
+            let sa: HashSet<String> = a.iter().map(|n| string_value(doc, *n)).collect();
+            if eq {
+                b.iter().any(|n| sa.contains(&string_value(doc, *n)))
+            } else if sa.len() > 1 {
+                true
+            } else {
+                let only = sa.iter().next();
+                b.iter().any(|n| Some(&string_value(doc, *n)) != only)
+            }
         }
-        (XPathObject::Number(_), _) | (_, XPathObject::Number(_)) => {
-            xml_xpath_cast_to_number(l, ctx) == xml_xpath_cast_to_number(r, ctx)
+        (NodeSet(a), other) | (other, NodeSet(a)) => match other {
+            Boolean(b) => (!a.is_empty() == *b) == eq,
+            Number(x) => a
+                .iter()
+                .any(|n| (xpath_number(&string_value(doc, *n)) == *x) == eq),
+            Str(s) => a.iter().any(|n| (string_value(doc, *n) == *s) == eq),
+            _ => false,
+        },
+        (Boolean(_), _) | (_, Boolean(_)) => {
+            (xml_xpath_cast_to_boolean(l) == xml_xpath_cast_to_boolean(r)) == eq
         }
-        _ => xml_xpath_cast_to_string(l, ctx) == xml_xpath_cast_to_string(r, ctx),
+        (Number(_), _) | (_, Number(_)) => {
+            (xml_xpath_cast_to_number(l, ctx) == xml_xpath_cast_to_number(r, ctx)) == eq
+        }
+        _ => (xml_xpath_cast_to_string(l, ctx) == xml_xpath_cast_to_string(r, ctx)) == eq,
+    }
+}
+
+/// `<`, `<=`, `>`, `>=` per XPath 1.0, 3.4 (libxml2 `xmlXPathCompareValues`):
+/// existential over node-sets, by number. Two node-sets compare by their
+/// extremes, which is the same answer as trying every pair.
+fn compare_rel(
+    l: &XPathObject,
+    r: &XPathObject,
+    ctx: &XmlXPathContext<'_>,
+    ord: Ordering,
+    or_eq: bool,
+) -> bool {
+    use XPathObject::{Boolean, NodeSet};
+    let doc = ctx.doc;
+    let test = |a: f64, b: f64| match a.partial_cmp(&b) {
+        Some(o) if o == ord => true,
+        Some(Ordering::Equal) => or_eq,
+        _ => false,
+    };
+    let nums = |v: &[NodeId]| -> Vec<f64> {
+        v.iter()
+            .map(|n| xpath_number(&string_value(doc, *n)))
+            .filter(|x| !x.is_nan())
+            .collect()
+    };
+    let bool_num = |b: bool| if b { 1.0 } else { 0.0 };
+    match (l, r) {
+        (NodeSet(a), NodeSet(b)) => {
+            let (na, nb) = (nums(a), nums(b));
+            let min = |v: &[f64]| v.iter().copied().reduce(f64::min);
+            let max = |v: &[f64]| v.iter().copied().reduce(f64::max);
+            let pair = if ord == Ordering::Less {
+                (min(&na), max(&nb))
+            } else {
+                (max(&na), min(&nb))
+            };
+            match pair {
+                (Some(x), Some(y)) => test(x, y),
+                _ => false,
+            }
+        }
+        (NodeSet(a), Boolean(b)) => test(bool_num(!a.is_empty()), bool_num(*b)),
+        (Boolean(b), NodeSet(a)) => test(bool_num(*b), bool_num(!a.is_empty())),
+        (NodeSet(a), other) => {
+            let y = xml_xpath_cast_to_number(other, ctx);
+            nums(a).into_iter().any(|x| test(x, y))
+        }
+        (other, NodeSet(b)) => {
+            let x = xml_xpath_cast_to_number(other, ctx);
+            nums(b).into_iter().any(|y| test(x, y))
+        }
+        _ => test(
+            xml_xpath_cast_to_number(l, ctx),
+            xml_xpath_cast_to_number(r, ctx),
+        ),
     }
 }
 
@@ -1147,52 +1648,199 @@ fn nodeset(o: XPathObject) -> Vec<NodeId> {
     }
 }
 
-fn sort_unique(doc: &XmlDoc, mut v: Vec<NodeId>) -> Vec<NodeId> {
-    let order = xml_xpath_order_doc_elems(doc);
-    v.sort_by_key(|n| order.iter().position(|x| x == n).unwrap_or(usize::MAX));
-    v.dedup();
-    v
+impl Axis {
+    /// Reverse axes number their proximity positions from the context node
+    /// backwards (XPath 1.0, 2.4).
+    fn is_reverse(self) -> bool {
+        matches!(
+            self,
+            Axis::Ancestor | Axis::AncestorOrSelf | Axis::Preceding | Axis::PrecedingSibling
+        )
+    }
 }
 
-fn eval_path(path: &PathExpr, ctx: &XmlXPathContext<'_>) -> Result<XPathObject, String> {
-    let mut nodes = if path.abs {
-        vec![NodeId::DOCUMENT]
-    } else {
-        vec![ctx.node]
-    };
-    if path.steps.is_empty() && path.abs {
-        return Ok(XPathObject::NodeSet(nodes));
-    }
-    for step in &path.steps {
-        let mut next = Vec::new();
-        for n in nodes {
-            next.extend(axis_nodes(ctx.doc, n, step.axis, &step.test, &ctx.ns));
+/// Applies `steps` to a node-set in document order, returning one.
+fn eval_steps(
+    env: &Env<'_, '_>,
+    mut nodes: Vec<NodeId>,
+    steps: &[Step],
+) -> Result<Vec<NodeId>, XPathError> {
+    let mut i = 0;
+    while i < steps.len() {
+        let step = &steps[i];
+        // `//x` is descendant-or-self::node()/child::x; with no predicate on
+        // either step that is descendant::x, which needs no merge or sort
+        // (libxml2 makes the same rewrite).
+        if step.axis == Axis::DescendantOrSelf
+            && matches!(step.test, NodeTest::Node)
+            && step.preds.is_empty()
+        {
+            if let Some(next) = steps.get(i + 1) {
+                if next.axis == Axis::Child && next.preds.is_empty() {
+                    nodes = step_nodes(env, &nodes, Axis::Descendant, &next.test, &[])?;
+                    i += 2;
+                    continue;
+                }
+            }
         }
-        nodes = filter_preds(ctx, sort_unique(ctx.doc, next), &step.preds)?;
+        nodes = step_nodes(env, &nodes, step.axis, &step.test, &step.preds)?;
+        i += 1;
     }
-    Ok(XPathObject::NodeSet(nodes))
+    Ok(nodes)
 }
 
+/// One location step from every node of `ctxs` (document order, no
+/// duplicates); the result is in document order with no duplicates.
+///
+/// Predicates are applied per context node, with proximity positions taken
+/// along the axis (reverse axes count backwards), and only then are the
+/// per-node results merged. Without predicates the merge has shortcuts that
+/// keep it linear: the union of `following` (or `preceding`) over many nodes
+/// is that axis from one of them, and nested `descendant` walks are skipped.
+fn step_nodes(
+    env: &Env<'_, '_>,
+    ctxs: &[NodeId],
+    axis: Axis,
+    test: &NodeTest,
+    preds: &[Expr],
+) -> Result<Vec<NodeId>, XPathError> {
+    let doc = env.doc;
+    let mut out = Vec::new();
+    if ctxs.is_empty() {
+        return Ok(out);
+    }
+    if preds.is_empty() {
+        if ctxs.len() > 1 {
+            let simple = || {
+                let idx = env.ctx.index();
+                ctxs.iter()
+                    .all(|&n| idx.pos(n) != u32::MAX && doc.kind(n) != NodeKind::Attribute)
+            };
+            match axis {
+                // following(x) is every node after x's subtree, so the union
+                // is following() of the node whose subtree ends first.
+                // preceding(x) is every node whose subtree ends before x, so
+                // the union is preceding() of the last node.
+                Axis::Following | Axis::Preceding if simple() => {
+                    let idx = env.ctx.index();
+                    let pick = if axis == Axis::Following {
+                        ctxs.iter().copied().min_by_key(|&n| idx.end(n))
+                    } else {
+                        ctxs.iter().copied().max_by_key(|&n| idx.pos(n))
+                    };
+                    if let Some(n) = pick {
+                        axis_into(env, n, axis, test, &mut out)?;
+                    }
+                    return Ok(out);
+                }
+                // Context nodes are in document order: one inside a subtree
+                // already walked adds nothing new, and the subtrees left are
+                // disjoint and in order, so the output needs no sort.
+                Axis::Descendant | Axis::DescendantOrSelf if simple() => {
+                    let idx = env.ctx.index();
+                    let mut covered: Option<u32> = None;
+                    for &n in ctxs {
+                        if covered.is_some_and(|e| idx.pos(n) <= e) {
+                            continue;
+                        }
+                        axis_into(env, n, axis, test, &mut out)?;
+                        covered = Some(idx.end(n));
+                    }
+                    return Ok(out);
+                }
+                // The siblings after the first context node under a parent
+                // hold those after every later one; before, the last one.
+                Axis::FollowingSibling | Axis::PrecedingSibling if simple() => {
+                    let mut seen = HashSet::new();
+                    let mut take = |n: NodeId| -> Result<(), XPathError> {
+                        if seen.insert(doc.parent(n).unwrap_or(n)) {
+                            axis_into(env, n, axis, test, &mut out)?;
+                        }
+                        Ok(())
+                    };
+                    if axis == Axis::FollowingSibling {
+                        ctxs.iter().try_for_each(|&n| take(n))?;
+                    } else {
+                        ctxs.iter().rev().try_for_each(|&n| take(n))?;
+                    }
+                    env.ctx.index().sort_unique(&mut out);
+                    return Ok(out);
+                }
+                // Climb from each node only until the chain joins one
+                // already climbed.
+                Axis::Ancestor | Axis::AncestorOrSelf => {
+                    let mut seen = HashSet::new();
+                    for &n in ctxs {
+                        let start = out.len();
+                        let mut p = if axis == Axis::AncestorOrSelf {
+                            Some(n)
+                        } else {
+                            doc.parent(n)
+                        };
+                        while let Some(x) = p {
+                            if !seen.insert(x) {
+                                break;
+                            }
+                            out.push(x);
+                            p = doc.parent(x);
+                        }
+                        keep_matching(env, &mut out, start, test, axis)?;
+                    }
+                    env.ctx.index().sort_unique(&mut out);
+                    return Ok(out);
+                }
+                _ => {}
+            }
+        }
+        for &n in ctxs {
+            axis_into(env, n, axis, test, &mut out)?;
+        }
+        if ctxs.len() > 1 {
+            env.ctx.index().sort_unique(&mut out);
+        }
+        return Ok(out);
+    }
+    let reverse = axis.is_reverse();
+    let mut s = Vec::new();
+    for &n in ctxs {
+        s.clear();
+        axis_into(env, n, axis, test, &mut s)?;
+        if reverse {
+            s.reverse();
+        }
+        let mut kept = filter_preds(env, std::mem::take(&mut s), preds)?;
+        if reverse {
+            kept.reverse();
+        }
+        out.extend_from_slice(&kept);
+    }
+    if ctxs.len() > 1 {
+        env.ctx.index().sort_unique(&mut out);
+    }
+    Ok(out)
+}
+
+/// Filters `nodes` (in the order that numbers their proximity positions)
+/// through each predicate in turn.
 fn filter_preds(
-    ctx: &XmlXPathContext<'_>,
+    env: &Env<'_, '_>,
     nodes: Vec<NodeId>,
     preds: &[Expr],
-) -> Result<Vec<NodeId>, String> {
+) -> Result<Vec<NodeId>, XPathError> {
     let mut cur = nodes;
     for pred in preds {
         let size = cur.len();
         let mut kept = Vec::new();
         for (i, n) in cur.iter().enumerate() {
-            let c2 = XmlXPathContext {
-                doc: ctx.doc,
+            let focus = Focus {
                 node: *n,
                 position: i + 1,
                 size,
-                ns: ctx.ns.clone(),
             };
-            let v = eval(pred, &c2)?;
-            let pass = match v {
-                XPathObject::Number(num) => (num as usize) == c2.position,
+            let pass = match eval(pred, env, focus)? {
+                // xmlXPathEvaluatePredicateResult: an exact comparison, so
+                // [1.5] selects nothing.
+                XPathObject::Number(num) => num == focus.position as f64,
                 other => xml_xpath_cast_to_boolean(&other),
             };
             if pass {
@@ -1204,129 +1852,228 @@ fn filter_preds(
     Ok(cur)
 }
 
-fn axis_nodes(
-    doc: &XmlDoc,
+/// Appends to `out` the nodes on `axis` from `n` that pass `test`, in
+/// document order, and charges the nodes visited.
+fn axis_into(
+    env: &Env<'_, '_>,
     n: NodeId,
     axis: Axis,
     test: &NodeTest,
-    ns: &[(String, String)],
-) -> Vec<NodeId> {
-    let mut raw = Vec::new();
+    out: &mut Vec<NodeId>,
+) -> Result<(), XPathError> {
+    let doc = env.doc;
+    let is_attr = doc.kind(n) == NodeKind::Attribute;
+    let start = out.len();
     match axis {
-        Axis::SelfAxis => raw.push(n),
+        Axis::SelfAxis => out.push(n),
         Axis::Child => {
-            let mut c = doc.first_child(n);
-            while let Some(x) = c {
-                raw.push(x);
-                c = doc.next_sibling(x);
+            if !is_attr {
+                let mut c = doc.first_child(n);
+                while let Some(x) = c {
+                    out.push(x);
+                    c = doc.next_sibling(x);
+                }
             }
         }
         Axis::Attribute => {
-            let mut a = doc.first_attr(n);
-            while let Some(x) = a {
-                raw.push(x);
-                a = doc.next_sibling(x);
+            if !is_attr {
+                let mut a = doc.first_attr(n);
+                while let Some(x) = a {
+                    out.push(x);
+                    a = doc.next_sibling(x);
+                }
             }
         }
         Axis::Parent => {
             if let Some(p) = doc.parent(n) {
-                raw.push(p);
+                out.push(p);
             }
         }
-        Axis::Ancestor => {
+        Axis::Ancestor | Axis::AncestorOrSelf => {
+            if axis == Axis::AncestorOrSelf {
+                out.push(n);
+            }
             let mut p = doc.parent(n);
             while let Some(x) = p {
-                raw.push(x);
+                out.push(x);
                 p = doc.parent(x);
             }
+            out[start..].reverse();
         }
-        Axis::AncestorOrSelf => {
-            raw.push(n);
-            let mut p = doc.parent(n);
-            while let Some(x) = p {
-                raw.push(x);
-                p = doc.parent(x);
+        Axis::Descendant | Axis::DescendantOrSelf => {
+            if axis == Axis::DescendantOrSelf {
+                out.push(n);
+            }
+            if !is_attr {
+                collect_desc(doc, n, out);
             }
         }
-        Axis::Descendant => collect_desc(doc, n, &mut raw, false),
-        Axis::DescendantOrSelf => collect_desc(doc, n, &mut raw, true),
         Axis::FollowingSibling => {
-            let mut s = doc.next_sibling(n);
-            while let Some(x) = s {
-                raw.push(x);
-                s = doc.next_sibling(x);
+            if !is_attr {
+                let mut s = doc.next_sibling(n);
+                while let Some(x) = s {
+                    out.push(x);
+                    s = doc.next_sibling(x);
+                }
             }
         }
         Axis::PrecedingSibling => {
-            let mut s = doc.prev_sibling(n);
-            let mut v = Vec::new();
-            while let Some(x) = s {
-                v.push(x);
-                s = doc.prev_sibling(x);
+            if !is_attr {
+                let mut s = doc.prev_sibling(n);
+                while let Some(x) = s {
+                    out.push(x);
+                    s = doc.prev_sibling(x);
+                }
+                out[start..].reverse();
             }
-            v.reverse();
-            raw.extend(v);
         }
         Axis::Following => {
+            // An attribute's following nodes start with its element's
+            // children; neither axis ever holds attributes.
             let mut cur = n;
-            loop {
-                if let Some(s) = doc.next_sibling(cur) {
-                    collect_desc(doc, s, &mut raw, true);
-                    let mut t = doc.next_sibling(s);
-                    while let Some(x) = t {
-                        collect_desc(doc, x, &mut raw, true);
-                        t = doc.next_sibling(x);
+            if is_attr {
+                match doc.parent(n) {
+                    Some(e) => {
+                        collect_desc(doc, e, out);
+                        cur = e;
                     }
-                    cur = s;
-                    // climb for more following
-                    if let Some(p) = doc.parent(cur) {
-                        cur = p;
-                        continue;
-                    }
-                } else if let Some(p) = doc.parent(cur) {
-                    cur = p;
-                    continue;
+                    None => return env.charge(1),
                 }
-                break;
+            }
+            loop {
+                let mut s = doc.next_sibling(cur);
+                while let Some(x) = s {
+                    out.push(x);
+                    collect_desc(doc, x, out);
+                    s = doc.next_sibling(x);
+                }
+                match doc.parent(cur) {
+                    Some(p) => cur = p,
+                    None => break,
+                }
             }
         }
         Axis::Preceding => {
-            // nodes before n in document order, excluding ancestors
-            let order = xml_xpath_order_doc_elems(doc);
-            let mut ancestors = Vec::new();
-            let mut p = Some(n);
-            while let Some(x) = p {
-                ancestors.push(x);
-                p = doc.parent(x);
+            // Built backwards (nearest first), then reversed: for the node
+            // and each ancestor, every earlier sibling's subtree. Ancestors
+            // themselves are never added.
+            let mut cur = n;
+            if is_attr {
+                match doc.parent(n) {
+                    Some(e) => cur = e,
+                    None => return env.charge(1),
+                }
             }
-            if let Some(idx) = order.iter().position(|x| *x == n) {
-                for &id in &order[..idx] {
-                    if !ancestors.contains(&id) {
-                        raw.push(id);
+            let mut sub = Vec::new();
+            loop {
+                let mut s = doc.prev_sibling(cur);
+                while let Some(x) = s {
+                    sub.clear();
+                    sub.push(x);
+                    collect_desc(doc, x, &mut sub);
+                    out.extend(sub.iter().rev());
+                    s = doc.prev_sibling(x);
+                }
+                match doc.parent(cur) {
+                    Some(p) => cur = p,
+                    None => break,
+                }
+            }
+            out[start..].reverse();
+        }
+        // Namespace nodes are not first-class in this tree.
+        Axis::Namespace => {}
+    }
+    keep_matching(env, out, start, test, axis)
+}
+
+/// Charges the nodes an axis visited (`out[start..]`) and keeps those that
+/// pass `test`.
+fn keep_matching(
+    env: &Env<'_, '_>,
+    out: &mut Vec<NodeId>,
+    start: usize,
+    test: &NodeTest,
+    axis: Axis,
+) -> Result<(), XPathError> {
+    let doc = env.doc;
+    env.charge((out.len() - start) as u64 + 1)?;
+    let ns = &env.ctx.ns;
+    let mut w = start;
+    for r in start..out.len() {
+        let id = out[r];
+        if node_test(doc, id, test, ns, axis) {
+            out[w] = id;
+            w += 1;
+        }
+    }
+    out.truncate(w);
+    Ok(())
+}
+
+/// Appends every descendant of `root` (not `root` itself, no attributes) in
+/// document order. Follows the links instead of recursing (#34).
+fn collect_desc(doc: &XmlDoc, root: NodeId, out: &mut Vec<NodeId>) {
+    let Some(mut cur) = doc.first_child(root) else {
+        return;
+    };
+    loop {
+        out.push(cur);
+        if let Some(c) = doc.first_child(cur) {
+            cur = c;
+            continue;
+        }
+        loop {
+            if let Some(s) = doc.next_sibling(cur) {
+                cur = s;
+                break;
+            }
+            match doc.parent(cur) {
+                Some(p) if p != root => cur = p,
+                _ => return,
+            }
+        }
+    }
+}
+
+/// XPath string-value of a node: its own text for a leaf, else the text of
+/// every descendant text node reached through elements, as
+/// `XmlDoc::xml_node_get_content` gives it, but without recursion.
+fn string_value(doc: &XmlDoc, id: NodeId) -> String {
+    match doc.kind(id) {
+        NodeKind::Text
+        | NodeKind::CData
+        | NodeKind::Comment
+        | NodeKind::Pi
+        | NodeKind::Attribute => doc.content(id).to_string(),
+        _ => {
+            let mut out = String::new();
+            let Some(mut cur) = doc.first_child(id) else {
+                return out;
+            };
+            loop {
+                match doc.kind(cur) {
+                    NodeKind::Text | NodeKind::CData => out.push_str(doc.content(cur)),
+                    NodeKind::Element => {
+                        if let Some(c) = doc.first_child(cur) {
+                            cur = c;
+                            continue;
+                        }
+                    }
+                    _ => {}
+                }
+                loop {
+                    if let Some(s) = doc.next_sibling(cur) {
+                        cur = s;
+                        break;
+                    }
+                    match doc.parent(cur) {
+                        Some(p) if p != id => cur = p,
+                        _ => return out,
                     }
                 }
             }
         }
-        Axis::Namespace => {
-            for (pre, _) in doc.ns_defs(n) {
-                let dummy = n; // namespace nodes not first-class; skip
-                let _ = (pre, dummy);
-            }
-        }
-    }
-    raw.into_iter()
-        .filter(|id| node_test(doc, *id, test, ns, axis))
-        .collect()
-}
-
-fn collect_desc(doc: &XmlDoc, n: NodeId, out: &mut Vec<NodeId>, include_self: bool) {
-    if include_self {
-        out.push(n);
-    }
-    let mut c = doc.first_child(n);
-    while let Some(x) = c {
-        collect_desc(doc, x, out, true);
-        c = doc.next_sibling(x);
     }
 }
 
@@ -1373,8 +2120,23 @@ fn node_test(
     }
 }
 
-fn eval_fun(name: &str, args: &[Expr], ctx: &XmlXPathContext<'_>) -> Result<XPathObject, String> {
-    let ev = |i: usize| eval(&args[i], ctx);
+fn eval_fun(
+    name: &str,
+    args: &[Expr],
+    env: &Env<'_, '_>,
+    f: Focus,
+) -> Result<XPathObject, XPathError> {
+    let ctx = env.ctx;
+    let doc = env.doc;
+    // A missing argument is libxml2's XPATH_INVALID_ARITY. Indexing `args`
+    // directly panicked on `count()` or `substring('a')`, which aborts the
+    // caller's thread on an expression it may not control.
+    let ev = |i: usize| match args.get(i) {
+        Some(a) => eval(a, env, f),
+        None => Err(XPathError::Eval(format!(
+            "Invalid number of arguments to {name}()"
+        ))),
+    };
     let local = name.rsplit(':').next().unwrap_or(name);
     match local {
         "true" => Ok(XPathObject::Boolean(true)),
@@ -1383,7 +2145,7 @@ fn eval_fun(name: &str, args: &[Expr], ctx: &XmlXPathContext<'_>) -> Result<XPat
         "boolean" => Ok(XPathObject::Boolean(xml_xpath_cast_to_boolean(&ev(0)?))),
         "number" => {
             let o = if args.is_empty() {
-                XPathObject::NodeSet(vec![ctx.node])
+                XPathObject::NodeSet(vec![f.node])
             } else {
                 ev(0)?
             };
@@ -1391,51 +2153,53 @@ fn eval_fun(name: &str, args: &[Expr], ctx: &XmlXPathContext<'_>) -> Result<XPat
         }
         "string" => {
             let o = if args.is_empty() {
-                XPathObject::NodeSet(vec![ctx.node])
+                XPathObject::NodeSet(vec![f.node])
             } else {
                 ev(0)?
             };
             Ok(XPathObject::String(xml_xpath_cast_to_string(&o, ctx)))
         }
-        "last" => Ok(XPathObject::Number(ctx.size as f64)),
-        "position" => Ok(XPathObject::Number(ctx.position as f64)),
+        "last" => Ok(XPathObject::Number(f.size as f64)),
+        "position" => Ok(XPathObject::Number(f.position as f64)),
         "count" => Ok(XPathObject::Number(nodeset(ev(0)?).len() as f64)),
         "local-name" => {
             let ns = if args.is_empty() {
-                vec![ctx.node]
-            } else {
-                nodeset(ev(0)?)
-            };
-            Ok(XPathObject::String(
-                ns.first().map(|id| ctx.doc.name(*id).to_string()).unwrap_or_default(),
-            ))
-        }
-        "name" => {
-            let ns = if args.is_empty() {
-                vec![ctx.node]
-            } else {
-                nodeset(ev(0)?)
-            };
-            Ok(XPathObject::String(
-                ns.first().map(|id| ctx.doc.qname(*id)).unwrap_or_default(),
-            ))
-        }
-        "namespace-uri" => {
-            let ns = if args.is_empty() {
-                vec![ctx.node]
+                vec![f.node]
             } else {
                 nodeset(ev(0)?)
             };
             Ok(XPathObject::String(
                 ns.first()
-                    .and_then(|id| ctx.doc.ns_uri(*id).map(str::to_string))
+                    .map(|id| doc.name(*id).to_string())
+                    .unwrap_or_default(),
+            ))
+        }
+        "name" => {
+            let ns = if args.is_empty() {
+                vec![f.node]
+            } else {
+                nodeset(ev(0)?)
+            };
+            Ok(XPathObject::String(
+                ns.first().map(|id| doc.qname(*id)).unwrap_or_default(),
+            ))
+        }
+        "namespace-uri" => {
+            let ns = if args.is_empty() {
+                vec![f.node]
+            } else {
+                nodeset(ev(0)?)
+            };
+            Ok(XPathObject::String(
+                ns.first()
+                    .and_then(|id| doc.ns_uri(*id).map(str::to_string))
                     .unwrap_or_default(),
             ))
         }
         "concat" => {
             let mut s = String::new();
             for a in args {
-                s.push_str(&xml_xpath_cast_to_string(&eval(a, ctx)?, ctx));
+                s.push_str(&xml_xpath_cast_to_string(&eval(a, env, f)?, ctx));
             }
             Ok(XPathObject::String(s))
         }
@@ -1453,14 +2217,18 @@ fn eval_fun(name: &str, args: &[Expr], ctx: &XmlXPathContext<'_>) -> Result<XPat
             let a = xml_xpath_cast_to_string(&ev(0)?, ctx);
             let b = xml_xpath_cast_to_string(&ev(1)?, ctx);
             Ok(XPathObject::String(
-                a.split_once(&b).map(|(x, _)| x.to_string()).unwrap_or_default(),
+                a.split_once(&b)
+                    .map(|(x, _)| x.to_string())
+                    .unwrap_or_default(),
             ))
         }
         "substring-after" => {
             let a = xml_xpath_cast_to_string(&ev(0)?, ctx);
             let b = xml_xpath_cast_to_string(&ev(1)?, ctx);
             Ok(XPathObject::String(
-                a.split_once(&b).map(|(_, x)| x.to_string()).unwrap_or_default(),
+                a.split_once(&b)
+                    .map(|(_, x)| x.to_string())
+                    .unwrap_or_default(),
             ))
         }
         "substring" => {
@@ -1484,7 +2252,7 @@ fn eval_fun(name: &str, args: &[Expr], ctx: &XmlXPathContext<'_>) -> Result<XPat
         }
         "string-length" => {
             let s = if args.is_empty() {
-                ctx.doc.xml_node_get_content(ctx.node)
+                string_value(doc, f.node)
             } else {
                 xml_xpath_cast_to_string(&ev(0)?, ctx)
             };
@@ -1492,7 +2260,7 @@ fn eval_fun(name: &str, args: &[Expr], ctx: &XmlXPathContext<'_>) -> Result<XPat
         }
         "normalize-space" => {
             let s = if args.is_empty() {
-                ctx.doc.xml_node_get_content(ctx.node)
+                string_value(doc, f.node)
             } else {
                 xml_xpath_cast_to_string(&ev(0)?, ctx)
             };
@@ -1502,16 +2270,27 @@ fn eval_fun(name: &str, args: &[Expr], ctx: &XmlXPathContext<'_>) -> Result<XPat
         }
         "translate" => {
             let s = xml_xpath_cast_to_string(&ev(0)?, ctx);
-            let from: Vec<char> = xml_xpath_cast_to_string(&ev(1)?, ctx).chars().collect();
+            let from = xml_xpath_cast_to_string(&ev(1)?, ctx);
             let to: Vec<char> = xml_xpath_cast_to_string(&ev(2)?, ctx).chars().collect();
+            // libxml2 charges translate() as quadratic, which its loop is;
+            // the same charge keeps an op limit refusing the same calls.
+            if env.limit != 0 && !s.is_empty() && !from.is_empty() {
+                let f1 = s.len() as u64 / 10 + 1;
+                let f2 = from.len() as u64 / 10 + 1;
+                env.charge(f1.saturating_mul(f2))?;
+            }
+            // First occurrence in `from` wins; a char past the end of `to`
+            // is deleted. One map lookup per char instead of a scan of
+            // `from`, which made this O(len(s) * len(from)).
+            let mut map: HashMap<char, Option<char>> = HashMap::new();
+            for (i, c) in from.chars().enumerate() {
+                map.entry(c).or_insert_with(|| to.get(i).copied());
+            }
             let out: String = s
                 .chars()
-                .filter_map(|c| {
-                    if let Some(i) = from.iter().position(|x| *x == c) {
-                        to.get(i).copied()
-                    } else {
-                        Some(c)
-                    }
+                .filter_map(|c| match map.get(&c) {
+                    Some(m) => *m,
+                    None => Some(c),
                 })
                 .collect();
             Ok(XPathObject::String(out))
@@ -1530,35 +2309,42 @@ fn eval_fun(name: &str, args: &[Expr], ctx: &XmlXPathContext<'_>) -> Result<XPat
             let ns = nodeset(ev(0)?);
             let mut t = 0.0;
             for id in ns {
-                t += xpath_number(&ctx.doc.xml_node_get_content(id));
+                t += xpath_number(&string_value(doc, id));
             }
             Ok(XPathObject::Number(t))
         }
         "id" => {
             let ids = xml_xpath_cast_to_string(&ev(0)?, ctx);
+            let toks: HashSet<&str> = ids.split_whitespace().collect();
+            env.charge(toks.len() as u64)?;
             let mut found = Vec::new();
-            let order = xml_xpath_order_doc_elems(ctx.doc);
-            for tok in ids.split_whitespace() {
-                for id in &order {
-                    if ctx.doc.kind(*id) == NodeKind::Element
-                        && ctx.doc.xml_get_prop(*id, "id").as_deref() == Some(tok)
-                    {
-                        found.push(*id);
+            if !toks.is_empty() {
+                // One pass over the document, not one per token.
+                let mut els = Vec::new();
+                walk_doc_order(doc, |id| els.push(id), |_| {});
+                env.charge(els.len() as u64)?;
+                for id in els {
+                    if doc.kind(id) == NodeKind::Element {
+                        if let Some(v) = doc.xml_get_prop(id, "id") {
+                            if toks.contains(v.as_str()) {
+                                found.push(id);
+                            }
+                        }
                     }
                 }
             }
-            Ok(XPathObject::NodeSet(sort_unique(ctx.doc, found)))
+            Ok(XPathObject::NodeSet(found))
         }
         "lang" => {
             let want = xml_xpath_cast_to_string(&ev(0)?, ctx).to_ascii_lowercase();
-            let mut cur = Some(ctx.node);
+            let mut cur = Some(f.node);
             let mut lang = None;
             while let Some(id) = cur {
-                if let Some(l) = ctx.doc.xml_get_prop(id, "lang") {
+                if let Some(l) = doc.xml_get_prop(id, "lang") {
                     lang = Some(l);
                     break;
                 }
-                cur = ctx.doc.parent(id);
+                cur = doc.parent(id);
             }
             let ok = lang
                 .map(|l| {
@@ -1568,7 +2354,7 @@ fn eval_fun(name: &str, args: &[Expr], ctx: &XmlXPathContext<'_>) -> Result<XPat
                 .unwrap_or(false);
             Ok(XPathObject::Boolean(ok))
         }
-        _ => Err(format!("unknown function {name}")),
+        _ => Err(format!("unknown function {name}").into()),
     }
 }
 

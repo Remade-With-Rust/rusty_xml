@@ -21,7 +21,7 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 
-use rusty_xml_tree::{Interrupt, InterruptPoll, NodeId, NodeKind, XmlDoc};
+use rusty_xml_tree::{Interrupt, NodeId, NodeKind, XmlDoc};
 
 use crate::error::XmlError;
 use crate::html_entities::{decode_html, Nul};
@@ -269,16 +269,12 @@ fn html_parse_str(
         noimplied: (options & HTML_PARSE_NOIMPLIED) != 0,
         attrs: Vec::new(),
         has_nul,
-        interrupt: interrupt.map(InterruptPoll::new),
+        interrupt,
+        limit: if interrupt.is_some() { POLL_BYTES.min(text.len()) } else { text.len() },
         stopped: false,
         deep: None,
     };
-    // Monomorphized: the plain parse has no poll in its loops at all.
-    if p.interrupt.is_some() {
-        p.document::<true>();
-    } else {
-        p.document::<false>();
-    }
+    p.document();
     if p.stopped {
         return Err(interrupted());
     }
@@ -291,6 +287,9 @@ struct Open {
     node: NodeId,
     tag: Tag,
 }
+
+/// Input bytes parsed between two polls of an interruptible parse.
+const POLL_BYTES: usize = 16 * 1024;
 
 /// Stack depth at which the open-element stack gets an index.
 ///
@@ -390,7 +389,11 @@ struct Parser<'a> {
     attrs: Vec<(Cow<'a, str>, Option<Cow<'a, str>>)>,
     /// The input has a NUL somewhere; without one, no run needs scanning.
     has_nul: bool,
-    interrupt: Option<InterruptPoll<'a>>,
+    interrupt: Option<&'a dyn Interrupt>,
+    /// Where the content loop stops to poll the interrupt: the end of the
+    /// input without one, so the plain parse pays nothing per token and the
+    /// loop is compiled once for both paths.
+    limit: usize,
     /// The interrupt fired.
     stopped: bool,
     /// Present only while the stack is deep; see [`DEEP`].
@@ -435,22 +438,29 @@ impl<'a> Parser<'a> {
 
     // ---- document and content (htmlParseDocument, htmlParseContent) ----
 
-    /// Count one token; true once the interrupt has fired.
+    /// Poll the interrupt and move `limit` on by [`POLL_BYTES`]; true once
+    /// it has fired.
     #[cold]
     #[inline(never)]
     fn poll(&mut self) -> bool {
-        if let Some(p) = self.interrupt.as_mut() {
-            if p.tick().is_err() {
+        if let Some(i) = self.interrupt {
+            if i.is_interrupted() {
                 self.stopped = true;
+                return true;
             }
         }
-        self.stopped
+        self.limit = if self.interrupt.is_some() {
+            self.pos.saturating_add(POLL_BYTES).min(self.b.len())
+        } else {
+            self.b.len()
+        };
+        false
     }
 
-    fn document<const W: bool>(&mut self) {
+    fn document(&mut self) {
         self.skip_blanks();
         while self.peek(0) == Some(b'<') {
-            if W && self.poll() {
+            if self.pos >= self.limit && self.poll() {
                 return;
             }
             match self.peek(1) {
@@ -473,14 +483,21 @@ impl<'a> Parser<'a> {
             }
             self.skip_blanks();
         }
-        self.content::<W>();
+        self.content();
     }
 
-    fn content<const W: bool>(&mut self) {
-        while self.pos < self.b.len() {
-            if W && self.poll() {
+    fn content(&mut self) {
+        loop {
+            self.content_until_limit();
+            if self.pos >= self.b.len() || self.poll() {
                 return;
             }
+        }
+    }
+
+    #[inline(always)]
+    fn content_until_limit(&mut self) {
+        while self.pos < self.limit {
             if self.mode != 0 || self.b[self.pos] != b'<' {
                 self.char_data();
                 continue;
@@ -524,6 +541,7 @@ impl<'a> Parser<'a> {
 
     /// Create an element under the current node (the document if none) and
     /// make it current.
+    #[inline]
     fn open(&mut self, name: &str, tag: Tag) -> NodeId {
         let el = self.doc.xml_new_node(None, name);
         let parent = self.top().map_or(NodeId::DOCUMENT, |o| o.node);
@@ -541,9 +559,19 @@ impl<'a> Parser<'a> {
     #[inline]
     fn push_open(&mut self, o: Open) {
         self.stack.push(o);
+        // One compare on the common path: the index exists only at or past
+        // DEEP, so a shallower stack can skip both arms.
+        if self.stack.len() >= DEEP {
+            self.push_deep(o);
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn push_deep(&mut self, o: Open) {
         if let Some(d) = self.deep.as_mut() {
             d.push(self.stack.len() - 1, o, &self.doc);
-        } else if self.stack.len() >= DEEP {
+        } else {
             self.deep = Some(Box::new(DeepIndex::build(&self.stack, &self.doc)));
         }
     }
@@ -551,12 +579,20 @@ impl<'a> Parser<'a> {
     #[inline]
     fn pop_open(&mut self) {
         if let Some(o) = self.stack.pop() {
-            if let Some(d) = self.deep.as_mut() {
-                d.pop(o, &self.doc);
-                // Hysteresis: hovering around DEEP does not rebuild per tag.
-                if self.stack.len() < DEEP / 2 {
-                    self.deep = None;
-                }
+            if self.deep.is_some() {
+                self.pop_deep(o);
+            }
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn pop_deep(&mut self, o: Open) {
+        if let Some(d) = self.deep.as_mut() {
+            d.pop(o, &self.doc);
+            // Hysteresis: hovering around DEEP does not rebuild per tag.
+            if self.stack.len() < DEEP / 2 {
+                self.deep = None;
             }
         }
     }

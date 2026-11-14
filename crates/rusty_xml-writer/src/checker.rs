@@ -4,10 +4,14 @@
 use rusty_xml_tree::{InterruptCheck, Interrupted};
 
 pub(crate) trait Checker {
+    /// False for `NoCheck`: the plain functions then take the loop that has no check in it.
+    const ACTIVE: bool;
     fn tick(&mut self) -> Result<(), Interrupted>;
 }
 
 impl Checker for InterruptCheck<'_> {
+    const ACTIVE: bool = true;
+
     #[inline]
     fn tick(&mut self) -> Result<(), Interrupted> {
         self.check()
@@ -17,6 +21,8 @@ impl Checker for InterruptCheck<'_> {
 pub(crate) struct NoCheck;
 
 impl Checker for NoCheck {
+    const ACTIVE: bool = false;
+
     #[inline(always)]
     fn tick(&mut self) -> Result<(), Interrupted> {
         Ok(())

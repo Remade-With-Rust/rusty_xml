@@ -155,7 +155,15 @@ enum Step {
 /// frame per level of document nesting, so a 2000-deep tree -- well inside the
 /// parser's own limit of 5000 -- overflowed the stack while being SAVED.
 /// Accepting a document the writer cannot serialize just moves the cliff.
-fn write_node(
+fn write_node(doc: &XmlDoc, id: NodeId, out: &mut String, opts: i32, level: i32, format: bool) {
+    let mut stack: Vec<Step> = vec![Step::Open(id, level, format)];
+    while write_step(doc, out, opts, &mut stack) {}
+}
+
+/// `write_node` with one check per step (a node, its indent, its newline or its end tag). The two
+/// drivers share `write_step`, inlined into both: as a generic loop or as a function with two
+/// callers the unchecked path lost 0.7% to 3.7% Ir to code shape, over its budget.
+fn write_node_checked(
     doc: &XmlDoc,
     id: NodeId,
     out: &mut String,
@@ -165,29 +173,56 @@ fn write_node(
     check: &mut impl Checker,
 ) -> Result<(), Interrupted> {
     let mut stack: Vec<Step> = vec![Step::Open(id, level, format)];
-    while let Some(step) = stack.pop() {
-        match step {
-            Step::Indent(l) => write_indent(out, l),
-            Step::Newline => out.push('\n'),
-            Step::Close(id, level, child_format) => {
-                if child_format {
-                    write_indent(out, level);
-                }
-                out.push_str("</");
-                out.push_str(&qname(doc.prefix(id), doc.name(id)));
-                out.push('>');
-            }
-            Step::Open(id, level, format) => {
-                // One check per node emitted.
-                check.tick()?;
-                write_one(doc, id, out, opts, level, format, &mut stack)
-            }
+    loop {
+        check.tick()?;
+        if !write_step(doc, out, opts, &mut stack) {
+            return Ok(());
         }
     }
-    Ok(())
+}
+
+/// The walk the plain functions use when `C` never stops, the checked one otherwise.
+fn walk<C: Checker>(
+    doc: &XmlDoc,
+    id: NodeId,
+    out: &mut String,
+    opts: i32,
+    level: i32,
+    format: bool,
+    check: &mut C,
+) -> Result<(), Interrupted> {
+    if C::ACTIVE {
+        write_node_checked(doc, id, out, opts, level, format, check)
+    } else {
+        write_node(doc, id, out, opts, level, format);
+        Ok(())
+    }
+}
+
+/// Handles the next step; false when the stack is empty.
+#[inline(always)]
+fn write_step(doc: &XmlDoc, out: &mut String, opts: i32, stack: &mut Vec<Step>) -> bool {
+    let Some(step) = stack.pop() else {
+        return false;
+    };
+    match step {
+        Step::Indent(l) => write_indent(out, l),
+        Step::Newline => out.push('\n'),
+        Step::Close(id, level, child_format) => {
+            if child_format {
+                write_indent(out, level);
+            }
+            out.push_str("</");
+            out.push_str(&qname(doc.prefix(id), doc.name(id)));
+            out.push('>');
+        }
+        Step::Open(id, level, format) => write_one(doc, id, out, opts, level, format, stack),
+    }
+    true
 }
 
 /// Emit a single node, pushing whatever work its children require.
+#[inline(always)]
 fn write_one(
     doc: &XmlDoc,
     id: NodeId,
@@ -402,7 +437,7 @@ fn save_inner(
     let format = (options & XML_SAVE_FORMAT) != 0;
     let mut child = doc.first_child(rusty_xml_tree::NodeId::DOCUMENT);
     while let Some(id) = child {
-        write_node(doc, id, &mut out, options, 0, format, check)?;
+        walk(doc, id, &mut out, options, 0, format, check)?;
         out.push('\n');
         child = doc.next_sibling(id);
     }
@@ -501,7 +536,7 @@ fn node_dump_inner(
     check: &mut impl Checker,
 ) -> Result<Vec<u8>, Interrupted> {
     let mut out = String::new();
-    write_node(doc, node, &mut out, options, 0, (options & XML_SAVE_FORMAT) != 0, check)?;
+    walk(doc, node, &mut out, options, 0, (options & XML_SAVE_FORMAT) != 0, check)?;
     Ok(out.into_bytes())
 }
 
@@ -841,7 +876,7 @@ fn save_html_doc(
     let format = (options & XML_SAVE_FORMAT) != 0;
     let mut child = doc.first_child(rusty_xml_tree::NodeId::DOCUMENT);
     while let Some(id) = child {
-        write_node(doc, id, &mut out, options, 0, format, check)?;
+        walk(doc, id, &mut out, options, 0, format, check)?;
         child = doc.next_sibling(id);
     }
     // htmlNodeDumpInternal writes one newline when it climbs back to the

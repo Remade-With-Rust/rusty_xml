@@ -271,6 +271,7 @@ fn html_parse_str(
         has_nul,
         interrupt: interrupt.map(InterruptPoll::new),
         stopped: false,
+        deep: None,
     };
     // Monomorphized: the plain parse has no poll in its loops at all.
     if p.interrupt.is_some() {
@@ -289,6 +290,86 @@ fn html_parse_str(
 struct Open {
     node: NodeId,
     tag: Tag,
+}
+
+/// Stack depth at which the open-element stack gets an index.
+///
+/// libxml2 caps HTML nesting at 256 (2048 with `XML_PARSE_HUGE`), so its
+/// linear scans of the stack stay cheap. This parser has no cap, and the same
+/// scans made an end tag that matches nothing, or a stray `<body>`, cost the
+/// whole depth: 80,000 unmatched end tags under 80,000 open elements took
+/// 3.8 s (#41). Below this depth the scans are faster than any index.
+const DEEP: usize = 256;
+
+/// End priorities in use (`tags::end_priority`), one slot each.
+const PRI_SLOTS: [u8; 8] = [100, 150, 160, 170, 180, 190, 200, 220];
+
+fn pri_slot(p: u8) -> usize {
+    PRI_SLOTS.iter().position(|&x| x == p).unwrap_or(0)
+}
+
+/// Where each tag, unknown name and end priority sits on a deep stack: the
+/// positions of its open elements, the top one last.
+struct DeepIndex {
+    by_tag: Vec<Vec<u32>>,
+    by_name: std::collections::HashMap<String, Vec<u32>>,
+    by_pri: [Vec<u32>; 8],
+}
+
+impl DeepIndex {
+    fn build(stack: &[Open], doc: &XmlDoc) -> Self {
+        let mut d = DeepIndex {
+            by_tag: vec![Vec::new(); tags::NT],
+            by_name: std::collections::HashMap::new(),
+            by_pri: Default::default(),
+        };
+        for (i, o) in stack.iter().enumerate() {
+            d.push(i, *o, doc);
+        }
+        d
+    }
+
+    fn push(&mut self, i: usize, o: Open, doc: &XmlDoc) {
+        let i = i as u32;
+        if o.tag == UNKNOWN {
+            self.by_name.entry(doc.name(o.node).to_string()).or_default().push(i);
+        } else {
+            self.by_tag[o.tag as usize].push(i);
+        }
+        self.by_pri[pri_slot(tags::end_priority(o.tag))].push(i);
+    }
+
+    fn pop(&mut self, o: Open, doc: &XmlDoc) {
+        if o.tag == UNKNOWN {
+            if let Some(v) = self.by_name.get_mut(doc.name(o.node)) {
+                v.pop();
+            }
+        } else {
+            self.by_tag[o.tag as usize].pop();
+        }
+        self.by_pri[pri_slot(tags::end_priority(o.tag))].pop();
+    }
+
+    fn top_of(&self, tag: Tag, name: &str) -> Option<usize> {
+        let v = if tag == UNKNOWN {
+            self.by_name.get(name)?
+        } else {
+            &self.by_tag[tag as usize]
+        };
+        v.last().map(|&i| i as usize)
+    }
+
+    fn has(&self, tag: Tag) -> bool {
+        !self.by_tag[tag as usize].is_empty()
+    }
+
+    /// Is there an element above `at` whose end priority exceeds `pri`?
+    fn higher_above(&self, at: usize, pri: u8) -> bool {
+        PRI_SLOTS
+            .iter()
+            .zip(&self.by_pri)
+            .any(|(&p, v)| p > pri && v.last().is_some_and(|&i| i as usize > at))
+    }
 }
 
 struct Parser<'a> {
@@ -312,6 +393,8 @@ struct Parser<'a> {
     interrupt: Option<InterruptPoll<'a>>,
     /// The interrupt fired.
     stopped: bool,
+    /// Present only while the stack is deep; see [`DEEP`].
+    deep: Option<Box<DeepIndex>>,
 }
 
 impl<'a> Parser<'a> {
@@ -451,8 +534,49 @@ impl<'a> Parser<'a> {
         if tag == BODY && self.insert < INSERT_IN_BODY {
             self.insert = INSERT_IN_BODY;
         }
-        self.stack.push(Open { node: el, tag });
+        self.push_open(Open { node: el, tag });
         el
+    }
+
+    #[inline]
+    fn push_open(&mut self, o: Open) {
+        self.stack.push(o);
+        if let Some(d) = self.deep.as_mut() {
+            d.push(self.stack.len() - 1, o, &self.doc);
+        } else if self.stack.len() >= DEEP {
+            self.deep = Some(Box::new(DeepIndex::build(&self.stack, &self.doc)));
+        }
+    }
+
+    #[inline]
+    fn pop_open(&mut self) {
+        if let Some(o) = self.stack.pop() {
+            if let Some(d) = self.deep.as_mut() {
+                d.pop(o, &self.doc);
+                // Hysteresis: hovering around DEEP does not rebuild per tag.
+                if self.stack.len() < DEEP / 2 {
+                    self.deep = None;
+                }
+            }
+        }
+    }
+
+    fn truncate_open(&mut self, at: usize) {
+        if self.deep.is_none() {
+            self.stack.truncate(at);
+            return;
+        }
+        while self.stack.len() > at {
+            self.pop_open();
+        }
+    }
+
+    /// Is an element with this (known) tag open?
+    fn is_open(&self, tag: Tag) -> bool {
+        match &self.deep {
+            Some(d) => d.has(tag),
+            None => self.stack.iter().any(|o| o.tag == tag),
+        }
     }
 
     fn open_implied(&mut self, tag: Tag) {
@@ -468,7 +592,7 @@ impl<'a> Parser<'a> {
             if !tags::start_closes(new, o.tag) {
                 break;
             }
-            self.stack.pop();
+            self.pop_open();
         }
     }
 
@@ -492,7 +616,7 @@ impl<'a> Parser<'a> {
             if self.insert >= INSERT_IN_BODY {
                 return;
             }
-            if self.stack.iter().any(|o| o.tag == BODY || o.tag == HEAD) {
+            if self.is_open(BODY) || self.is_open(HEAD) {
                 return;
             }
             self.open_implied(BODY);
@@ -703,7 +827,7 @@ impl<'a> Parser<'a> {
         if tag == HEAD && self.stack.len() != 1 {
             discard = true;
         }
-        if tag == BODY && self.stack.iter().any(|o| o.tag == BODY) {
+        if tag == BODY && self.is_open(BODY) {
             discard = true;
         }
         if discard {
@@ -723,7 +847,7 @@ impl<'a> Parser<'a> {
         let Some(top) = self.top() else { return };
         if self.b[self.pos..].starts_with(b"/>") {
             self.pos += 2;
-            self.stack.pop();
+            self.pop_open();
             return;
         }
         if self.b[self.pos] != b'>' {
@@ -731,7 +855,7 @@ impl<'a> Parser<'a> {
         }
         self.pos += 1;
         if tags::is_empty(top.tag) {
-            self.stack.pop();
+            self.pop_open();
         } else {
             self.mode = tags::data_mode(top.tag);
         }
@@ -822,6 +946,16 @@ impl<'a> Parser<'a> {
         let tag = tags::tag_of(name.as_bytes());
         if self.depth > 0 && (tag == HTML || tag == BODY || tag == HEAD) {
             self.depth -= 1;
+            return;
+        }
+        if let Some(d) = &self.deep {
+            let Some(at) = d.top_of(tag, name.as_ref()) else {
+                return;
+            };
+            if d.higher_above(at, tags::end_priority(tag)) {
+                return;
+            }
+            self.truncate_open(at);
             return;
         }
         // Known elements match by tag; only unknown ones compare names.

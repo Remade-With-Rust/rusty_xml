@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-v0.9.0...rusty_xml-v0.9.1) - 2026-11-14
+
+### Changed
+
+- `xml_xpath_cmp_nodes` now returns libxml2's `xmlXPathCmpNodes` values: 1 when the first node precedes the second, -1 when it follows, 0 for the same node, -2 for a node outside the document or nodes in different trees. 0.9.0 returned the opposite sign. Callers that sort with it, or test `== 1` for "before", should check their order (#38).
+
+### Added
+
+- *(tree)* add the Interrupt trait for cooperative cancellation ([#39](https://github.com/Remade-With-Rust/rusty_xml/pull/39))
+
+### Fixed
+
+- *(parser)* report the error a recovering parse survived; pin #44 and #45
+- *(parser)* close the unbounded paths found in the #41 review
+- *(parser)* bound entity amplification as libxml2 does, keep push errors, add stop and cancel controls (#32, #35, #39, #40)
+
+### Other
+
+- state the new depth, amplification, content-model, XPath and cancellation guarantees
+- Merge branch 'fix/valid-36-39' into int/issues-32-41
+- Merge branch 'fix/xpath-34-37-38-40' into int/issues-32-41
+- *(html)* keep the deep-stack test's stack deep
+
 ## [0.9.0](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-v0.8.5...rusty_xml-v0.9.0) - 2026-11-13
 
 ### Fixed

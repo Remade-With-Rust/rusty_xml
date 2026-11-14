@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-tree-v0.9.0...rusty_xml-tree-v0.9.1) - 2026-11-14
+
+### Added
+
+- *(tree)* add the Interrupt trait for cooperative cancellation ([#39](https://github.com/Remade-With-Rust/rusty_xml/pull/39))
+
+### Fixed
+
+- *(parser)* report the error a recovering parse survived; pin #44 and #45
+- *(tree)* read node content without recursing per level ([#41](https://github.com/Remade-With-Rust/rusty_xml/pull/41))
+
 ## [0.9.0](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-tree-v0.8.5...rusty_xml-tree-v0.9.0) - 2026-11-13
 
 ### Other

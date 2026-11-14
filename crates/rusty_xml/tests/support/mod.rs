@@ -3,7 +3,8 @@ pub mod golden;
 
 use rusty_xml::{
     xml_ctxt_read_memory_with_interrupt, xml_new_parser_ctxt, xml_read_io_with_interrupt,
-    xml_parse_dtd_with_interrupt, xml_read_memory_with_interrupt,
+    xml_create_push_parser_ctxt, xml_parse_chunk_with_interrupt, xml_parse_dtd_with_interrupt,
+    xml_read_memory_with_interrupt,
     xml_sax_parse_memory_with_interrupt, InterruptCheck,
     InterruptError, SaxRecorder, XmlDoc, XmlError, XML_ERR_USER_STOP,
 };
@@ -118,6 +119,17 @@ pub fn run_interrupt(dir: &Path, case: &golden::Case) -> String {
                 &mut check,
             );
             golden::render_sax(&rec, r)
+        }
+        "push" | "pushlist" => {
+            let chunks = golden::push_chunks(dir, case);
+            let mut ctxt = xml_create_push_parser_ctxt(&[], None, None, 0);
+            let last = chunks.len() - 1;
+            let results: Vec<_> = chunks
+                .iter()
+                .enumerate()
+                .map(|(i, c)| xml_parse_chunk_with_interrupt(&mut ctxt, c, i32::from(i == last), &mut check))
+                .collect();
+            golden::render_push(&results)
         }
         "dtd" => golden::render_dtd(xml_parse_dtd_with_interrupt(
             &golden::file(dir, &a[0]),

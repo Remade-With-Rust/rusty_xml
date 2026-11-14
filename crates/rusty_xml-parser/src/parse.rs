@@ -284,6 +284,8 @@ pub struct XmlPushParserCtxt {
     /// streaming path works on raw bytes and cannot convert as it goes, so
     /// those documents are buffered whole, as they were before streaming.
     no_stream: bool,
+    /// Set once an interrupt has stopped this context; every later chunk returns it unparsed.
+    stopped: Option<XmlError>,
 }
 
 impl XmlPushParserCtxt {
@@ -323,6 +325,7 @@ pub fn xml_create_push_parser_ctxt(
         state: None,
         consumed: 0,
         no_stream: false,
+        stopped: None,
     }
 }
 
@@ -333,10 +336,56 @@ pub fn xml_parse_chunk(
     chunk: &[u8],
     terminate: i32,
 ) -> Result<Option<XmlDoc>, XmlError> {
+    parse_chunk_inner(ctxt, chunk, terminate, &mut NoCheck)
+}
+
+/// Like [`xml_parse_chunk`], but fails with `XML_ERR_USER_STOP` once `check` reports an interrupt.
+/// The context is then stopped for good: every later chunk, through either function, returns the
+/// same error without parsing.
+pub fn xml_parse_chunk_with_interrupt(
+    ctxt: &mut XmlPushParserCtxt,
+    chunk: &[u8],
+    terminate: i32,
+    check: &mut InterruptCheck<'_>,
+) -> Result<Option<XmlDoc>, XmlError> {
+    parse_chunk_inner(ctxt, chunk, terminate, check)
+}
+
+fn parse_chunk_inner<C: Checker>(
+    ctxt: &mut XmlPushParserCtxt,
+    chunk: &[u8],
+    terminate: i32,
+    check: &mut C,
+) -> Result<Option<XmlDoc>, XmlError> {
+    if let Some(e) = &ctxt.stopped {
+        return Err(e.clone());
+    }
+    let result = match check.tick() {
+        Ok(()) => parse_chunk_body(ctxt, chunk, terminate, check),
+        Err(_) => Err(stop_error(0, 0)),
+    };
+    if check.is_stopped() {
+        // A stop is never a result, wherever a branch below discarded it.
+        let e = match result {
+            Err(e) if e.code == XML_ERR_USER_STOP => e,
+            _ => stop_error(0, 0),
+        };
+        ctxt.last_error = Some(e.clone());
+        ctxt.stopped = Some(e.clone());
+        return Err(e);
+    }
+    result
+}
+
+fn parse_chunk_body<C: Checker>(
+    ctxt: &mut XmlPushParserCtxt,
+    chunk: &[u8],
+    terminate: i32,
+    check: &mut C,
+) -> Result<Option<XmlDoc>, XmlError> {
     ctxt.buf.extend_from_slice(chunk);
     let terminate = terminate != 0;
     let opts = ctxt.options;
-    let mut check = NoCheck;
 
     // Phase 1 -- prolog. Nothing can stream until the root's start tag is in
     // hand, so buffer until it parses. The prolog is small, and re-parsing it
@@ -354,12 +403,14 @@ pub fn xml_parse_chunk(
     if ctxt.state.is_none() && !ctxt.no_stream {
         let mut sink = rusty_xml_sax::NullSax;
         let started = {
-            let mut p = fresh_parser(&ctxt.buf, opts, &mut sink, &mut check);
+            let mut p = fresh_parser(&ctxt.buf, opts, &mut sink, check);
             match p.parse_prolog().and_then(|()| p.open_element(NodeId::DOCUMENT)) {
                 Ok(Some(root)) => {
                     let at = p.pos;
                     Some((p.suspend(vec![root], false), at))
                 }
+                // A stop must reach the caller, not fall back to a whole parse.
+                Err(e) if p.check.is_stopped() => return Err(e),
                 // `<root/>`, or not enough input yet, or a real error. All three
                 // are handled by parsing the buffer whole -- which for the empty
                 // root is correct and for an error reports it at the right time.
@@ -376,7 +427,7 @@ pub fn xml_parse_chunk(
                 if !terminate {
                     return Ok(None);
                 }
-                return finish_whole(ctxt);
+                return finish_whole(ctxt, check);
             }
         }
     }
@@ -385,7 +436,7 @@ pub fn xml_parse_chunk(
         if !terminate {
             return Ok(None);
         }
-        return finish_whole(ctxt);
+        return finish_whole(ctxt, check);
     }
 
     // Phase 2 -- content, streamed. Parse as far as the buffer allows, then
@@ -395,7 +446,7 @@ pub fn xml_parse_chunk(
     let mut st = ctxt.state.take().expect("state is present past the prolog");
     let mut open = std::mem::take(&mut st.open);
     let was_closed = st.root_closed;
-    let mut p = Parser::resume(&ctxt.buf, opts, &mut sink, st, &mut check);
+    let mut p = Parser::resume(&ctxt.buf, opts, &mut sink, st, check);
 
     // Once the root has closed, everything left is epilogue; re-entering the
     // content loop would parse trailing whitespace as document content.
@@ -422,7 +473,7 @@ pub fn xml_parse_chunk(
     }
 
     if let Some(o) = open.last() {
-        let (_, local) = Parser::<NoCheck>::split_qname(&o.qname).unwrap_or((None, &o.qname));
+        let (_, local) = Parser::<C>::split_qname(&o.qname).unwrap_or((None, &o.qname));
         let e = p.err(
             XML_ERR_TAG_NOT_FINISHED,
             format!("Premature end of data in tag {local}"),
@@ -437,7 +488,7 @@ pub fn xml_parse_chunk(
     }
     let total = ctxt.consumed + ctxt.buf.len();
     let mut doc = p.suspend(open, true).doc;
-    apply_dtd_defaults(&mut doc, total, ctxt.options, &mut check)?;
+    apply_dtd_defaults(&mut doc, total, ctxt.options, check)?;
     normalize_tokenized_attrs(&mut doc);
     ctxt.buf = Vec::new();
     ctxt.buf.shrink_to_fit();
@@ -486,12 +537,18 @@ fn fresh_parser<'a, C: Checker>(
 }
 
 /// Parse the accumulated buffer as one whole document.
-fn finish_whole(ctxt: &mut XmlPushParserCtxt) -> Result<Option<XmlDoc>, XmlError> {
-    match xml_read_memory(
+fn finish_whole<C: Checker>(
+    ctxt: &mut XmlPushParserCtxt,
+    check: &mut C,
+) -> Result<Option<XmlDoc>, XmlError> {
+    let mut sink = rusty_xml_sax::NullSax;
+    match parse_doc(
         &ctxt.buf,
         ctxt.url.as_deref(),
         ctxt.encoding.as_deref(),
         ctxt.options,
+        &mut sink,
+        check,
     ) {
         Ok(doc) => {
             ctxt.buf = Vec::new();

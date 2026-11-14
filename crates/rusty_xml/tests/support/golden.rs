@@ -310,6 +310,17 @@ pub fn render_sax(rec: &SaxRecorder, r: Result<XmlDoc, XmlError>) -> String {
     )
 }
 
+/// The chunks a `push` (fixed size) or `pushlist` (one per line) case feeds; the last terminates.
+pub fn push_chunks(dir: &Path, case: &Case) -> Vec<Vec<u8>> {
+    let bytes = file(dir, &case.args[0]);
+    if case.kind == "push" {
+        let size = number(&case.args[1]) as usize;
+        return bytes.chunks(size).map(<[u8]>::to_vec).collect();
+    }
+    let text = String::from_utf8(bytes).expect("utf-8 fixture");
+    text.lines().map(|l| l.as_bytes().to_vec()).collect()
+}
+
 pub fn file(dir: &Path, name: &str) -> Vec<u8> {
     let path = dir.join(name);
     fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
@@ -340,28 +351,14 @@ pub fn run_default(dir: &Path, case: &Case) -> String {
             let r = xml_sax_parse_memory(&file(dir, &a[0]), 0, &mut rec);
             render_sax(&rec, r)
         }
-        "push" => {
-            let bytes = file(dir, &a[0]);
-            let size = number(&a[1]) as usize;
+        "push" | "pushlist" => {
+            let chunks = push_chunks(dir, case);
             let mut ctxt = xml_create_push_parser_ctxt(&[], None, None, 0);
-            let last = bytes.chunks(size).count() - 1;
-            let results: Vec<_> = bytes
-                .chunks(size)
-                .enumerate()
-                .map(|(i, c)| xml_parse_chunk(&mut ctxt, c, i32::from(i == last)))
-                .collect();
-            render_push(&results)
-        }
-        "pushlist" => {
-            let text = String::from_utf8(file(dir, &a[0])).expect("utf-8 fixture");
-            let lines: Vec<&str> = text.lines().collect();
-            let mut ctxt = xml_create_push_parser_ctxt(&[], None, None, 0);
-            let results: Vec<_> = lines
+            let last = chunks.len() - 1;
+            let results: Vec<_> = chunks
                 .iter()
                 .enumerate()
-                .map(|(i, l)| {
-                    xml_parse_chunk(&mut ctxt, l.as_bytes(), i32::from(i + 1 == lines.len()))
-                })
+                .map(|(i, c)| xml_parse_chunk(&mut ctxt, c, i32::from(i == last)))
                 .collect();
             render_push(&results)
         }

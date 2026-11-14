@@ -781,15 +781,38 @@ impl XmlDoc {
         }
     }
 
+    /// Append the text and CDATA under `id`, descending into elements, in
+    /// document order.
+    ///
+    /// Walked through the sibling and parent links rather than by recursion:
+    /// the recursive form cost a stack frame per level, so reading the content
+    /// of a deep document (the parser allows 5,000 levels, a million under
+    /// `XML_PARSE_HUGE`) overflowed the stack, which aborts the process.
     fn collect_text(&self, id: NodeId, out: &mut String) {
         let mut c = self.first_child(id);
         while let Some(ch) = c {
             match self.kind(ch) {
                 NodeKind::Text | NodeKind::CData => out.push_str(self.content(ch)),
-                NodeKind::Element => self.collect_text(ch, out),
+                NodeKind::Element => {
+                    if let Some(first) = self.first_child(ch) {
+                        c = Some(first);
+                        continue;
+                    }
+                }
                 _ => {}
             }
-            c = self.next_sibling(ch);
+            // The next node in document order: a sibling, or the sibling of
+            // the nearest ancestor below `id` that has one.
+            let mut n = ch;
+            c = loop {
+                if let Some(s) = self.next_sibling(n) {
+                    break Some(s);
+                }
+                match self.parent(n) {
+                    Some(p) if p != id => n = p,
+                    _ => break None,
+                }
+            };
         }
     }
 

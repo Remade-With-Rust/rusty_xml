@@ -1,11 +1,13 @@
 //! Parser limits and stop controls: entity amplification (#32, #40), the
 //! push parser after a fatal error (#35), SAX stop (#40), cooperative
-//! cancellation (#39), deep XInclude (#34) and the DTD entity graph (#41).
+//! cancellation (#39), deep XInclude (#34), the DTD entity graph (#41) and
+//! the HTML nesting cap (#48).
 //!
 //! Expected outcomes come from the pinned oracle, `xmllint` 2.15.3.
 
 use rusty_xml::{
     default_parse_options, html_read_memory, html_read_memory_interruptible,
+    html_read_memory_with, HtmlParseSettings, NodeId, NodeKind, XmlDoc,
     xml_create_push_parser_ctxt, xml_ctxt_is_stopped, xml_ctxt_set_max_amplification,
     xml_parse_chunk, xml_parse_chunk_interruptible, xml_read_memory, xml_read_memory_interruptible,
     xml_read_memory_with, xml_sax_parse_memory, xml_sax_parse_memory_interruptible, xml_save_doc,
@@ -519,16 +521,17 @@ fn namespace_lookup_does_not_walk_the_depth() {
     assert!(t.elapsed().as_secs() < 20, "took {:?}", t.elapsed());
 }
 
-/// #41: HTML has no nesting cap (libxml2's is 256), and an end tag that
-/// matched nothing, or a stray <body>, scanned the whole open-element stack:
-/// 80,000 of them under 80,000 open elements took 3.8 s.
+/// #41: with the nesting cap lifted (#48), an end tag that matched nothing,
+/// or a stray <body>, scanned the whole open-element stack: 80,000 of them
+/// under 80,000 open elements took 3.8 s.
 #[test]
 fn html_end_tags_do_not_scan_a_deep_stack() {
     let n = 200_000;
     let t = std::time::Instant::now();
+    let uncapped = HtmlParseSettings::new().with_max_depth(-1);
     for tail in ["</i>", "<body>"] {
         let d = format!("<div>{}{}", "<b>".repeat(n), tail.repeat(n));
-        let doc = html_read_memory(d.as_bytes(), None, None, 0).unwrap();
+        let doc = html_read_memory_with(d.as_bytes(), None, None, 0, &uncapped).unwrap();
         assert!(doc.len() > n);
     }
     assert!(t.elapsed().as_secs() < 20, "took {:?}", t.elapsed());
@@ -657,4 +660,108 @@ fn recovering_reads_report_the_error_they_survived() {
     // The amplification error is reported the same way.
     let doc = xml_read_memory(&flat_bomb(100_000), None, None, opts).expect("recovered");
     assert!(doc.warnings.iter().any(|w| w.contains("error code 114")), "{:?}", doc.warnings);
+}
+
+fn count_elements(doc: &XmlDoc, name: &str) -> usize {
+    (0..doc.len() as u32)
+        .map(NodeId)
+        .filter(|&i| {
+            doc.kind(i) == NodeKind::Element && doc.name(i) == name && doc.parent(i).is_some()
+        })
+        .count()
+}
+
+/// `<html><body>`, `<div>` x n, `x`, `</div>` x n, `<p>after</p>`: #48's input.
+fn nested_divs(n: usize) -> String {
+    format!(
+        "<html><body>{}x{}<p>after</p>",
+        "<div>".repeat(n),
+        "</div>".repeat(n)
+    )
+}
+
+/// #48: libxml2's HTML nesting cap, on by default. `html` and `body` count,
+/// so 254 divs fit; the 255th is refused and the parse stops there with
+/// `XML_ERR_RESOURCE_LIMIT`, keeping the tree built so far. `XML_PARSE_HUGE`
+/// raises the cap to 2048. Every row matches `xmllint --html` 2.15.3 (the
+/// byte-for-byte outputs are fixtures under `html_fixtures/cases/depth-*`).
+#[test]
+fn html_nesting_cap_matches_libxml2() {
+    let read = |n: usize, opts: i32| html_read_memory(nested_divs(n).as_bytes(), None, None, opts).unwrap();
+    let doc = read(254, 0);
+    assert_eq!(count_elements(&doc, "div"), 254);
+    assert_eq!(count_elements(&doc, "p"), 1);
+    assert!(doc.warnings.is_empty());
+    for n in [255, 300, 200_000] {
+        let doc = read(n, 0);
+        assert_eq!(count_elements(&doc, "div"), 254, "n = {n}");
+        assert_eq!(count_elements(&doc, "p"), 0, "nothing after the cap, n = {n}");
+        assert_eq!(doc.warnings.len(), 1);
+        assert!(doc.warnings[0].contains(&format!("error code {XML_ERR_RESOURCE_LIMIT}")));
+        assert!(doc.warnings[0]
+            .ends_with("Excessive depth in document: 256, use XML_PARSE_HUGE option"));
+    }
+    let doc = read(2_100, XML_PARSE_HUGE);
+    assert_eq!(count_elements(&doc, "div"), 2_046);
+    assert!(doc.warnings[0].contains("Excessive depth in document: 2048"));
+    // The refused element is gone whatever its kind.
+    for inner in ["<br>", "<span/>", "<script>s()</script>", "<i id=q>in</i>"] {
+        let d = format!("<html><body>{}a{inner}b", "<div>".repeat(254));
+        let doc = html_read_memory(d.as_bytes(), None, None, 0).unwrap();
+        let out = String::from_utf8(xml_save_doc(&doc, 0)).unwrap();
+        assert!(out.contains("<div>a</div>"), "{inner}");
+        assert!(!out.contains(">b<"), "nothing after the cap: {inner}");
+        assert_eq!(doc.warnings.len(), 1, "{inner}");
+    }
+}
+
+/// #48: the cap is adjustable, and `-1` removes it.
+#[test]
+fn html_nesting_cap_is_adjustable() {
+    let d = nested_divs(300);
+    let with = |s: HtmlParseSettings| html_read_memory_with(d.as_bytes(), None, None, 0, &s).unwrap();
+    let doc = with(HtmlParseSettings::new());
+    assert_eq!(count_elements(&doc, "div"), 254, "0 keeps libxml2's default");
+    let doc = with(HtmlParseSettings::new().with_max_depth(10));
+    assert_eq!(count_elements(&doc, "div"), 8);
+    assert!(doc.warnings[0].contains("Excessive depth in document: 10"));
+    let doc = with(HtmlParseSettings::new().with_max_depth(1_000));
+    assert_eq!(count_elements(&doc, "div"), 300);
+    assert!(doc.warnings.is_empty());
+    let doc = with(HtmlParseSettings::new().with_max_depth(-1));
+    assert_eq!(count_elements(&doc, "div"), 300);
+    assert_eq!(count_elements(&doc, "p"), 1);
+    assert!(doc.warnings.is_empty());
+    let plain = html_read_memory(nested_divs(250).as_bytes(), None, None, 0).unwrap();
+    let uncapped = html_read_memory_with(
+        nested_divs(250).as_bytes(),
+        None,
+        None,
+        0,
+        &HtmlParseSettings::new().with_max_depth(-1),
+    )
+    .unwrap();
+    assert_eq!(xml_save_doc(&plain, 0), xml_save_doc(&uncapped, 0), "under the cap nothing changes");
+
+    // A cap the implied elements themselves reach: text implies `body`,
+    // which is refused, and the text goes nowhere.
+    let doc = html_read_memory_with(
+        b"<html>hello<div>x</div>",
+        None,
+        None,
+        0,
+        &HtmlParseSettings::new().with_max_depth(1),
+    )
+    .unwrap();
+    assert_eq!(count_elements(&doc, "html"), 1);
+    assert_eq!(count_elements(&doc, "body"), 0);
+    assert_eq!(count_elements(&doc, "div"), 0);
+    assert!(!String::from_utf8(xml_save_doc(&doc, 0)).unwrap().contains("hello"));
+    assert_eq!(doc.warnings.len(), 1);
+
+    // The interrupt still works alongside a cap.
+    let fired = AtomicBool::new(true);
+    let s = HtmlParseSettings::new().with_max_depth(-1).with_interrupt(&fired);
+    let err = html_read_memory_with(d.as_bytes(), None, None, 0, &s).unwrap_err();
+    assert_eq!(err.code, XML_ERR_USER_STOP);
 }

@@ -107,6 +107,9 @@ What we *do* gate hard, and what those numbers cost nothing:
     message.
   - **XPath** sorts by a document-order index, so steps are not quadratic, and
     `XmlXPathContext::set_op_limit` caps the work, as libxml2's `opLimit` does.
+  - **HTML nesting** stops at libxml2's cap, 256 levels (2048 under
+    `XML_PARSE_HUGE`), so code that walks the tree recursively is safe on any
+    page. `HtmlParseSettings::max_depth` raises or removes it.
 - **Long-running calls can be cancelled.** Parsing, XPath, the validators,
   C14N and save have `*_interruptible` variants that take an `Interrupt`: an
   `AtomicBool`, a closure or `NeverInterrupt`. A SAX handler can end a parse

@@ -20,7 +20,7 @@ use std::process;
 
 fn usage() -> ! {
     eprintln!(
-        "Usage: rxmlint [--noout] [--recover] [--oldxml10] [--sax] [--stream] [--format] [--xpath EXPR] [--c14n] [--exc-c14n] [--html] [--push] [--dtdvalid] [--relaxng FILE] [--schema FILE] [--schematron FILE] [--repeat] [file|-]\n  --repeat : first sets 100 inner parses, each extra --repeat multiplies by 10 (xmllint; rxmlint-repeat-flag-v1)"
+        "Usage: rxmlint [--noout] [--recover] [--oldxml10] [--huge] [--sax] [--stream] [--format] [--xpath EXPR] [--c14n] [--exc-c14n] [--html] [--push] [--dtdvalid] [--relaxng FILE] [--schema FILE] [--schematron FILE] [--repeat] [file|-]\n  --repeat : first sets 100 inner parses, each extra --repeat multiplies by 10 (xmllint; rxmlint-repeat-flag-v1)"
     );
     process::exit(1);
 }
@@ -39,6 +39,7 @@ fn main() {
     let mut recover = false;
     let mut c14n = false;
     let mut oldxml10 = false;
+    let mut huge = false;
     let mut exc_c14n = false;
     let mut dtdvalid = false;
     let mut xpath: Option<String> = None;
@@ -62,6 +63,7 @@ fn main() {
             "--html" => html = true,
             "--push" => push = true,
             "--oldxml10" => oldxml10 = true,
+            "--huge" => huge = true,
             "--c14n" => c14n = true,
             "--exc-c14n" => exc_c14n = true,
             "--dtdvalid" => dtdvalid = true,
@@ -121,6 +123,9 @@ fn main() {
         // XML 1.0 before the 5th edition: the older, narrower name character
         // classes. xmllint spells it the same way.
         | if oldxml10 { rusty_xml::XML_PARSE_OLD10 } else { 0 }
+        // Lifts the size and depth limits, as in xmllint (#48: the HTML
+        // nesting cap goes from 256 to 2048).
+        | if huge { rusty_xml::XML_PARSE_HUGE } else { 0 }
         // Canonicalization is defined over the document AFTER attribute
         // defaulting, so the c14n path needs the DTD defaults completed even
         // though a plain parse does not. xmllint does the same.
@@ -166,6 +171,13 @@ fn main() {
             if html {
                 match html_read_memory(&bytes, url, None, options) {
                     Ok(doc) => {
+                        // xmllint --html reports what stopped the parse (the
+                        // nesting cap, #48) on stderr and still exits 0.
+                        if emit {
+                            for w in &doc.warnings {
+                                eprintln!("{w}");
+                            }
+                        }
                         if emit && !noout {
                             let out = xml_save_doc(&doc, save_opts);
                             let _ = io::stdout().write_all(&out);

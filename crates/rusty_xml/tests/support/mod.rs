@@ -2,7 +2,7 @@
 pub mod golden;
 
 use rusty_xml::{
-    xml_ctxt_read_memory_with_interrupt, xml_new_parser_ctxt, xml_read_io_with_interrupt,
+    html_read_memory_with_interrupt, xml_ctxt_read_memory_with_interrupt, xml_new_parser_ctxt, xml_read_io_with_interrupt,
     xml_create_push_parser_ctxt, xml_parse_chunk_with_interrupt, xml_parse_dtd_with_interrupt,
     xml_read_memory_with_interrupt, xml_reader_for_memory_with_interrupt,
     xml_sax_parse_memory_with_interrupt, xml_xinclude_process_with_interrupt, InterruptCheck,
@@ -149,6 +149,16 @@ pub fn run_interrupt(dir: &Path, case: &golden::Case) -> String {
             }
             Err(e) => e,
         },
+        "html" => golden::render_doc(html_read_memory_with_interrupt(
+            &golden::file(dir, &a[0]),
+            None,
+            None,
+            0,
+            &mut check,
+        )),
+        "html5lib" => golden::render_html5lib(dir, &a[0], |input| {
+            html_read_memory_with_interrupt(input, None, None, 0, &mut check)
+        }),
         "dtd" => golden::render_dtd(xml_parse_dtd_with_interrupt(
             &golden::file(dir, &a[0]),
             None,

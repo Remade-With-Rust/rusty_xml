@@ -21,8 +21,9 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 
-use rusty_xml_tree::{NodeId, NodeKind, XmlDoc};
+use rusty_xml_tree::{InterruptCheck, NodeId, NodeKind, XmlDoc};
 
+use crate::checker::{stop_error, Checker, NoCheck};
 use crate::error::XmlError;
 use crate::html_entities::{decode_html, Nul};
 use crate::html_tags::{self as tags, Tag, BODY, HEAD, HTML, P, UNKNOWN};
@@ -100,7 +101,32 @@ pub fn html_read_memory(
     encoding: Option<&str>,
     options: i32,
 ) -> Result<XmlDoc, XmlError> {
+    html_parse_inner(buffer, url, encoding, options, &mut NoCheck)
+}
+
+/// Like [`html_read_memory`], but fails with `XML_ERR_USER_STOP` once `check` reports an
+/// interrupt; no partial document is returned.
+pub fn html_read_memory_with_interrupt(
+    buffer: &[u8],
+    url: Option<&str>,
+    encoding: Option<&str>,
+    options: i32,
+    check: &mut InterruptCheck<'_>,
+) -> Result<XmlDoc, XmlError> {
+    html_parse_inner(buffer, url, encoding, options, check)
+}
+
+fn html_parse_inner<C: Checker>(
+    buffer: &[u8],
+    url: Option<&str>,
+    encoding: Option<&str>,
+    options: i32,
+    check: &mut C,
+) -> Result<XmlDoc, XmlError> {
     let _ = url;
+    // Encoding detection and conversion are linear in the input and stay unchecked, with one
+    // check before and one after.
+    check.tick().map_err(|_| stop_error(0, 0))?;
     // A BOM, the `encoding` argument or a leading `<?xm` decide the encoding
     // up front. Otherwise libxml2 decides as it parses: a `<meta>` charset, or
     // a guess at the first non-ASCII byte (`html_encoding`, #27).
@@ -115,13 +141,14 @@ pub fn html_read_memory(
         let (bytes, _) = crate::encoding::xml_convert_to_utf8_cow(buffer, encoding)?;
         utf8_cow(bytes)
     };
+    check.tick().map_err(|_| stop_error(0, 0))?;
     let (has_cr, has_nul) = scan_cr_nul(text.as_bytes());
     let text = if has_cr {
         normalize_newlines(text)
     } else {
         text
     };
-    Ok(html_parse_str(&text, options, has_nul))
+    html_parse_str(&text, options, has_nul, check)
 }
 
 /// Does the input contain a CR, a NUL? Fixed 64-byte blocks with no exit
@@ -212,7 +239,12 @@ fn normalize_newlines(s: Cow<'_, str>) -> Cow<'_, str> {
     Cow::Owned(out)
 }
 
-fn html_parse_str(text: &str, options: i32, has_nul: bool) -> XmlDoc {
+fn html_parse_str<C: Checker>(
+    text: &str,
+    options: i32,
+    has_nul: bool,
+    check: &mut C,
+) -> Result<XmlDoc, XmlError> {
     // Sized for the densest markup measured, about one node per 10 input
     // bytes, so the arena never doubles and copies its way up; the slack
     // this leaves on lighter pages is released once the tree is built (#22).
@@ -222,6 +254,8 @@ fn html_parse_str(text: &str, options: i32, has_nul: bool) -> XmlDoc {
     // doctype where XML would emit a declaration.
     doc.node_mut(NodeId::DOCUMENT).kind = NodeKind::HtmlDocument;
     let mut p = Parser {
+        check,
+        stopped: false,
         src: text,
         b: text.as_bytes(),
         pos: 0,
@@ -235,8 +269,11 @@ fn html_parse_str(text: &str, options: i32, has_nul: bool) -> XmlDoc {
         has_nul,
     };
     p.document();
+    if p.stopped {
+        return Err(p.stop_error());
+    }
     p.doc.shrink_nodes();
-    p.doc
+    Ok(p.doc)
 }
 
 #[derive(Clone, Copy)]
@@ -245,7 +282,11 @@ struct Open {
     tag: Tag,
 }
 
-struct Parser<'a> {
+struct Parser<'a, C: Checker> {
+    /// Consulted once per token pass of `document` and `content`.
+    check: &'a mut C,
+    /// A check has stopped the parse; every loop tests it and the entry point reports it.
+    stopped: bool,
     src: &'a str,
     b: &'a [u8],
     pos: usize,
@@ -265,7 +306,28 @@ struct Parser<'a> {
     has_nul: bool,
 }
 
-impl<'a> Parser<'a> {
+impl<'a, C: Checker> Parser<'a, C> {
+    /// Counts one token pass; true once the parse must stop.
+    #[inline]
+    fn halt(&mut self) -> bool {
+        if !C::ACTIVE {
+            return false;
+        }
+        if self.check.tick().is_err() {
+            self.stopped = true;
+        }
+        self.stopped
+    }
+
+    /// `XML_ERR_USER_STOP` at the input position the stop was observed.
+    #[cold]
+    fn stop_error(&self) -> XmlError {
+        let seen = &self.b[..self.pos.min(self.b.len())];
+        let line = 1 + seen.iter().filter(|&&c| c == b'\n').count();
+        let col = seen.iter().rev().take_while(|&&c| c != b'\n').count() + 1;
+        stop_error(line as u32, col as u32)
+    }
+
     /// The NUL policy for a run: none to apply when the input has no NUL.
     #[inline]
     fn nul(&self, want: Nul) -> Nul {
@@ -308,6 +370,9 @@ impl<'a> Parser<'a> {
         while self.peek(0) == Some(b'<') {
             match self.peek(1) {
                 Some(b'!') => {
+                    if self.halt() {
+                        return;
+                    }
                     if self.b[self.pos..].starts_with(b"<!--") {
                         self.pos += 4;
                         self.comment(false);
@@ -319,6 +384,9 @@ impl<'a> Parser<'a> {
                     }
                 }
                 Some(b'?') => {
+                    if self.halt() {
+                        return;
+                    }
                     self.pos += 1;
                     self.comment(true);
                 }
@@ -331,6 +399,9 @@ impl<'a> Parser<'a> {
 
     fn content(&mut self) {
         while self.pos < self.b.len() {
+            if self.halt() {
+                return;
+            }
             if self.mode != 0 || self.b[self.pos] != b'<' {
                 self.char_data();
                 continue;

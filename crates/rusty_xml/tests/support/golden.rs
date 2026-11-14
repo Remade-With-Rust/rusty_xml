@@ -361,6 +361,25 @@ pub fn render_xinclude(r: Result<i32, XmlError>, doc: &XmlDoc) -> String {
 ", payload(&xml_save_doc(doc, 0)))
 }
 
+/// One line per html5lib case: its name, and the length and hash of the rendered result of `parse`.
+pub fn render_html5lib(
+    dir: &Path,
+    archive: &str,
+    mut parse: impl FnMut(&[u8]) -> Result<XmlDoc, XmlError>,
+) -> String {
+    let mut out = String::new();
+    for (name, input, _expected) in read_html5lib_archive(&dir.join(archive)) {
+        let text = render_doc(parse(&input));
+        out.push_str(&format!(
+            "{name} LEN {} FNV {:016x}
+",
+            text.len(),
+            fnv(text.as_bytes())
+        ));
+    }
+    out
+}
+
 pub fn file(dir: &Path, name: &str) -> Vec<u8> {
     let path = dir.join(name);
     fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
@@ -465,18 +484,7 @@ pub fn run_default(dir: &Path, case: &Case) -> String {
             Err(e) => e,
         },
         "html" => render_doc(html_read_memory(&file(dir, &a[0]), None, None, 0)),
-        "html5lib" => {
-            let mut out = String::new();
-            for (name, input, _expected) in read_html5lib_archive(&dir.join(&a[0])) {
-                let text = render_doc(html_read_memory(&input, None, None, 0));
-                out.push_str(&format!(
-                    "{name} LEN {} FNV {:016x}\n",
-                    text.len(),
-                    fnv(text.as_bytes())
-                ));
-            }
-            out
-        }
+        "html5lib" => render_html5lib(dir, &a[0], |input| html_read_memory(input, None, None, 0)),
         other => panic!("unknown manifest kind {other}"),
     };
     finish(text)

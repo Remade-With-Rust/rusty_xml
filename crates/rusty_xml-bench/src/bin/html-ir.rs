@@ -8,8 +8,12 @@
 //! an FNV-1a fingerprint of the tree in document order. The fingerprint moves
 //! if and only if the tree moves, so a probe that claims to be output
 //! preserving must leave it byte-identical.
+//!
+//! `--interrupt` parses through `html_read_memory_with_interrupt` with an interrupt that never
+//! fires, at the default interval.
 
-use rusty_xml::{NodeId, NodeKind, XmlDoc};
+use rusty_xml::{InterruptCheck, NodeId, NodeKind, XmlDoc};
+use std::sync::atomic::AtomicBool;
 
 #[global_allocator]
 static ALLOC: rusty_xml_alloc::Allocator = rusty_xml_alloc::NEW;
@@ -79,9 +83,13 @@ fn walk(doc: &XmlDoc, id: NodeId, t: &mut Tally) {
 }
 
 fn main() {
-    let mut args = std::env::args().skip(1);
-    let list = args.next().expect("usage: html-ir LIST [REPS]");
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let interrupt = args.iter().any(|a| a == "--interrupt");
+    args.retain(|a| a != "--interrupt");
+    let mut args = args.into_iter();
+    let list = args.next().expect("usage: html-ir LIST [REPS] [--interrupt]");
     let reps: u32 = args.next().map_or(1, |r| r.parse().expect("reps"));
+    let never = AtomicBool::new(false);
     let names = std::fs::read_to_string(&list).expect("read list");
     let bufs: Vec<Vec<u8>> = names
         .lines()
@@ -95,7 +103,18 @@ fn main() {
     };
     for _ in 0..reps {
         for b in &bufs {
-            let doc = rusty_xml::html_read_memory(b, None, None, 0).expect("parse");
+            let doc = if interrupt {
+                rusty_xml::html_read_memory_with_interrupt(
+                    b,
+                    None,
+                    None,
+                    0,
+                    &mut InterruptCheck::new(&never),
+                )
+            } else {
+                rusty_xml::html_read_memory(b, None, None, 0)
+            }
+            .expect("parse");
             walk(&doc, NodeId::DOCUMENT, &mut t);
         }
     }

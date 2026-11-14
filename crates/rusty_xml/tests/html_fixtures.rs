@@ -10,7 +10,7 @@
 //!   source tree, with their expected output in the same layout.
 //! - `html5lib-9329e64.zst`: the html5lib-tests tree-construction documents
 //!   and their expected output, in one zstd archive. Its layout is documented
-//!   on `read_archive`.
+//!   on `support::golden::read_html5lib_archive_with_header`.
 //!
 //! The expected output comes from the pinned oracle (`oracle/PIN`, libxml2
 //! 21503). Regenerate all of it with
@@ -27,13 +27,14 @@ use std::path::{Path, PathBuf};
 
 use rusty_xml::{html_read_memory, xml_save_doc};
 
+mod support;
+use support::golden::{read_html5lib_archive_with_header, Html5libHeader};
+
 /// Sets a `known-differences.txt` key may name.
 const SETS: [&str; 3] = ["cases", "libxml2", "html5lib"];
 
 const HTML5LIB_ARCHIVE: &str = "html5lib-9329e64.zst";
 const HTML5LIB_TESTS_SHA: &str = "9329e64694e7835d0dcff9811e22856ef6ad16f9";
-/// The archive's first line.
-const ARCHIVE_MAGIC: &str = "rusty_xml html fixtures v1";
 /// Prefix of the `Err` that `ours` returns when parsing or serializing panics.
 const PANIC_PREFIX: &str = "panic: ";
 
@@ -95,107 +96,9 @@ fn is_input(name: &str) -> bool {
     (name.ends_with(".html") || name.ends_with(".htm")) && !name.ends_with(".xmllint.html")
 }
 
-/// Cursor over the decompressed archive.
-struct Reader<'a> {
-    rest: &'a [u8],
-}
-
-impl<'a> Reader<'a> {
-    /// The next line, without its newline.
-    fn line(&mut self) -> &'a str {
-        let end = self
-            .rest
-            .iter()
-            .position(|&b| b == b'\n')
-            .expect("archive: unterminated line");
-        let (line, rest) = self.rest.split_at(end);
-        self.rest = &rest[1..];
-        std::str::from_utf8(line).expect("archive: line is not UTF-8")
-    }
-
-    /// The next line as a length.
-    fn length(&mut self) -> usize {
-        self.line()
-            .parse()
-            .expect("archive: length line is not a number")
-    }
-
-    /// The next `len` bytes, with no newline after them.
-    fn bytes(&mut self, len: usize) -> &'a [u8] {
-        assert!(len <= self.rest.len(), "archive: truncated record");
-        let (bytes, rest) = self.rest.split_at(len);
-        self.rest = rest;
-        bytes
-    }
-}
-
-/// The archive's header fields.
-struct ArchiveHeader {
-    oracle_tag: String,
-    oracle_sha: String,
-    html5lib_sha: String,
-    license: Vec<u8>,
-}
-
-/// Decompresses `html5lib-9329e64.zst` and parses it into its header and its
-/// cases: name, input, expected output. Layout, after the zstd frame:
-///
-/// ```text
-/// rusty_xml html fixtures v1\n
-/// oracle <tag> <sha>\n
-/// html5lib-tests <sha>\n
-/// license <len>\n<len bytes of html5lib-tests/LICENSE>
-/// then per case, sorted by name: <name>\n<input len>\n<input bytes><expected len>\n<expected bytes>
-/// ```
-fn read_archive() -> (ArchiveHeader, Vec<(String, Vec<u8>, Vec<u8>)>) {
-    let path = fixtures_dir().join(HTML5LIB_ARCHIVE);
-    let packed = fs::read(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
-    let bytes = rusty_zstd::decompress(&packed)
-        .unwrap_or_else(|e| panic!("{}: cannot decompress: {e}", path.display()));
-
-    let mut r = Reader { rest: &bytes };
-    assert_eq!(
-        r.line(),
-        ARCHIVE_MAGIC,
-        "{}: bad magic line",
-        path.display()
-    );
-    let oracle = r
-        .line()
-        .strip_prefix("oracle ")
-        .expect("archive: second line is not `oracle <tag> <sha>`");
-    let (oracle_tag, oracle_sha) = oracle
-        .split_once(' ')
-        .expect("archive: `oracle` line has no SHA");
-    let html5lib_sha = r
-        .line()
-        .strip_prefix("html5lib-tests ")
-        .expect("archive: third line is not `html5lib-tests <sha>`")
-        .to_string();
-    let license_len = r
-        .line()
-        .strip_prefix("license ")
-        .expect("archive: fourth line is not `license <len>`")
-        .parse::<usize>()
-        .expect("archive: license length is not a number");
-    let license = r.bytes(license_len).to_vec();
-
-    let header = ArchiveHeader {
-        oracle_tag: oracle_tag.to_string(),
-        oracle_sha: oracle_sha.to_string(),
-        html5lib_sha,
-        license,
-    };
-    let mut cases = Vec::new();
-    while !r.rest.is_empty() {
-        let name = r.line().to_string();
-        let input_len = r.length();
-        let input = r.bytes(input_len).to_vec();
-        let expected_len = r.length();
-        let expected = r.bytes(expected_len).to_vec();
-        cases.push((name, input, expected));
-    }
-    (header, cases)
+/// The html5lib archive's header and cases; the reader lives in `support::golden`.
+fn read_archive() -> (Html5libHeader, Vec<(String, Vec<u8>, Vec<u8>)>) {
+    read_html5lib_archive_with_header(&fixtures_dir().join(HTML5LIB_ARCHIVE))
 }
 
 /// Loads every input of `set` in file-name order, with its expected output.

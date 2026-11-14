@@ -1,0 +1,49 @@
+1 depth 0 name Some("soap:Envelope") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("soap:Header") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("wsse:Security") value None empty false attrs 1
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("wsse:UsernameToken") value None empty false attrs 1
+14 depth 4 name Some("#text") value Some("\n        ") empty false attrs 0
+1 depth 4 name Some("wsse:Username") value None empty false attrs 0
+3 depth 5 name Some("#text") value Some("service") empty false attrs 0
+15 depth 4 name Some("wsse:Username") value None empty false attrs 0
+14 depth 4 name Some("#text") value Some("\n        ") empty false attrs 0
+1 depth 4 name Some("wsse:Nonce") value None empty false attrs 1
+3 depth 5 name Some("#text") value Some("bm9uY2U=") empty false attrs 0
+15 depth 4 name Some("wsse:Nonce") value None empty false attrs 0
+14 depth 4 name Some("#text") value Some("\n      ") empty false attrs 0
+15 depth 3 name Some("wsse:UsernameToken") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n    ") empty false attrs 0
+15 depth 2 name Some("wsse:Security") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n  ") empty false attrs 0
+15 depth 1 name Some("soap:Header") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("soap:Body") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("m:GetQuote") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("m:Symbol") value None empty false attrs 1
+3 depth 4 name Some("#text") value Some("ACME") empty false attrs 0
+15 depth 3 name Some("m:Symbol") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("m:Depth") value None empty false attrs 1
+3 depth 4 name Some("#text") value Some("10") empty false attrs 0
+15 depth 3 name Some("m:Depth") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("m:Filters") value None empty false attrs 0
+14 depth 4 name Some("#text") value Some("\n        ") empty false attrs 0
+1 depth 4 name Some("m:Filter") value None empty true attrs 2
+14 depth 4 name Some("#text") value Some("\n        ") empty false attrs 0
+1 depth 4 name Some("m:Filter") value None empty true attrs 2
+14 depth 4 name Some("#text") value Some("\n        ") empty false attrs 0
+1 depth 4 name Some("m:Filter") value None empty true attrs 1
+14 depth 4 name Some("#text") value Some("\n      ") empty false attrs 0
+15 depth 3 name Some("m:Filters") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n    ") empty false attrs 0
+15 depth 2 name Some("m:GetQuote") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n  ") empty false attrs 0
+15 depth 1 name Some("soap:Body") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n") empty false attrs 0
+15 depth 0 name Some("soap:Envelope") value None empty false attrs 0

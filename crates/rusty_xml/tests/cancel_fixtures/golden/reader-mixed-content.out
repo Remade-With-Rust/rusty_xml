@@ -1,0 +1,75 @@
+1 depth 0 name Some("article") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("para") value None empty false attrs 0
+3 depth 2 name Some("#text") value Some("A paragraph with ") empty false attrs 0
+1 depth 2 name Some("b") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("bold") empty false attrs 0
+15 depth 2 name Some("b") value None empty false attrs 0
+3 depth 2 name Some("#text") value Some(" and ") empty false attrs 0
+1 depth 2 name Some("i") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("italic") empty false attrs 0
+15 depth 2 name Some("i") value None empty false attrs 0
+3 depth 2 name Some("#text") value Some(" and trailing space. ") empty false attrs 0
+15 depth 1 name Some("para") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("para") value None empty false attrs 0
+3 depth 2 name Some("#text") value Some(" Leading space and ") empty false attrs 0
+1 depth 2 name Some("b") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("bold at the start") empty false attrs 0
+15 depth 2 name Some("b") value None empty false attrs 0
+3 depth 2 name Some("#text") value Some(".") empty false attrs 0
+15 depth 1 name Some("para") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("para") value None empty false attrs 0
+3 depth 2 name Some("#text") value Some("Adjacent") empty false attrs 0
+1 depth 2 name Some("b") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("elements") empty false attrs 0
+15 depth 2 name Some("b") value None empty false attrs 0
+1 depth 2 name Some("i") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("with") empty false attrs 0
+15 depth 2 name Some("i") value None empty false attrs 0
+1 depth 2 name Some("u") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("no") empty false attrs 0
+15 depth 2 name Some("u") value None empty false attrs 0
+3 depth 2 name Some("#text") value Some("text between them.") empty false attrs 0
+15 depth 1 name Some("para") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("para") value None empty false attrs 0
+3 depth 2 name Some("#text") value Some("An entity ") empty false attrs 0
+3 depth 2 name Some("#text") value Some("&") empty false attrs 0
+3 depth 2 name Some("#text") value Some(" a reference A and a ") empty false attrs 0
+4 depth 2 name Some("#cdata-section") value Some("CDATA <section>") empty false attrs 0
+3 depth 2 name Some("#text") value Some(" inline.") empty false attrs 0
+15 depth 1 name Some("para") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("para") value None empty false attrs 1
+3 depth 2 name Some("#text") value Some("   preserved     spacing   ") empty false attrs 0
+15 depth 1 name Some("para") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("empty") value None empty true attrs 0
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("selfclosed") value None empty true attrs 0
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("deep") value None empty false attrs 0
+1 depth 2 name Some("a") value None empty false attrs 0
+1 depth 3 name Some("b") value None empty false attrs 0
+1 depth 4 name Some("c") value None empty false attrs 0
+1 depth 5 name Some("d") value None empty false attrs 0
+1 depth 6 name Some("e") value None empty false attrs 0
+3 depth 7 name Some("#text") value Some("five levels down") empty false attrs 0
+15 depth 6 name Some("e") value None empty false attrs 0
+15 depth 5 name Some("d") value None empty false attrs 0
+15 depth 4 name Some("c") value None empty false attrs 0
+15 depth 3 name Some("b") value None empty false attrs 0
+15 depth 2 name Some("a") value None empty false attrs 0
+15 depth 1 name Some("deep") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+8 depth 1 name Some("#comment") value Some(" a comment between elements ") empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+7 depth 1 name Some("target") value Some("instruction data") empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("after-comment") value None empty false attrs 0
+3 depth 2 name Some("#text") value Some("text") empty false attrs 0
+15 depth 1 name Some("after-comment") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n") empty false attrs 0
+15 depth 0 name Some("article") value None empty false attrs 0

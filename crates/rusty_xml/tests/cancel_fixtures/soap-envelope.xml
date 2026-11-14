@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"
+               xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+               xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <soap:Header>
+    <wsse:Security xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"
+                   soap:mustUnderstand="1">
+      <wsse:UsernameToken wsse:Id="UsernameToken-1">
+        <wsse:Username>service</wsse:Username>
+        <wsse:Nonce EncodingType="Base64Binary">bm9uY2U=</wsse:Nonce>
+      </wsse:UsernameToken>
+    </wsse:Security>
+  </soap:Header>
+  <soap:Body>
+    <m:GetQuote xmlns:m="urn:example:quotes">
+      <m:Symbol xsi:type="xsd:string">ACME</m:Symbol>
+      <m:Depth xsi:type="xsd:int">10</m:Depth>
+      <m:Filters>
+        <m:Filter name="min" value="1.5"/>
+        <m:Filter name="max" value="99.5"/>
+        <m:Filter name="empty"></m:Filter>
+      </m:Filters>
+    </m:GetQuote>
+  </soap:Body>
+</soap:Envelope>

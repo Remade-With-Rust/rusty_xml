@@ -1,0 +1,5 @@
+1 depth 0 name Some("svg") value None empty false attrs 2
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("rect") value None empty true attrs 4
+14 depth 1 name Some("#text") value Some("\n") empty false attrs 0
+15 depth 0 name Some("svg") value None empty false attrs 0

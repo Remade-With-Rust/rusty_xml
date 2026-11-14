@@ -1,0 +1,7 @@
+<!DOCTYPE doc [
+<!ELEMENT doc (head, item+)>
+<!ELEMENT head (#PCDATA)>
+<!ELEMENT item (#PCDATA)>
+<!ATTLIST item id CDATA #REQUIRED>
+]>
+<doc><head>h</head><item>a</item></doc>

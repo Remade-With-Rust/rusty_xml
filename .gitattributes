@@ -1,1 +1,2 @@
 crates/rusty_xml/tests/html_fixtures/** -text
+crates/rusty_xml/tests/cancel_fixtures/** -text

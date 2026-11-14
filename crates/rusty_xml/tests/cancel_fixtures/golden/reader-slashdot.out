@@ -1,0 +1,403 @@
+1 depth 0 name Some("ultramode") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n ") empty false attrs 0
+1 depth 1 name Some("story") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("title") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("100 Mbit/s on Fibre to the home") empty false attrs 0
+15 depth 2 name Some("title") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("url") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("http://slashdot.org/articles/99/06/06/1440211.shtml") empty false attrs 0
+15 depth 2 name Some("url") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("time") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("1999-06-06 14:39:59") empty false attrs 0
+15 depth 2 name Some("time") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("author") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("CmdrTaco") empty false attrs 0
+15 depth 2 name Some("author") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("department") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("wouldn't-it-be-nice") empty false attrs 0
+15 depth 2 name Some("department") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("topic") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("internet") empty false attrs 0
+15 depth 2 name Some("topic") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("comments") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("20") empty false attrs 0
+15 depth 2 name Some("comments") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("section") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("articles") empty false attrs 0
+15 depth 2 name Some("section") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("image") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("topicinternet.jpg") empty false attrs 0
+15 depth 2 name Some("image") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n  ") empty false attrs 0
+15 depth 1 name Some("story") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n ") empty false attrs 0
+1 depth 1 name Some("story") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("title") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("Gimp 1.2 Preview") empty false attrs 0
+15 depth 2 name Some("title") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("url") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("http://slashdot.org/articles/99/06/06/1438246.shtml") empty false attrs 0
+15 depth 2 name Some("url") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("time") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("1999-06-06 14:38:40") empty false attrs 0
+15 depth 2 name Some("time") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("author") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("CmdrTaco") empty false attrs 0
+15 depth 2 name Some("author") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("department") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("stuff-to-read") empty false attrs 0
+15 depth 2 name Some("department") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("topic") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("gimp") empty false attrs 0
+15 depth 2 name Some("topic") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("comments") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("12") empty false attrs 0
+15 depth 2 name Some("comments") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("section") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("articles") empty false attrs 0
+15 depth 2 name Some("section") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("image") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("topicgimp.gif") empty false attrs 0
+15 depth 2 name Some("image") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n  ") empty false attrs 0
+15 depth 1 name Some("story") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n ") empty false attrs 0
+1 depth 1 name Some("story") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("title") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("Sony's AIBO robot Sold Out") empty false attrs 0
+15 depth 2 name Some("title") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("url") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("http://slashdot.org/articles/99/06/06/1432256.shtml") empty false attrs 0
+15 depth 2 name Some("url") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("time") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("1999-06-06 14:32:51") empty false attrs 0
+15 depth 2 name Some("time") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("author") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("CmdrTaco") empty false attrs 0
+15 depth 2 name Some("author") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("department") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("stuff-to-see") empty false attrs 0
+15 depth 2 name Some("department") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("topic") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("tech") empty false attrs 0
+15 depth 2 name Some("topic") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("comments") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("10") empty false attrs 0
+15 depth 2 name Some("comments") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("section") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("articles") empty false attrs 0
+15 depth 2 name Some("section") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("image") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("topictech2.jpg") empty false attrs 0
+15 depth 2 name Some("image") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n  ") empty false attrs 0
+15 depth 1 name Some("story") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n ") empty false attrs 0
+1 depth 1 name Some("story") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("title") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("Ask Slashdot: Another Word for \"Hacker\"?") empty false attrs 0
+15 depth 2 name Some("title") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("url") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("http://slashdot.org/askslashdot/99/06/05/1815225.shtml") empty false attrs 0
+15 depth 2 name Some("url") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("time") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("1999-06-05 20:00:00") empty false attrs 0
+15 depth 2 name Some("time") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("author") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("Cliff") empty false attrs 0
+15 depth 2 name Some("author") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("department") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("hacker-vs-cracker") empty false attrs 0
+15 depth 2 name Some("department") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("topic") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("news") empty false attrs 0
+15 depth 2 name Some("topic") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("comments") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("385") empty false attrs 0
+15 depth 2 name Some("comments") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("section") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("askslashdot") empty false attrs 0
+15 depth 2 name Some("section") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("image") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("topicnews.gif") empty false attrs 0
+15 depth 2 name Some("image") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n  ") empty false attrs 0
+15 depth 1 name Some("story") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n ") empty false attrs 0
+1 depth 1 name Some("story") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("title") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("Corel Linux FAQ") empty false attrs 0
+15 depth 2 name Some("title") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("url") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("http://slashdot.org/articles/99/06/05/1842218.shtml") empty false attrs 0
+15 depth 2 name Some("url") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("time") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("1999-06-05 18:42:06") empty false attrs 0
+15 depth 2 name Some("time") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("author") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("CmdrTaco") empty false attrs 0
+15 depth 2 name Some("author") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("department") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("stuff-to-read") empty false attrs 0
+15 depth 2 name Some("department") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("topic") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("corel") empty false attrs 0
+15 depth 2 name Some("topic") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("comments") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("164") empty false attrs 0
+15 depth 2 name Some("comments") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("section") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("articles") empty false attrs 0
+15 depth 2 name Some("section") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("image") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("topiccorel.gif") empty false attrs 0
+15 depth 2 name Some("image") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n  ") empty false attrs 0
+15 depth 1 name Some("story") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n ") empty false attrs 0
+1 depth 1 name Some("story") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("title") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("Upside downsides MP3.COM.") empty false attrs 0
+15 depth 2 name Some("title") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("url") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("http://slashdot.org/articles/99/06/05/1558210.shtml") empty false attrs 0
+15 depth 2 name Some("url") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("time") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("1999-06-05 15:56:45") empty false attrs 0
+15 depth 2 name Some("time") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("author") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("CmdrTaco") empty false attrs 0
+15 depth 2 name Some("author") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("department") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("stuff-to-think-about") empty false attrs 0
+15 depth 2 name Some("department") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("topic") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("music") empty false attrs 0
+15 depth 2 name Some("topic") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("comments") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("48") empty false attrs 0
+15 depth 2 name Some("comments") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("section") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("articles") empty false attrs 0
+15 depth 2 name Some("section") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("image") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("topicmusic.gif") empty false attrs 0
+15 depth 2 name Some("image") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n  ") empty false attrs 0
+15 depth 1 name Some("story") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n ") empty false attrs 0
+1 depth 1 name Some("story") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("title") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("2 Terabits of Bandwidth") empty false attrs 0
+15 depth 2 name Some("title") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("url") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("http://slashdot.org/articles/99/06/05/1554258.shtml") empty false attrs 0
+15 depth 2 name Some("url") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("time") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("1999-06-05 15:53:43") empty false attrs 0
+15 depth 2 name Some("time") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("author") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("CmdrTaco") empty false attrs 0
+15 depth 2 name Some("author") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("department") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("faster-porn") empty false attrs 0
+15 depth 2 name Some("department") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("topic") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("internet") empty false attrs 0
+15 depth 2 name Some("topic") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("comments") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("66") empty false attrs 0
+15 depth 2 name Some("comments") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("section") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("articles") empty false attrs 0
+15 depth 2 name Some("section") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("image") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("topicinternet.jpg") empty false attrs 0
+15 depth 2 name Some("image") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n  ") empty false attrs 0
+15 depth 1 name Some("story") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n ") empty false attrs 0
+1 depth 1 name Some("story") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("title") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("Suppression of cold fusion research?") empty false attrs 0
+15 depth 2 name Some("title") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("url") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("http://slashdot.org/articles/99/06/04/2313200.shtml") empty false attrs 0
+15 depth 2 name Some("url") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("time") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("1999-06-04 23:12:29") empty false attrs 0
+15 depth 2 name Some("time") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("author") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("Hemos") empty false attrs 0
+15 depth 2 name Some("author") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("department") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("possibly-probably") empty false attrs 0
+15 depth 2 name Some("department") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("topic") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("science") empty false attrs 0
+15 depth 2 name Some("topic") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("comments") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("217") empty false attrs 0
+15 depth 2 name Some("comments") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("section") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("articles") empty false attrs 0
+15 depth 2 name Some("section") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("image") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("topicscience.gif") empty false attrs 0
+15 depth 2 name Some("image") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n  ") empty false attrs 0
+15 depth 1 name Some("story") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n ") empty false attrs 0
+1 depth 1 name Some("story") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("title") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("California Gov. Halts Wage Info Sale") empty false attrs 0
+15 depth 2 name Some("title") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("url") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("http://slashdot.org/articles/99/06/04/235256.shtml") empty false attrs 0
+15 depth 2 name Some("url") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("time") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("1999-06-04 23:05:34") empty false attrs 0
+15 depth 2 name Some("time") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("author") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("Hemos") empty false attrs 0
+15 depth 2 name Some("author") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("department") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("woo-hoo!") empty false attrs 0
+15 depth 2 name Some("department") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("topic") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("usa") empty false attrs 0
+15 depth 2 name Some("topic") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("comments") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("16") empty false attrs 0
+15 depth 2 name Some("comments") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("section") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("articles") empty false attrs 0
+15 depth 2 name Some("section") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("image") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("topicus.gif") empty false attrs 0
+15 depth 2 name Some("image") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n  ") empty false attrs 0
+15 depth 1 name Some("story") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n ") empty false attrs 0
+1 depth 1 name Some("story") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("title") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("Red Hat Announces IPO") empty false attrs 0
+15 depth 2 name Some("title") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("url") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("http://slashdot.org/articles/99/06/04/0849207.shtml") empty false attrs 0
+15 depth 2 name Some("url") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("time") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("1999-06-04 19:30:18") empty false attrs 0
+15 depth 2 name Some("time") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("author") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("Justin") empty false attrs 0
+15 depth 2 name Some("author") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("department") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("details-sketchy") empty false attrs 0
+15 depth 2 name Some("department") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("topic") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("redhat") empty false attrs 0
+15 depth 2 name Some("topic") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("comments") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("155") empty false attrs 0
+15 depth 2 name Some("comments") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("section") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("articles") empty false attrs 0
+15 depth 2 name Some("section") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("image") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("topicredhat.gif") empty false attrs 0
+15 depth 2 name Some("image") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n  ") empty false attrs 0
+15 depth 1 name Some("story") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n") empty false attrs 0
+15 depth 0 name Some("ultramode") value None empty false attrs 0

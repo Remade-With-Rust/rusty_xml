@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<article>
+  <para>A paragraph with <b>bold</b> and <i>italic</i> and trailing space. </para>
+  <para> Leading space and <b>bold at the start</b>.</para>
+  <para>Adjacent<b>elements</b><i>with</i><u>no</u>text between them.</para>
+  <para>An entity &amp; a reference &#65; and a <![CDATA[CDATA <section>]]> inline.</para>
+  <para xml:space="preserve">   preserved     spacing   </para>
+  <empty></empty>
+  <selfclosed/>
+  <deep><a><b><c><d><e>five levels down</e></d></c></b></a></deep>
+  <!-- a comment between elements -->
+  <?target instruction data?>
+  <after-comment>text</after-comment>
+</article>

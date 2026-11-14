@@ -1,0 +1,83 @@
+1 depth 0 name Some("html") value None empty false attrs 2
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("head") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("title") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("Corpus page") empty false attrs 0
+15 depth 2 name Some("title") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("meta") value None empty true attrs 2
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("link") value None empty true attrs 3
+14 depth 2 name Some("#text") value Some("\n  ") empty false attrs 0
+15 depth 1 name Some("head") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("body") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("h1") value None empty false attrs 1
+3 depth 3 name Some("#text") value Some("Heading with “quotes”") empty false attrs 0
+15 depth 2 name Some("h1") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("p") value None empty false attrs 1
+3 depth 3 name Some("#text") value Some("Text with ") empty false attrs 0
+1 depth 3 name Some("em") value None empty false attrs 0
+3 depth 4 name Some("#text") value Some("emphasis") empty false attrs 0
+15 depth 3 name Some("em") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some(", ") empty false attrs 0
+1 depth 3 name Some("strong") value None empty false attrs 0
+3 depth 4 name Some("#text") value Some("strength") empty false attrs 0
+15 depth 3 name Some("strong") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some(" and\n      a ") empty false attrs 0
+1 depth 3 name Some("a") value None empty false attrs 2
+3 depth 4 name Some("#text") value Some("link") empty false attrs 0
+15 depth 3 name Some("a") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some(".") empty false attrs 0
+15 depth 2 name Some("p") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("ul") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("li") value None empty false attrs 0
+3 depth 4 name Some("#text") value Some("one") empty false attrs 0
+15 depth 3 name Some("li") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("li") value None empty false attrs 0
+3 depth 4 name Some("#text") value Some("two") empty false attrs 0
+1 depth 4 name Some("br") value None empty true attrs 0
+3 depth 4 name Some("#text") value Some("and a half") empty false attrs 0
+15 depth 3 name Some("li") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("li") value None empty false attrs 0
+3 depth 4 name Some("#text") value Some("three") empty false attrs 0
+15 depth 3 name Some("li") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n    ") empty false attrs 0
+15 depth 2 name Some("ul") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("table") value None empty false attrs 1
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("tr") value None empty false attrs 0
+1 depth 4 name Some("th") value None empty false attrs 0
+3 depth 5 name Some("#text") value Some("a") empty false attrs 0
+15 depth 4 name Some("th") value None empty false attrs 0
+1 depth 4 name Some("th") value None empty false attrs 0
+3 depth 5 name Some("#text") value Some("b") empty false attrs 0
+15 depth 4 name Some("th") value None empty false attrs 0
+15 depth 3 name Some("tr") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("tr") value None empty false attrs 0
+1 depth 4 name Some("td") value None empty false attrs 0
+3 depth 5 name Some("#text") value Some("1") empty false attrs 0
+15 depth 4 name Some("td") value None empty false attrs 0
+1 depth 4 name Some("td") value None empty false attrs 0
+3 depth 5 name Some("#text") value Some("2") empty false attrs 0
+15 depth 4 name Some("td") value None empty false attrs 0
+15 depth 3 name Some("tr") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n    ") empty false attrs 0
+15 depth 2 name Some("table") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("pre") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("  leading space\n    and a newline") empty false attrs 0
+15 depth 2 name Some("pre") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n  ") empty false attrs 0
+15 depth 1 name Some("body") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n") empty false attrs 0
+15 depth 0 name Some("html") value None empty false attrs 0

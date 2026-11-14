@@ -1,0 +1,4 @@
+<!ELEMENT doc (head, item+)>
+<!ELEMENT head (#PCDATA)>
+<!ELEMENT item (#PCDATA)>
+<!ATTLIST item id CDATA #REQUIRED>

@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"
+     width="500" height="400" viewBox="0 0 500 400" version="1.1">
+  <title>Attribute-heavy corpus document</title>
+  <defs>
+    <linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="red"/>
+      <stop offset="100%" stop-color="blue"/>
+    </linearGradient>
+  </defs>
+  <rect id="r0" x="0" y="0" width="10" height="10" fill="#000000" stroke="black" stroke-width="0.5" opacity="0.0" transform="translate(0,0)"/>
+  <rect id="r1" x="11" y="7" width="10" height="10" fill="#060301" stroke="black" stroke-width="0.5" opacity="0.1" transform="translate(1,0)"/>
+  <rect id="r2" x="22" y="14" width="10" height="10" fill="#0c0602" stroke="black" stroke-width="0.5" opacity="0.2" transform="translate(2,0)"/>
+  <rect id="r3" x="33" y="21" width="10" height="10" fill="#120903" stroke="black" stroke-width="0.5" opacity="0.3" transform="translate(3,0)"/>
+  <rect id="r4" x="44" y="28" width="10" height="10" fill="#180c04" stroke="black" stroke-width="0.5" opacity="0.4" transform="translate(4,0)"/>
+  <rect id="r5" x="55" y="35" width="10" height="10" fill="#1e0f05" stroke="black" stroke-width="0.5" opacity="0.5" transform="translate(5,0)"/>
+  <rect id="r6" x="66" y="42" width="10" height="10" fill="#241206" stroke="black" stroke-width="0.5" opacity="0.6" transform="translate(6,0)"/>
+  <rect id="r7" x="77" y="49" width="10" height="10" fill="#2a1507" stroke="black" stroke-width="0.5" opacity="0.7" transform="translate(7,0)"/>
+  <rect id="r8" x="88" y="56" width="10" height="10" fill="#301808" stroke="black" stroke-width="0.5" opacity="0.8" transform="translate(8,0)"/>
+  <rect id="r9" x="99" y="63" width="10" height="10" fill="#361b09" stroke="black" stroke-width="0.5" opacity="0.9" transform="translate(9,0)"/>
+  <rect id="r10" x="110" y="70" width="10" height="10" fill="#3c1e0a" stroke="black" stroke-width="0.5" opacity="0.0" transform="translate(10,0)"/>
+  <rect id="r11" x="121" y="77" width="10" height="10" fill="#42210b" stroke="black" stroke-width="0.5" opacity="0.1" transform="translate(11,0)"/>
+  <rect id="r12" x="132" y="84" width="10" height="10" fill="#48240c" stroke="black" stroke-width="0.5" opacity="0.2" transform="translate(12,0)"/>
+  <rect id="r13" x="143" y="91" width="10" height="10" fill="#4e270d" stroke="black" stroke-width="0.5" opacity="0.3" transform="translate(13,0)"/>
+  <rect id="r14" x="154" y="98" width="10" height="10" fill="#542a0e" stroke="black" stroke-width="0.5" opacity="0.4" transform="translate(14,0)"/>
+  <rect id="r15" x="165" y="105" width="10" height="10" fill="#5a2d0f" stroke="black" stroke-width="0.5" opacity="0.5" transform="translate(15,0)"/>
+  <rect id="r16" x="176" y="112" width="10" height="10" fill="#603010" stroke="black" stroke-width="0.5" opacity="0.6" transform="translate(16,0)"/>
+  <rect id="r17" x="187" y="119" width="10" height="10" fill="#663311" stroke="black" stroke-width="0.5" opacity="0.7" transform="translate(17,0)"/>
+  <rect id="r18" x="198" y="126" width="10" height="10" fill="#6c3612" stroke="black" stroke-width="0.5" opacity="0.8" transform="translate(18,0)"/>
+  <rect id="r19" x="209" y="133" width="10" height="10" fill="#723913" stroke="black" stroke-width="0.5" opacity="0.9" transform="translate(19,0)"/>
+  <rect id="r20" x="220" y="140" width="10" height="10" fill="#783c14" stroke="black" stroke-width="0.5" opacity="0.0" transform="translate(20,0)"/>
+  <rect id="r21" x="231" y="147" width="10" height="10" fill="#7e3f15" stroke="black" stroke-width="0.5" opacity="0.1" transform="translate(21,0)"/>
+  <rect id="r22" x="242" y="154" width="10" height="10" fill="#844216" stroke="black" stroke-width="0.5" opacity="0.2" transform="translate(22,0)"/>
+  <rect id="r23" x="253" y="161" width="10" height="10" fill="#8a4517" stroke="black" stroke-width="0.5" opacity="0.3" transform="translate(23,0)"/>
+  <rect id="r24" x="264" y="168" width="10" height="10" fill="#904818" stroke="black" stroke-width="0.5" opacity="0.4" transform="translate(24,0)"/>
+  <rect id="r25" x="275" y="175" width="10" height="10" fill="#964b19" stroke="black" stroke-width="0.5" opacity="0.5" transform="translate(25,0)"/>
+  <rect id="r26" x="286" y="182" width="10" height="10" fill="#9c4e1a" stroke="black" stroke-width="0.5" opacity="0.6" transform="translate(26,0)"/>
+  <rect id="r27" x="297" y="189" width="10" height="10" fill="#a2511b" stroke="black" stroke-width="0.5" opacity="0.7" transform="translate(27,0)"/>
+  <rect id="r28" x="308" y="196" width="10" height="10" fill="#a8541c" stroke="black" stroke-width="0.5" opacity="0.8" transform="translate(28,0)"/>
+  <rect id="r29" x="319" y="203" width="10" height="10" fill="#ae571d" stroke="black" stroke-width="0.5" opacity="0.9" transform="translate(29,0)"/>
+  <rect id="r30" x="330" y="210" width="10" height="10" fill="#b45a1e" stroke="black" stroke-width="0.5" opacity="0.0" transform="translate(30,0)"/>
+  <rect id="r31" x="341" y="217" width="10" height="10" fill="#ba5d1f" stroke="black" stroke-width="0.5" opacity="0.1" transform="translate(31,0)"/>
+  <rect id="r32" x="352" y="224" width="10" height="10" fill="#c06020" stroke="black" stroke-width="0.5" opacity="0.2" transform="translate(32,0)"/>
+  <rect id="r33" x="363" y="231" width="10" height="10" fill="#c66321" stroke="black" stroke-width="0.5" opacity="0.3" transform="translate(33,0)"/>
+  <rect id="r34" x="374" y="238" width="10" height="10" fill="#cc6622" stroke="black" stroke-width="0.5" opacity="0.4" transform="translate(34,0)"/>
+  <rect id="r35" x="385" y="245" width="10" height="10" fill="#d26923" stroke="black" stroke-width="0.5" opacity="0.5" transform="translate(35,0)"/>
+  <rect id="r36" x="396" y="252" width="10" height="10" fill="#d86c24" stroke="black" stroke-width="0.5" opacity="0.6" transform="translate(36,0)"/>
+  <rect id="r37" x="407" y="259" width="10" height="10" fill="#de6f25" stroke="black" stroke-width="0.5" opacity="0.7" transform="translate(37,0)"/>
+  <rect id="r38" x="418" y="266" width="10" height="10" fill="#e47226" stroke="black" stroke-width="0.5" opacity="0.8" transform="translate(38,0)"/>
+  <rect id="r39" x="429" y="273" width="10" height="10" fill="#ea7527" stroke="black" stroke-width="0.5" opacity="0.9" transform="translate(39,0)"/>
+  <use xlink:href="#r0" x="200" y="200"/>
+  <text x="10" y="380" font-family="serif" font-size="12">caption &amp; label</text>
+</svg>

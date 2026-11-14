@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+pub mod golden;
 
 use rusty_xml::{InterruptCheck, InterruptError, XmlError, XML_ERR_USER_STOP};
 use std::cell::Cell;

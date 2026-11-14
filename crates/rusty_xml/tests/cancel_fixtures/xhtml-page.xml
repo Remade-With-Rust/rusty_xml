@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN"
+  "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+  <head>
+    <title>Corpus page</title>
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8"/>
+    <link rel="stylesheet" href="s.css" type="text/css"/>
+  </head>
+  <body>
+    <h1 id="top">Heading with &#8220;quotes&#8221;</h1>
+    <p class="intro">Text with <em>emphasis</em>, <strong>strength</strong> and
+      a <a href="#top" title="up &amp; away">link</a>.</p>
+    <ul>
+      <li>one</li>
+      <li>two<br/>and a half</li>
+      <li>three</li>
+    </ul>
+    <table summary="numbers">
+      <tr><th>a</th><th>b</th></tr>
+      <tr><td>1</td><td>2</td></tr>
+    </table>
+    <pre>  leading space
+    and a newline</pre>
+  </body>
+</html>

@@ -1,0 +1,107 @@
+1 depth 0 name Some("svg") value None empty false attrs 4
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("title") value None empty false attrs 0
+3 depth 2 name Some("#text") value Some("Attribute-heavy corpus document") empty false attrs 0
+15 depth 1 name Some("title") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("defs") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("linearGradient") value None empty false attrs 5
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("stop") value None empty true attrs 2
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("stop") value None empty true attrs 2
+14 depth 3 name Some("#text") value Some("\n    ") empty false attrs 0
+15 depth 2 name Some("linearGradient") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n  ") empty false attrs 0
+15 depth 1 name Some("defs") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("rect") value None empty true attrs 10
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("rect") value None empty true attrs 10
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("rect") value None empty true attrs 10
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("rect") value None empty true attrs 10
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("rect") value None empty true attrs 10
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("rect") value None empty true attrs 10
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("rect") value None empty true attrs 10
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("rect") value None empty true attrs 10
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("rect") value None empty true attrs 10
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("rect") value None empty true attrs 10
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("rect") value None empty true attrs 10
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("rect") value None empty true attrs 10
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("rect") value None empty true attrs 10
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("rect") value None empty true attrs 10
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("rect") value None empty true attrs 10
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("rect") value None empty true attrs 10
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("rect") value None empty true attrs 10
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("rect") value None empty true attrs 10
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("rect") value None empty true attrs 10
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("rect") value None empty true attrs 10
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("rect") value None empty true attrs 10
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("rect") value None empty true attrs 10
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("rect") value None empty true attrs 10
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("rect") value None empty true attrs 10
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("rect") value None empty true attrs 10
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("rect") value None empty true attrs 10
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("rect") value None empty true attrs 10
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("rect") value None empty true attrs 10
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("rect") value None empty true attrs 10
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("rect") value None empty true attrs 10
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("rect") value None empty true attrs 10
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("rect") value None empty true attrs 10
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("rect") value None empty true attrs 10
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("rect") value None empty true attrs 10
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("rect") value None empty true attrs 10
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("rect") value None empty true attrs 10
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("rect") value None empty true attrs 10
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("rect") value None empty true attrs 10
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("rect") value None empty true attrs 10
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("rect") value None empty true attrs 10
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("use") value None empty true attrs 3
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("text") value None empty false attrs 4
+3 depth 2 name Some("#text") value Some("caption ") empty false attrs 0
+3 depth 2 name Some("#text") value Some("&") empty false attrs 0
+3 depth 2 name Some("#text") value Some(" label") empty false attrs 0
+15 depth 1 name Some("text") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n") empty false attrs 0
+15 depth 0 name Some("svg") value None empty false attrs 0

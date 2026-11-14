@@ -1,0 +1,13 @@
+OK
+<root xmlns="urn:default:one" xml:base="urn:base">
+  <child>in the default namespace</child>
+  <a:child xmlns:a="urn:a" xmlns:b="urn:b" xml:lang="en-GB" b:attr="prefixed attribute">in a</a:child>
+  <rebound>
+    <a:child xmlns:a="urn:a-rebound">a means something else here</a:child>
+  </rebound>
+  <undeclared xmlns="">
+    <child>in no namespace at all</child>
+  </undeclared>
+  <a:mixed xmlns:a="urn:a" xml:space="preserve">  text  <b:inner xmlns:b="urn:b"></b:inner>  more  </a:mixed>
+  <empty-with-ns></empty-with-ns>
+</root>

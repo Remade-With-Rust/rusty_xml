@@ -1,0 +1,459 @@
+1 depth 0 name Some("rss") value None empty false attrs 1
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("channel") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("title") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("Example — feed") empty false attrs 0
+15 depth 2 name Some("title") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("link") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("https://example.invalid/") empty false attrs 0
+15 depth 2 name Some("link") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("description") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("A feed with CDATA, entities and mixed content.") empty false attrs 0
+15 depth 2 name Some("description") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("language") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("en-gb") empty false attrs 0
+15 depth 2 name Some("language") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("dc:creator") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("nobody") empty false attrs 0
+15 depth 2 name Some("dc:creator") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("item") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("title") value None empty false attrs 0
+3 depth 4 name Some("#text") value Some("Item 1 ") empty false attrs 0
+3 depth 4 name Some("#text") value Some("&") empty false attrs 0
+3 depth 4 name Some("#text") value Some(" the ") empty false attrs 0
+3 depth 4 name Some("#text") value Some("<") empty false attrs 0
+3 depth 4 name Some("#text") value Some("angle") empty false attrs 0
+3 depth 4 name Some("#text") value Some(">") empty false attrs 0
+3 depth 4 name Some("#text") value Some(" test") empty false attrs 0
+15 depth 3 name Some("title") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("link") value None empty false attrs 0
+3 depth 4 name Some("#text") value Some("https://example.invalid/1?a=1") empty false attrs 0
+3 depth 4 name Some("#text") value Some("&") empty false attrs 0
+3 depth 4 name Some("#text") value Some("b=2") empty false attrs 0
+15 depth 3 name Some("link") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("guid") value None empty false attrs 1
+3 depth 4 name Some("#text") value Some("urn:uuid:0000-0001") empty false attrs 0
+15 depth 3 name Some("guid") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("pubDate") value None empty false attrs 0
+3 depth 4 name Some("#text") value Some("Tue, 02 Jun 1999 14:39:59 GMT") empty false attrs 0
+15 depth 3 name Some("pubDate") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("description") value None empty false attrs 0
+4 depth 4 name Some("#cdata-section") value Some("Raw <b>markup</b> & ampersands ]] > stay put.") empty false attrs 0
+15 depth 3 name Some("description") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("category") value None empty false attrs 1
+3 depth 4 name Some("#text") value Some("news") empty false attrs 0
+15 depth 3 name Some("category") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n    ") empty false attrs 0
+15 depth 2 name Some("item") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("item") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("title") value None empty false attrs 0
+3 depth 4 name Some("#text") value Some("Item 2 ") empty false attrs 0
+3 depth 4 name Some("#text") value Some("&") empty false attrs 0
+3 depth 4 name Some("#text") value Some(" the ") empty false attrs 0
+3 depth 4 name Some("#text") value Some("<") empty false attrs 0
+3 depth 4 name Some("#text") value Some("angle") empty false attrs 0
+3 depth 4 name Some("#text") value Some(">") empty false attrs 0
+3 depth 4 name Some("#text") value Some(" test") empty false attrs 0
+15 depth 3 name Some("title") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("link") value None empty false attrs 0
+3 depth 4 name Some("#text") value Some("https://example.invalid/2?a=1") empty false attrs 0
+3 depth 4 name Some("#text") value Some("&") empty false attrs 0
+3 depth 4 name Some("#text") value Some("b=2") empty false attrs 0
+15 depth 3 name Some("link") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("guid") value None empty false attrs 1
+3 depth 4 name Some("#text") value Some("urn:uuid:0000-0002") empty false attrs 0
+15 depth 3 name Some("guid") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("pubDate") value None empty false attrs 0
+3 depth 4 name Some("#text") value Some("Tue, 03 Jun 1999 14:39:59 GMT") empty false attrs 0
+15 depth 3 name Some("pubDate") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("description") value None empty false attrs 0
+4 depth 4 name Some("#cdata-section") value Some("Raw <b>markup</b> & ampersands ]] > stay put.") empty false attrs 0
+15 depth 3 name Some("description") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("category") value None empty false attrs 1
+3 depth 4 name Some("#text") value Some("news") empty false attrs 0
+15 depth 3 name Some("category") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n    ") empty false attrs 0
+15 depth 2 name Some("item") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("item") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("title") value None empty false attrs 0
+3 depth 4 name Some("#text") value Some("Item 3 ") empty false attrs 0
+3 depth 4 name Some("#text") value Some("&") empty false attrs 0
+3 depth 4 name Some("#text") value Some(" the ") empty false attrs 0
+3 depth 4 name Some("#text") value Some("<") empty false attrs 0
+3 depth 4 name Some("#text") value Some("angle") empty false attrs 0
+3 depth 4 name Some("#text") value Some(">") empty false attrs 0
+3 depth 4 name Some("#text") value Some(" test") empty false attrs 0
+15 depth 3 name Some("title") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("link") value None empty false attrs 0
+3 depth 4 name Some("#text") value Some("https://example.invalid/3?a=1") empty false attrs 0
+3 depth 4 name Some("#text") value Some("&") empty false attrs 0
+3 depth 4 name Some("#text") value Some("b=2") empty false attrs 0
+15 depth 3 name Some("link") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("guid") value None empty false attrs 1
+3 depth 4 name Some("#text") value Some("urn:uuid:0000-0003") empty false attrs 0
+15 depth 3 name Some("guid") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("pubDate") value None empty false attrs 0
+3 depth 4 name Some("#text") value Some("Tue, 04 Jun 1999 14:39:59 GMT") empty false attrs 0
+15 depth 3 name Some("pubDate") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("description") value None empty false attrs 0
+4 depth 4 name Some("#cdata-section") value Some("Raw <b>markup</b> & ampersands ]] > stay put.") empty false attrs 0
+15 depth 3 name Some("description") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("category") value None empty false attrs 1
+3 depth 4 name Some("#text") value Some("news") empty false attrs 0
+15 depth 3 name Some("category") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n    ") empty false attrs 0
+15 depth 2 name Some("item") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("item") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("title") value None empty false attrs 0
+3 depth 4 name Some("#text") value Some("Item 4 ") empty false attrs 0
+3 depth 4 name Some("#text") value Some("&") empty false attrs 0
+3 depth 4 name Some("#text") value Some(" the ") empty false attrs 0
+3 depth 4 name Some("#text") value Some("<") empty false attrs 0
+3 depth 4 name Some("#text") value Some("angle") empty false attrs 0
+3 depth 4 name Some("#text") value Some(">") empty false attrs 0
+3 depth 4 name Some("#text") value Some(" test") empty false attrs 0
+15 depth 3 name Some("title") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("link") value None empty false attrs 0
+3 depth 4 name Some("#text") value Some("https://example.invalid/4?a=1") empty false attrs 0
+3 depth 4 name Some("#text") value Some("&") empty false attrs 0
+3 depth 4 name Some("#text") value Some("b=2") empty false attrs 0
+15 depth 3 name Some("link") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("guid") value None empty false attrs 1
+3 depth 4 name Some("#text") value Some("urn:uuid:0000-0004") empty false attrs 0
+15 depth 3 name Some("guid") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("pubDate") value None empty false attrs 0
+3 depth 4 name Some("#text") value Some("Tue, 05 Jun 1999 14:39:59 GMT") empty false attrs 0
+15 depth 3 name Some("pubDate") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("description") value None empty false attrs 0
+4 depth 4 name Some("#cdata-section") value Some("Raw <b>markup</b> & ampersands ]] > stay put.") empty false attrs 0
+15 depth 3 name Some("description") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("category") value None empty false attrs 1
+3 depth 4 name Some("#text") value Some("news") empty false attrs 0
+15 depth 3 name Some("category") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n    ") empty false attrs 0
+15 depth 2 name Some("item") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("item") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("title") value None empty false attrs 0
+3 depth 4 name Some("#text") value Some("Item 5 ") empty false attrs 0
+3 depth 4 name Some("#text") value Some("&") empty false attrs 0
+3 depth 4 name Some("#text") value Some(" the ") empty false attrs 0
+3 depth 4 name Some("#text") value Some("<") empty false attrs 0
+3 depth 4 name Some("#text") value Some("angle") empty false attrs 0
+3 depth 4 name Some("#text") value Some(">") empty false attrs 0
+3 depth 4 name Some("#text") value Some(" test") empty false attrs 0
+15 depth 3 name Some("title") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("link") value None empty false attrs 0
+3 depth 4 name Some("#text") value Some("https://example.invalid/5?a=1") empty false attrs 0
+3 depth 4 name Some("#text") value Some("&") empty false attrs 0
+3 depth 4 name Some("#text") value Some("b=2") empty false attrs 0
+15 depth 3 name Some("link") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("guid") value None empty false attrs 1
+3 depth 4 name Some("#text") value Some("urn:uuid:0000-0005") empty false attrs 0
+15 depth 3 name Some("guid") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("pubDate") value None empty false attrs 0
+3 depth 4 name Some("#text") value Some("Tue, 06 Jun 1999 14:39:59 GMT") empty false attrs 0
+15 depth 3 name Some("pubDate") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("description") value None empty false attrs 0
+4 depth 4 name Some("#cdata-section") value Some("Raw <b>markup</b> & ampersands ]] > stay put.") empty false attrs 0
+15 depth 3 name Some("description") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("category") value None empty false attrs 1
+3 depth 4 name Some("#text") value Some("news") empty false attrs 0
+15 depth 3 name Some("category") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n    ") empty false attrs 0
+15 depth 2 name Some("item") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("item") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("title") value None empty false attrs 0
+3 depth 4 name Some("#text") value Some("Item 6 ") empty false attrs 0
+3 depth 4 name Some("#text") value Some("&") empty false attrs 0
+3 depth 4 name Some("#text") value Some(" the ") empty false attrs 0
+3 depth 4 name Some("#text") value Some("<") empty false attrs 0
+3 depth 4 name Some("#text") value Some("angle") empty false attrs 0
+3 depth 4 name Some("#text") value Some(">") empty false attrs 0
+3 depth 4 name Some("#text") value Some(" test") empty false attrs 0
+15 depth 3 name Some("title") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("link") value None empty false attrs 0
+3 depth 4 name Some("#text") value Some("https://example.invalid/6?a=1") empty false attrs 0
+3 depth 4 name Some("#text") value Some("&") empty false attrs 0
+3 depth 4 name Some("#text") value Some("b=2") empty false attrs 0
+15 depth 3 name Some("link") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("guid") value None empty false attrs 1
+3 depth 4 name Some("#text") value Some("urn:uuid:0000-0006") empty false attrs 0
+15 depth 3 name Some("guid") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("pubDate") value None empty false attrs 0
+3 depth 4 name Some("#text") value Some("Tue, 07 Jun 1999 14:39:59 GMT") empty false attrs 0
+15 depth 3 name Some("pubDate") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("description") value None empty false attrs 0
+4 depth 4 name Some("#cdata-section") value Some("Raw <b>markup</b> & ampersands ]] > stay put.") empty false attrs 0
+15 depth 3 name Some("description") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("category") value None empty false attrs 1
+3 depth 4 name Some("#text") value Some("news") empty false attrs 0
+15 depth 3 name Some("category") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n    ") empty false attrs 0
+15 depth 2 name Some("item") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("item") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("title") value None empty false attrs 0
+3 depth 4 name Some("#text") value Some("Item 7 ") empty false attrs 0
+3 depth 4 name Some("#text") value Some("&") empty false attrs 0
+3 depth 4 name Some("#text") value Some(" the ") empty false attrs 0
+3 depth 4 name Some("#text") value Some("<") empty false attrs 0
+3 depth 4 name Some("#text") value Some("angle") empty false attrs 0
+3 depth 4 name Some("#text") value Some(">") empty false attrs 0
+3 depth 4 name Some("#text") value Some(" test") empty false attrs 0
+15 depth 3 name Some("title") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("link") value None empty false attrs 0
+3 depth 4 name Some("#text") value Some("https://example.invalid/7?a=1") empty false attrs 0
+3 depth 4 name Some("#text") value Some("&") empty false attrs 0
+3 depth 4 name Some("#text") value Some("b=2") empty false attrs 0
+15 depth 3 name Some("link") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("guid") value None empty false attrs 1
+3 depth 4 name Some("#text") value Some("urn:uuid:0000-0007") empty false attrs 0
+15 depth 3 name Some("guid") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("pubDate") value None empty false attrs 0
+3 depth 4 name Some("#text") value Some("Tue, 08 Jun 1999 14:39:59 GMT") empty false attrs 0
+15 depth 3 name Some("pubDate") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("description") value None empty false attrs 0
+4 depth 4 name Some("#cdata-section") value Some("Raw <b>markup</b> & ampersands ]] > stay put.") empty false attrs 0
+15 depth 3 name Some("description") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("category") value None empty false attrs 1
+3 depth 4 name Some("#text") value Some("news") empty false attrs 0
+15 depth 3 name Some("category") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n    ") empty false attrs 0
+15 depth 2 name Some("item") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("item") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("title") value None empty false attrs 0
+3 depth 4 name Some("#text") value Some("Item 8 ") empty false attrs 0
+3 depth 4 name Some("#text") value Some("&") empty false attrs 0
+3 depth 4 name Some("#text") value Some(" the ") empty false attrs 0
+3 depth 4 name Some("#text") value Some("<") empty false attrs 0
+3 depth 4 name Some("#text") value Some("angle") empty false attrs 0
+3 depth 4 name Some("#text") value Some(">") empty false attrs 0
+3 depth 4 name Some("#text") value Some(" test") empty false attrs 0
+15 depth 3 name Some("title") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("link") value None empty false attrs 0
+3 depth 4 name Some("#text") value Some("https://example.invalid/8?a=1") empty false attrs 0
+3 depth 4 name Some("#text") value Some("&") empty false attrs 0
+3 depth 4 name Some("#text") value Some("b=2") empty false attrs 0
+15 depth 3 name Some("link") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("guid") value None empty false attrs 1
+3 depth 4 name Some("#text") value Some("urn:uuid:0000-0008") empty false attrs 0
+15 depth 3 name Some("guid") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("pubDate") value None empty false attrs 0
+3 depth 4 name Some("#text") value Some("Tue, 09 Jun 1999 14:39:59 GMT") empty false attrs 0
+15 depth 3 name Some("pubDate") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("description") value None empty false attrs 0
+4 depth 4 name Some("#cdata-section") value Some("Raw <b>markup</b> & ampersands ]] > stay put.") empty false attrs 0
+15 depth 3 name Some("description") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("category") value None empty false attrs 1
+3 depth 4 name Some("#text") value Some("news") empty false attrs 0
+15 depth 3 name Some("category") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n    ") empty false attrs 0
+15 depth 2 name Some("item") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("item") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("title") value None empty false attrs 0
+3 depth 4 name Some("#text") value Some("Item 9 ") empty false attrs 0
+3 depth 4 name Some("#text") value Some("&") empty false attrs 0
+3 depth 4 name Some("#text") value Some(" the ") empty false attrs 0
+3 depth 4 name Some("#text") value Some("<") empty false attrs 0
+3 depth 4 name Some("#text") value Some("angle") empty false attrs 0
+3 depth 4 name Some("#text") value Some(">") empty false attrs 0
+3 depth 4 name Some("#text") value Some(" test") empty false attrs 0
+15 depth 3 name Some("title") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("link") value None empty false attrs 0
+3 depth 4 name Some("#text") value Some("https://example.invalid/9?a=1") empty false attrs 0
+3 depth 4 name Some("#text") value Some("&") empty false attrs 0
+3 depth 4 name Some("#text") value Some("b=2") empty false attrs 0
+15 depth 3 name Some("link") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("guid") value None empty false attrs 1
+3 depth 4 name Some("#text") value Some("urn:uuid:0000-0009") empty false attrs 0
+15 depth 3 name Some("guid") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("pubDate") value None empty false attrs 0
+3 depth 4 name Some("#text") value Some("Tue, 01 Jun 1999 14:39:59 GMT") empty false attrs 0
+15 depth 3 name Some("pubDate") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("description") value None empty false attrs 0
+4 depth 4 name Some("#cdata-section") value Some("Raw <b>markup</b> & ampersands ]] > stay put.") empty false attrs 0
+15 depth 3 name Some("description") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("category") value None empty false attrs 1
+3 depth 4 name Some("#text") value Some("news") empty false attrs 0
+15 depth 3 name Some("category") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n    ") empty false attrs 0
+15 depth 2 name Some("item") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("item") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("title") value None empty false attrs 0
+3 depth 4 name Some("#text") value Some("Item 10 ") empty false attrs 0
+3 depth 4 name Some("#text") value Some("&") empty false attrs 0
+3 depth 4 name Some("#text") value Some(" the ") empty false attrs 0
+3 depth 4 name Some("#text") value Some("<") empty false attrs 0
+3 depth 4 name Some("#text") value Some("angle") empty false attrs 0
+3 depth 4 name Some("#text") value Some(">") empty false attrs 0
+3 depth 4 name Some("#text") value Some(" test") empty false attrs 0
+15 depth 3 name Some("title") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("link") value None empty false attrs 0
+3 depth 4 name Some("#text") value Some("https://example.invalid/10?a=1") empty false attrs 0
+3 depth 4 name Some("#text") value Some("&") empty false attrs 0
+3 depth 4 name Some("#text") value Some("b=2") empty false attrs 0
+15 depth 3 name Some("link") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("guid") value None empty false attrs 1
+3 depth 4 name Some("#text") value Some("urn:uuid:0000-0010") empty false attrs 0
+15 depth 3 name Some("guid") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("pubDate") value None empty false attrs 0
+3 depth 4 name Some("#text") value Some("Tue, 02 Jun 1999 14:39:59 GMT") empty false attrs 0
+15 depth 3 name Some("pubDate") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("description") value None empty false attrs 0
+4 depth 4 name Some("#cdata-section") value Some("Raw <b>markup</b> & ampersands ]] > stay put.") empty false attrs 0
+15 depth 3 name Some("description") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("category") value None empty false attrs 1
+3 depth 4 name Some("#text") value Some("news") empty false attrs 0
+15 depth 3 name Some("category") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n    ") empty false attrs 0
+15 depth 2 name Some("item") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("item") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("title") value None empty false attrs 0
+3 depth 4 name Some("#text") value Some("Item 11 ") empty false attrs 0
+3 depth 4 name Some("#text") value Some("&") empty false attrs 0
+3 depth 4 name Some("#text") value Some(" the ") empty false attrs 0
+3 depth 4 name Some("#text") value Some("<") empty false attrs 0
+3 depth 4 name Some("#text") value Some("angle") empty false attrs 0
+3 depth 4 name Some("#text") value Some(">") empty false attrs 0
+3 depth 4 name Some("#text") value Some(" test") empty false attrs 0
+15 depth 3 name Some("title") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("link") value None empty false attrs 0
+3 depth 4 name Some("#text") value Some("https://example.invalid/11?a=1") empty false attrs 0
+3 depth 4 name Some("#text") value Some("&") empty false attrs 0
+3 depth 4 name Some("#text") value Some("b=2") empty false attrs 0
+15 depth 3 name Some("link") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("guid") value None empty false attrs 1
+3 depth 4 name Some("#text") value Some("urn:uuid:0000-0011") empty false attrs 0
+15 depth 3 name Some("guid") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("pubDate") value None empty false attrs 0
+3 depth 4 name Some("#text") value Some("Tue, 03 Jun 1999 14:39:59 GMT") empty false attrs 0
+15 depth 3 name Some("pubDate") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("description") value None empty false attrs 0
+4 depth 4 name Some("#cdata-section") value Some("Raw <b>markup</b> & ampersands ]] > stay put.") empty false attrs 0
+15 depth 3 name Some("description") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("category") value None empty false attrs 1
+3 depth 4 name Some("#text") value Some("news") empty false attrs 0
+15 depth 3 name Some("category") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n    ") empty false attrs 0
+15 depth 2 name Some("item") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("item") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("title") value None empty false attrs 0
+3 depth 4 name Some("#text") value Some("Item 12 ") empty false attrs 0
+3 depth 4 name Some("#text") value Some("&") empty false attrs 0
+3 depth 4 name Some("#text") value Some(" the ") empty false attrs 0
+3 depth 4 name Some("#text") value Some("<") empty false attrs 0
+3 depth 4 name Some("#text") value Some("angle") empty false attrs 0
+3 depth 4 name Some("#text") value Some(">") empty false attrs 0
+3 depth 4 name Some("#text") value Some(" test") empty false attrs 0
+15 depth 3 name Some("title") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("link") value None empty false attrs 0
+3 depth 4 name Some("#text") value Some("https://example.invalid/12?a=1") empty false attrs 0
+3 depth 4 name Some("#text") value Some("&") empty false attrs 0
+3 depth 4 name Some("#text") value Some("b=2") empty false attrs 0
+15 depth 3 name Some("link") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("guid") value None empty false attrs 1
+3 depth 4 name Some("#text") value Some("urn:uuid:0000-0012") empty false attrs 0
+15 depth 3 name Some("guid") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("pubDate") value None empty false attrs 0
+3 depth 4 name Some("#text") value Some("Tue, 04 Jun 1999 14:39:59 GMT") empty false attrs 0
+15 depth 3 name Some("pubDate") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("description") value None empty false attrs 0
+4 depth 4 name Some("#cdata-section") value Some("Raw <b>markup</b> & ampersands ]] > stay put.") empty false attrs 0
+15 depth 3 name Some("description") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n      ") empty false attrs 0
+1 depth 3 name Some("category") value None empty false attrs 1
+3 depth 4 name Some("#text") value Some("news") empty false attrs 0
+15 depth 3 name Some("category") value None empty false attrs 0
+14 depth 3 name Some("#text") value Some("\n    ") empty false attrs 0
+15 depth 2 name Some("item") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n  ") empty false attrs 0
+15 depth 1 name Some("channel") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n") empty false attrs 0
+15 depth 0 name Some("rss") value None empty false attrs 0

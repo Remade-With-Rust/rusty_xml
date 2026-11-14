@@ -1,0 +1,15 @@
+1 depth 0 name Some("feed") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("title") value None empty false attrs 0
+3 depth 2 name Some("#text") value Some("lite") empty false attrs 0
+15 depth 1 name Some("title") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("id") value None empty false attrs 0
+3 depth 2 name Some("#text") value Some("urn:uuid:00000000-0000-0000-0000-000000000001") empty false attrs 0
+15 depth 1 name Some("id") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("updated") value None empty false attrs 0
+3 depth 2 name Some("#text") value Some("2026-01-01T00:00:00Z") empty false attrs 0
+15 depth 1 name Some("updated") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n") empty false attrs 0
+15 depth 0 name Some("feed") value None empty false attrs 0

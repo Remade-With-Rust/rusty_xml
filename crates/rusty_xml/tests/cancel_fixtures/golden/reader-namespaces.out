@@ -1,0 +1,35 @@
+1 depth 0 name Some("root") value None empty false attrs 1
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("child") value None empty false attrs 0
+3 depth 2 name Some("#text") value Some("in the default namespace") empty false attrs 0
+15 depth 1 name Some("child") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("a:child") value None empty false attrs 2
+3 depth 2 name Some("#text") value Some("in a") empty false attrs 0
+15 depth 1 name Some("a:child") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("rebound") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("a:child") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("a means something else here") empty false attrs 0
+15 depth 2 name Some("a:child") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n  ") empty false attrs 0
+15 depth 1 name Some("rebound") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("undeclared") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("child") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("in no namespace at all") empty false attrs 0
+15 depth 2 name Some("child") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n  ") empty false attrs 0
+15 depth 1 name Some("undeclared") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("a:mixed") value None empty false attrs 1
+3 depth 2 name Some("#text") value Some("  text  ") empty false attrs 0
+1 depth 2 name Some("b:inner") value None empty true attrs 0
+3 depth 2 name Some("#text") value Some("  more  ") empty false attrs 0
+15 depth 1 name Some("a:mixed") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("empty-with-ns") value None empty true attrs 0
+14 depth 1 name Some("#text") value Some("\n") empty false attrs 0
+15 depth 0 name Some("root") value None empty false attrs 0

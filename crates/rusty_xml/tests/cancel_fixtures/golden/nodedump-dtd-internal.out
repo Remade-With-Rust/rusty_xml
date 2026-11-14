@@ -1,0 +1,7 @@
+<catalogue>
+  <product id="p1"><name>Widget by Example Ltd™</name><price>9.99</price></product>
+  <product id="p2" stock="out"><name>Gadget</name><price>19.99</price>
+    <note>Back in stock soon — ask Example Ltd.</note></product>
+  <product id="p3" stock="backorder" currency="EUR">
+    <name>Doohickey</name><price>4.50</price></product>
+</catalogue>

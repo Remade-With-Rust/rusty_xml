@@ -1,0 +1,3 @@
+<element name="doc" xmlns="http://relaxng.org/ns/structure/1.0">
+<oneOrMore><element name="item"><attribute name="id"/><text/></element></oneOrMore>
+</element>

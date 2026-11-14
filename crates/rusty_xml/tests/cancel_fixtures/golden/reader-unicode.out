@@ -1,0 +1,31 @@
+1 depth 0 name Some("document") value None empty false attrs 1
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("cjk") value None empty false attrs 0
+3 depth 2 name Some("#text") value Some("日本語のテキストです。中文测试。한국어") empty false attrs 0
+15 depth 1 name Some("cjk") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("rtl") value None empty false attrs 1
+3 depth 2 name Some("#text") value Some("مرحبا بالعالم שלום") empty false attrs 0
+15 depth 1 name Some("rtl") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("combining") value None empty false attrs 0
+3 depth 2 name Some("#text") value Some("e\u{301} a\u{300} n\u{303} o\u{308} क\u{94d}ष") empty false attrs 0
+15 depth 1 name Some("combining") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("astral") value None empty false attrs 0
+3 depth 2 name Some("#text") value Some("😀 🇬🇧 𝄞") empty false attrs 0
+15 depth 1 name Some("astral") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("élément") value None empty false attrs 1
+3 depth 2 name Some("#text") value Some("accented element and attribute names") empty false attrs 0
+15 depth 1 name Some("élément") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("refs") value None empty false attrs 0
+3 depth 2 name Some("#text") value Some("日 日 😀 😀") empty false attrs 0
+15 depth 1 name Some("refs") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("mixed") value None empty false attrs 0
+3 depth 2 name Some("#text") value Some("ASCII then 中文 then ASCII again") empty false attrs 0
+15 depth 1 name Some("mixed") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n") empty false attrs 0
+15 depth 0 name Some("document") value None empty false attrs 0

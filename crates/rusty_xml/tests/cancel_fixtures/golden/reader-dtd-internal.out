@@ -1,0 +1,39 @@
+1 depth 0 name Some("catalogue") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("product") value None empty false attrs 1
+1 depth 2 name Some("name") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("Widget by ") empty false attrs 0
+3 depth 3 name Some("#text") value Some("Example Ltd") empty false attrs 0
+3 depth 3 name Some("#text") value Some("™") empty false attrs 0
+15 depth 2 name Some("name") value None empty false attrs 0
+1 depth 2 name Some("price") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("9.99") empty false attrs 0
+15 depth 2 name Some("price") value None empty false attrs 0
+15 depth 1 name Some("product") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("product") value None empty false attrs 2
+1 depth 2 name Some("name") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("Gadget") empty false attrs 0
+15 depth 2 name Some("name") value None empty false attrs 0
+1 depth 2 name Some("price") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("19.99") empty false attrs 0
+15 depth 2 name Some("price") value None empty false attrs 0
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("note") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("Back in stock soon — ask ") empty false attrs 0
+3 depth 3 name Some("#text") value Some("Example Ltd") empty false attrs 0
+3 depth 3 name Some("#text") value Some(".") empty false attrs 0
+15 depth 2 name Some("note") value None empty false attrs 0
+15 depth 1 name Some("product") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n  ") empty false attrs 0
+1 depth 1 name Some("product") value None empty false attrs 3
+14 depth 2 name Some("#text") value Some("\n    ") empty false attrs 0
+1 depth 2 name Some("name") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("Doohickey") empty false attrs 0
+15 depth 2 name Some("name") value None empty false attrs 0
+1 depth 2 name Some("price") value None empty false attrs 0
+3 depth 3 name Some("#text") value Some("4.50") empty false attrs 0
+15 depth 2 name Some("price") value None empty false attrs 0
+15 depth 1 name Some("product") value None empty false attrs 0
+14 depth 1 name Some("#text") value Some("\n") empty false attrs 0
+15 depth 0 name Some("catalogue") value None empty false attrs 0

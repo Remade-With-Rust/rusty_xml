@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.2](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-cli-v0.9.1...rusty_xml-cli-v0.9.2) - 2026-11-14
+
+### Added
+
+- *(html)* libxml2's nesting cap, 256 by default, adjustable ([#48](https://github.com/Remade-With-Rust/rusty_xml/pull/48))
+
 ## [0.9.1](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-cli-v0.9.0...rusty_xml-cli-v0.9.1) - 2026-11-14
 
 ### Fixed

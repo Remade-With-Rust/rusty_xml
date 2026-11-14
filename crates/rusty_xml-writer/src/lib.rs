@@ -146,27 +146,10 @@ enum Step {
     Newline,
 }
 
-/// What a save polls between nodes (#39). The plain calls pass [`NoPoll`],
-/// which inlines away, so they keep their cost.
-trait Poll {
-    fn tick(&mut self) -> Result<(), Interrupted>;
-}
-
-struct NoPoll;
-
-impl Poll for NoPoll {
-    #[inline(always)]
-    fn tick(&mut self) -> Result<(), Interrupted> {
-        Ok(())
-    }
-}
-
-impl Poll for InterruptPoll<'_> {
-    #[inline]
-    fn tick(&mut self) -> Result<(), Interrupted> {
-        InterruptPoll::tick(self)
-    }
-}
+/// What a save polls between nodes (#39): `None` for the plain calls. Not
+/// generic, so the save loop is compiled once and `write_one` stays inlined
+/// into it; a generic poll split it in two and cost the plain save ~1% Ir.
+type Poll<'p, 'i> = Option<&'p mut InterruptPoll<'i>>;
 
 /// Serialize a subtree.
 ///
@@ -175,18 +158,18 @@ impl Poll for InterruptPoll<'_> {
 /// parser's own limit of 5000 -- overflowed the stack while being SAVED.
 /// Accepting a document the writer cannot serialize just moves the cliff.
 fn write_node(doc: &XmlDoc, id: NodeId, out: &mut String, opts: i32, level: i32, format: bool) {
-    // NoPoll never fails.
-    let _ = write_node_polled(doc, id, out, opts, level, format, &mut NoPoll);
+    // Without a poll it never fails.
+    let _ = write_node_polled(doc, id, out, opts, level, format, None);
 }
 
-fn write_node_polled<P: Poll>(
+fn write_node_polled(
     doc: &XmlDoc,
     id: NodeId,
     out: &mut String,
     opts: i32,
     level: i32,
     format: bool,
-    poll: &mut P,
+    mut poll: Poll<'_, '_>,
 ) -> Result<(), Interrupted> {
     let mut stack: Vec<Step> = vec![Step::Open(id, level, format)];
     while let Some(step) = stack.pop() {
@@ -202,7 +185,9 @@ fn write_node_polled<P: Poll>(
                 out.push('>');
             }
             Step::Open(id, level, format) => {
-                poll.tick()?;
+                if let Some(p) = poll.as_deref_mut() {
+                    p.tick()?;
+                }
                 write_one(doc, id, out, opts, level, format, &mut stack)
             }
         }
@@ -371,8 +356,8 @@ fn write_one(
 /// `xmlSaveDoc` / `xmlDocDumpMemory` with `xmlSaveOption` bits.
 #[doc(alias = "xmlSaveDoc")]
 pub fn xml_save_doc(doc: &XmlDoc, options: i32) -> Vec<u8> {
-    // NoPoll never fails.
-    save_doc(doc, options, &mut NoPoll).unwrap_or_default()
+    // Without a poll it never fails.
+    save_doc(doc, options, None).unwrap_or_default()
 }
 
 /// [`xml_save_doc`], stopping with `Err(Interrupted)` once `interrupt` fires.
@@ -385,10 +370,10 @@ pub fn xml_save_doc_interruptible(
 ) -> Result<Vec<u8>, Interrupted> {
     let mut poll = InterruptPoll::new(interrupt);
     poll.check()?;
-    save_doc(doc, options, &mut poll)
+    save_doc(doc, options, Some(&mut poll))
 }
 
-fn save_doc<P: Poll>(doc: &XmlDoc, options: i32, poll: &mut P) -> Result<Vec<u8>, Interrupted> {
+fn save_doc(doc: &XmlDoc, options: i32, mut poll: Poll<'_, '_>) -> Result<Vec<u8>, Interrupted> {
     let mut out = String::new();
     // An HTML document is serialized by HTML rules. It used to go out through
     // the XML writer, which emitted <?xml version="1.0" encoding="HTML"?> --
@@ -425,7 +410,7 @@ fn save_doc<P: Poll>(doc: &XmlDoc, options: i32, poll: &mut P) -> Result<Vec<u8>
     let format = (options & XML_SAVE_FORMAT) != 0;
     let mut child = doc.first_child(rusty_xml_tree::NodeId::DOCUMENT);
     while let Some(id) = child {
-        write_node_polled(doc, id, &mut out, options, 0, format, poll)?;
+        write_node_polled(doc, id, &mut out, options, 0, format, poll.as_deref_mut())?;
         out.push('\n');
         child = doc.next_sibling(id);
     }
@@ -797,7 +782,7 @@ fn push_quoted(out: &mut String, s: &str) {
     }
 }
 
-fn save_html_doc<P: Poll>(doc: &XmlDoc, options: i32, poll: &mut P) -> Result<Vec<u8>, Interrupted> {
+fn save_html_doc(doc: &XmlDoc, options: i32, mut poll: Poll<'_, '_>) -> Result<Vec<u8>, Interrupted> {
     let mut out = String::new();
     if (options & XML_SAVE_NO_DECL) == 0 {
         out.push_str("<!DOCTYPE ");
@@ -840,7 +825,7 @@ fn save_html_doc<P: Poll>(doc: &XmlDoc, options: i32, poll: &mut P) -> Result<Ve
     let format = (options & XML_SAVE_FORMAT) != 0;
     let mut child = doc.first_child(rusty_xml_tree::NodeId::DOCUMENT);
     while let Some(id) = child {
-        write_node_polled(doc, id, &mut out, options, 0, format, poll)?;
+        write_node_polled(doc, id, &mut out, options, 0, format, poll.as_deref_mut())?;
         child = doc.next_sibling(id);
     }
     // htmlNodeDumpInternal writes one newline when it climbs back to the

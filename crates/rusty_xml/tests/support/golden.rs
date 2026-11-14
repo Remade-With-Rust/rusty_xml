@@ -161,7 +161,7 @@ fn fnv(bytes: &[u8]) -> u64 {
     h
 }
 
-fn payload(bytes: &[u8]) -> String {
+pub fn payload(bytes: &[u8]) -> String {
     if bytes.len() >= BIG {
         return format!("LEN {} FNV {:016x}", bytes.len(), fnv(bytes));
     }
@@ -174,7 +174,7 @@ fn payload(bytes: &[u8]) -> String {
     }
 }
 
-fn finish(text: String) -> String {
+pub fn finish(text: String) -> String {
     if text.len() >= BIG {
         format!("LEN {} FNV {:016x}\n", text.len(), fnv(text.as_bytes()))
     } else {
@@ -182,7 +182,7 @@ fn finish(text: String) -> String {
     }
 }
 
-fn render_err(e: &XmlError) -> String {
+pub fn render_err(e: &XmlError) -> String {
     format!("ERR {} {}:{} {}\n", e.code, e.line, e.col, e.message)
 }
 
@@ -278,17 +278,49 @@ pub fn render_reader(seq: &[(i32, String)]) -> String {
     seq.iter().map(|(t, s)| format!("{t} {s}\n")).collect()
 }
 
-fn file(dir: &Path, name: &str) -> Vec<u8> {
+/// A read callback over `bytes` that hands out at most 1000 bytes per call.
+pub fn io_reader(bytes: Vec<u8>) -> impl FnMut(&mut [u8]) -> Result<usize, std::io::Error> {
+    let mut cursor = std::io::Cursor::new(bytes);
+    move |buf: &mut [u8]| {
+        let n = buf.len().min(1000);
+        cursor.read(&mut buf[..n])
+    }
+}
+
+/// The result of a context read plus the context's `last_error` and whether it holds a document.
+pub fn render_ctxt(r: Result<XmlDoc, XmlError>, ctxt: &XmlParserCtxt) -> String {
+    format!(
+        "{}last_error {:?}
+doc {}
+",
+        render_doc(r),
+        ctxt.last_error,
+        ctxt.doc.is_some()
+    )
+}
+
+/// The recorder's event count and a hash of its events, then the result.
+pub fn render_sax(rec: &SaxRecorder, r: Result<XmlDoc, XmlError>) -> String {
+    format!(
+        "events {} fp {:016x}
+{}",
+        rec.events.len(),
+        fnv(format!("{:?}", rec.events).as_bytes()),
+        render_doc(r)
+    )
+}
+
+pub fn file(dir: &Path, name: &str) -> Vec<u8> {
     let path = dir.join(name);
     fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
 
-fn number(s: &str) -> i32 {
+pub fn number(s: &str) -> i32 {
     s.parse().unwrap_or_else(|_| panic!("not a number: {s}"))
 }
 
 /// Parses a fixture with the XML parser at options 0, or renders its error.
-fn parse_fixture(bytes: &[u8]) -> Result<XmlDoc, String> {
+pub fn parse_fixture(bytes: &[u8]) -> Result<XmlDoc, String> {
     xml_read_memory(bytes, None, None, 0).map_err(|e| render_err(&e))
 }
 
@@ -300,35 +332,13 @@ pub fn run_default(dir: &Path, case: &Case) -> String {
         "ctxt" => {
             let mut ctxt = xml_new_parser_ctxt();
             let r = xml_ctxt_read_memory(&mut ctxt, &file(dir, &a[0]), None, None, number(&a[1]));
-            format!(
-                "{}last_error {:?}\ndoc {}\n",
-                render_doc(r),
-                ctxt.last_error,
-                ctxt.doc.is_some()
-            )
+            render_ctxt(r, &ctxt)
         }
-        "io" => {
-            let mut cursor = std::io::Cursor::new(file(dir, &a[0]));
-            let r = xml_read_io(
-                |buf: &mut [u8]| {
-                    let n = buf.len().min(1000);
-                    cursor.read(&mut buf[..n])
-                },
-                None,
-                None,
-                0,
-            );
-            render_doc(r)
-        }
+        "io" => render_doc(xml_read_io(io_reader(file(dir, &a[0])), None, None, 0)),
         "sax" => {
             let mut rec = SaxRecorder::new();
             let r = xml_sax_parse_memory(&file(dir, &a[0]), 0, &mut rec);
-            format!(
-                "events {} fp {:016x}\n{}",
-                rec.events.len(),
-                fnv(format!("{:?}", rec.events).as_bytes()),
-                render_doc(r)
-            )
+            render_sax(&rec, r)
         }
         "push" => {
             let bytes = file(dir, &a[0]);

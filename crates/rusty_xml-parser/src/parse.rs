@@ -1,7 +1,7 @@
 //! UTF-8 well-formed document parser. No DTD / HTML / XInclude / recovery (M1).
 
 use rusty_xml_sax::{SaxAttr, SaxHandler};
-use rusty_xml_tree::{NodeId, NodeKind, XmlDoc};
+use rusty_xml_tree::{InterruptCheck, NoInterrupt, NodeId, NodeKind, XmlDoc};
 
 use crate::chvalid::{xml_is_char, xml_is_name_char, xml_is_name_start_char};
 use crate::error::*;
@@ -160,7 +160,21 @@ pub fn xml_read_memory(
     options: i32,
 ) -> Result<XmlDoc, XmlError> {
     let mut sink = rusty_xml_sax::NullSax;
-    parse_doc(buffer, url, encoding, options, &mut sink)
+    let mut check = InterruptCheck::new(&NoInterrupt);
+    parse_doc(buffer, url, encoding, options, &mut sink, &mut check)
+}
+
+/// Like [`xml_read_memory`], but fails with `XML_ERR_USER_STOP` once `check` reports an interrupt.
+/// A stop never returns a partial document, not even under `XML_PARSE_RECOVER`.
+pub fn xml_read_memory_with_interrupt(
+    buffer: &[u8],
+    url: Option<&str>,
+    encoding: Option<&str>,
+    options: i32,
+    check: &mut InterruptCheck<'_>,
+) -> Result<XmlDoc, XmlError> {
+    let mut sink = rusty_xml_sax::NullSax;
+    parse_doc(buffer, url, encoding, options, &mut sink, check)
 }
 
 /// `xmlReadDoc`.
@@ -196,8 +210,22 @@ pub fn xml_ctxt_read_memory(
     encoding: Option<&str>,
     options: i32,
 ) -> Result<XmlDoc, XmlError> {
+    let mut check = InterruptCheck::new(&NoInterrupt);
+    xml_ctxt_read_memory_with_interrupt(ctxt, buffer, url, encoding, options, &mut check)
+}
+
+/// Like [`xml_ctxt_read_memory`], but fails with `XML_ERR_USER_STOP` once `check` reports an
+/// interrupt; `ctxt.last_error` holds that error and `ctxt.doc` keeps its previous value.
+pub fn xml_ctxt_read_memory_with_interrupt(
+    ctxt: &mut XmlParserCtxt,
+    buffer: &[u8],
+    url: Option<&str>,
+    encoding: Option<&str>,
+    options: i32,
+    check: &mut InterruptCheck<'_>,
+) -> Result<XmlDoc, XmlError> {
     let opts = if options != 0 { options } else { ctxt.options };
-    match xml_read_memory(buffer, url, encoding, opts) {
+    match xml_read_memory_with_interrupt(buffer, url, encoding, opts, check) {
         Ok(doc) => {
             ctxt.doc = Some(doc.clone());
             ctxt.last_error = None;
@@ -216,7 +244,19 @@ pub fn xml_sax_parse_memory(
     options: i32,
     sax: &mut dyn SaxHandler,
 ) -> Result<XmlDoc, XmlError> {
-    parse_doc(buffer, None, None, options, sax)
+    let mut check = InterruptCheck::new(&NoInterrupt);
+    parse_doc(buffer, None, None, options, sax, &mut check)
+}
+
+/// Like [`xml_sax_parse_memory`], but fails with `XML_ERR_USER_STOP` once `check` reports an
+/// interrupt. Events already delivered stay with the handler; none follows the stop.
+pub fn xml_sax_parse_memory_with_interrupt(
+    buffer: &[u8],
+    options: i32,
+    sax: &mut dyn SaxHandler,
+    check: &mut InterruptCheck<'_>,
+) -> Result<XmlDoc, XmlError> {
+    parse_doc(buffer, None, None, options, sax, check)
 }
 
 /// Push parser context (`xmlCreatePushParserCtxt`).
@@ -286,6 +326,7 @@ pub fn xml_parse_chunk(
     ctxt.buf.extend_from_slice(chunk);
     let terminate = terminate != 0;
     let opts = ctxt.options;
+    let mut check = InterruptCheck::new(&NoInterrupt);
 
     // Phase 1 -- prolog. Nothing can stream until the root's start tag is in
     // hand, so buffer until it parses. The prolog is small, and re-parsing it
@@ -303,7 +344,7 @@ pub fn xml_parse_chunk(
     if ctxt.state.is_none() && !ctxt.no_stream {
         let mut sink = rusty_xml_sax::NullSax;
         let started = {
-            let mut p = fresh_parser(&ctxt.buf, opts, &mut sink);
+            let mut p = fresh_parser(&ctxt.buf, opts, &mut sink, &mut check);
             match p.parse_prolog().and_then(|()| p.open_element(NodeId::DOCUMENT)) {
                 Ok(Some(root)) => {
                     let at = p.pos;
@@ -344,7 +385,7 @@ pub fn xml_parse_chunk(
     let mut st = ctxt.state.take().expect("state is present past the prolog");
     let mut open = std::mem::take(&mut st.open);
     let was_closed = st.root_closed;
-    let mut p = Parser::resume(&ctxt.buf, opts, &mut sink, st);
+    let mut p = Parser::resume(&ctxt.buf, opts, &mut sink, st, &mut check);
 
     // Once the root has closed, everything left is epilogue; re-entering the
     // content loop would parse trailing whitespace as document content.
@@ -395,12 +436,14 @@ pub fn xml_parse_chunk(
 }
 
 /// A parser over a whole buffer, configured exactly as `parse_utf8` does.
-fn fresh_parser<'a>(
+fn fresh_parser<'a, 'i>(
     input: &'a [u8],
     options: i32,
     sax: &'a mut dyn SaxHandler,
-) -> Parser<'a> {
+    check: &'a mut InterruptCheck<'i>,
+) -> Parser<'a, 'i> {
     Parser {
+        check,
         input,
         pos: 0,
         line: 1,
@@ -456,7 +499,7 @@ fn finish_whole(ctxt: &mut XmlPushParserCtxt) -> Result<Option<XmlDoc>, XmlError
 /// `xmlReadIO` — caller-supplied read callback, no network.
 #[doc(alias = "xmlReadIO")]
 pub fn xml_read_io<F>(
-    mut read: F,
+    read: F,
     url: Option<&str>,
     encoding: Option<&str>,
     options: i32,
@@ -464,16 +507,33 @@ pub fn xml_read_io<F>(
 where
     F: FnMut(&mut [u8]) -> Result<usize, std::io::Error>,
 {
+    let mut check = InterruptCheck::new(&NoInterrupt);
+    xml_read_io_with_interrupt(read, url, encoding, options, &mut check)
+}
+
+/// Like [`xml_read_io`], but fails with `XML_ERR_USER_STOP` once `check` reports an interrupt;
+/// `check` is consulted before every read call as well as during the parse.
+pub fn xml_read_io_with_interrupt<F>(
+    mut read: F,
+    url: Option<&str>,
+    encoding: Option<&str>,
+    options: i32,
+    check: &mut InterruptCheck<'_>,
+) -> Result<XmlDoc, XmlError>
+where
+    F: FnMut(&mut [u8]) -> Result<usize, std::io::Error>,
+{
     let mut buf = Vec::new();
     let mut tmp = [0u8; 4096];
     loop {
+        check.check().map_err(|_| stop_error(0, 0))?;
         let n = read(&mut tmp).map_err(|e| XmlError::new(XML_ERR_DOCUMENT_START, e.to_string(), 0, 0))?;
         if n == 0 {
             break;
         }
         buf.extend_from_slice(&tmp[..n]);
     }
-    xml_read_memory(&buf, url, encoding, options)
+    xml_read_memory_with_interrupt(&buf, url, encoding, options, check)
 }
 
 /// `xmlCtxtReset`.
@@ -528,7 +588,9 @@ impl RawAttr {
     }
 }
 
-struct Parser<'a> {
+struct Parser<'a, 'i> {
+    /// Consulted once per unit of work through `tick`; shared with entity sub-parsers.
+    check: &'a mut InterruptCheck<'i>,
     input: &'a [u8],
     pos: usize,
     line: u32,
@@ -555,7 +617,16 @@ struct Parser<'a> {
     entity_budget: usize,
 }
 
-impl<'a> Parser<'a> {
+impl<'a, 'i> Parser<'a, 'i> {
+    /// Counts one unit of work; `XML_ERR_USER_STOP` at the current position once the check stops.
+    #[inline]
+    fn tick(&mut self) -> Result<(), XmlError> {
+        match self.check.check() {
+            Ok(()) => Ok(()),
+            Err(_) => Err(stop_error(self.line, self.col)),
+        }
+    }
+
     /// A name carrying a colon that does not form a QName is legal XML but a
     /// namespace error, and C reports it as "Failed to parse QName".
     fn check_qname(&mut self, name: &str) {
@@ -840,6 +911,7 @@ impl<'a> Parser<'a> {
         if self.char_buf.is_empty() {
             return Ok(());
         }
+        self.tick()?;
         if self.char_buf.len() > MAX_TEXT && (self.options & XML_PARSE_HUGE) == 0 {
             return Err(self.err(XML_ERR_INVALID_CHAR, "Text too long"));
         }
@@ -865,6 +937,7 @@ impl<'a> Parser<'a> {
 
     fn parse_comment(&mut self, parent: Option<NodeId>) -> Result<(), XmlError> {
         // called after seeing "<!--"
+        self.tick()?;
         let mut body = String::new();
         loop {
             if self.starts_with(b"-->") {
@@ -895,6 +968,7 @@ impl<'a> Parser<'a> {
 
     fn parse_pi(&mut self, parent: Option<NodeId>, xml_decl_ok: bool) -> Result<bool, XmlError> {
         // called after seeing "<?"
+        self.tick()?;
         let target = self.parse_name()?;
         if target.eq_ignore_ascii_case("xml") {
             if xml_decl_ok {
@@ -1047,6 +1121,7 @@ impl<'a> Parser<'a> {
 
     fn parse_cdata(&mut self, parent: Option<NodeId>) -> Result<(), XmlError> {
         // after "<![CDATA["
+        self.tick()?;
         let mut body = String::new();
         loop {
             if self.starts_with(b"]]>") {
@@ -1215,6 +1290,7 @@ impl<'a> Parser<'a> {
     /// isolated parse, so an undefined-prefix failure falls back to the old
     /// text behaviour rather than rejecting a document libxml2 accepts.
     fn splice_entity(&mut self, repl: &str, parent: NodeId) -> Result<(), XmlError> {
+        self.tick()?;
         // The splice path bypasses expand_entity, which is where the
         // amplification budget was charged -- so a bomb whose replacement
         // contains '&' stopped being charged at all and expanded freely. It is
@@ -1232,6 +1308,7 @@ impl<'a> Parser<'a> {
         let wrapped = format!("<rusty-xml-entity>{repl}</rusty-xml-entity>");
         let mut null = rusty_xml_sax::NullSax;
         let mut sub = Parser {
+            check: &mut *self.check,
             input: wrapped.as_bytes(),
             pos: 0,
             line: self.line,
@@ -1597,6 +1674,7 @@ impl<'a> Parser<'a> {
     /// closed. Split out of `parse_element` so the content loop can be driven
     /// by an explicit stack instead of by recursion.
     fn open_element(&mut self, parent: NodeId) -> Result<Option<OpenElem>, XmlError> {
+        self.tick()?;
         self.depth += 1;
         let cap = if (self.options & XML_PARSE_HUGE) != 0 {
             MAX_DEPTH_HUGE
@@ -1927,6 +2005,7 @@ impl<'a> Parser<'a> {
     /// carried across the call: `split_qname` borrows, so this allocates
     /// nothing.
     fn close_element(&mut self, open: &OpenElem) -> Result<(), XmlError> {
+        self.tick()?;
         let (prefix, local) = Self::split_qname(&open.qname).map_err(|mut e| {
             e.line = self.line;
             e.col = self.col;
@@ -1996,9 +2075,11 @@ impl<'a> Parser<'a> {
         options: i32,
         sax: &'a mut dyn SaxHandler,
         st: PushState,
+        check: &'a mut InterruptCheck<'i>,
     ) -> Self {
         let _ = st.root_closed;
         Parser {
+            check,
             input,
             pos: 0,
             line: st.line,
@@ -2393,15 +2474,23 @@ impl<'a> Parser<'a> {
     }
 }
 
+#[cold]
+fn stop_error(line: u32, col: u32) -> XmlError {
+    XmlError::new(XML_ERR_USER_STOP, "Interrupted by caller", line, col)
+}
+
 fn parse_doc(
     buffer: &[u8],
     _url: Option<&str>,
     encoding: Option<&str>,
     options: i32,
     sax: &mut dyn SaxHandler,
+    check: &mut InterruptCheck<'_>,
 ) -> Result<XmlDoc, XmlError> {
+    check.check().map_err(|_| stop_error(1, 1))?;
     let (converted, enc_name) = crate::encoding::xml_convert_to_utf8_cow(buffer, encoding)?;
-    parse_utf8(&converted, enc_name.as_deref(), options, sax)
+    check.check().map_err(|_| stop_error(1, 1))?;
+    parse_utf8(&converted, enc_name.as_deref(), options, sax, check)
 }
 
 fn parse_utf8(
@@ -2409,9 +2498,11 @@ fn parse_utf8(
     enc_name: Option<&str>,
     options: i32,
     sax: &mut dyn SaxHandler,
+    check: &mut InterruptCheck<'_>,
 ) -> Result<XmlDoc, XmlError> {
     let options = options | XML_PARSE_NONET | XML_PARSE_NO_XXE;
     let mut p = Parser {
+        check,
         input: buffer,
         pos: 0,
         line: 1,
@@ -2479,6 +2570,14 @@ fn parse_utf8(
             Ok(p.doc)
         }
         Err(e) => {
+            // A stop is never a result: no end_document, no recovered document.
+            if p.check.is_stopped() {
+                return Err(if e.code == XML_ERR_USER_STOP {
+                    e
+                } else {
+                    stop_error(p.line, p.col)
+                });
+            }
             if p.started {
                 p.sax.end_document();
             }

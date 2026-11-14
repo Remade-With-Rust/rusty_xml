@@ -7,8 +7,15 @@
 //! Prints work-parity anchors and an FNV-1a fingerprint over error codes, every node id the XPath
 //! returned, in order, and the saved bytes. A change that claims to preserve output must leave the
 //! fingerprint byte-identical.
+//!
+//! `--interrupt` runs the parse through the `_with_interrupt` variant with an interrupt that never
+//! fires, at the default interval.
 
-use rusty_xml::{xml_read_memory, xml_save_doc, xml_xpath_eval, NodeId, XPathObject, XmlDoc, XmlXPathContext};
+use rusty_xml::{
+    xml_read_memory, xml_read_memory_with_interrupt, xml_save_doc, xml_xpath_eval, InterruptCheck,
+    NodeId, XPathObject, XmlDoc, XmlXPathContext,
+};
+use std::sync::atomic::AtomicBool;
 
 #[global_allocator]
 static ALLOC: rusty_xml_alloc::Allocator = rusty_xml_alloc::NEW;
@@ -45,9 +52,13 @@ fn count_nodes(doc: &XmlDoc, id: NodeId) -> u64 {
 }
 
 fn main() {
-    let mut args = std::env::args().skip(1);
-    let list = args.next().expect("usage: xml-ir LIST [REPS]");
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let interrupt = args.iter().any(|a| a == "--interrupt");
+    args.retain(|a| a != "--interrupt");
+    let mut args = args.into_iter();
+    let list = args.next().expect("usage: xml-ir LIST [REPS] [--interrupt]");
     let reps: u32 = args.next().map_or(1, |r| r.parse().expect("reps"));
+    let never = AtomicBool::new(false);
     let names = std::fs::read_to_string(&list).expect("read list");
     let bufs: Vec<Vec<u8>> = names
         .lines()
@@ -63,7 +74,12 @@ fn main() {
     };
     for _ in 0..reps {
         for b in &bufs {
-            let doc = match xml_read_memory(b, None, None, 0) {
+            let parsed = if interrupt {
+                xml_read_memory_with_interrupt(b, None, None, 0, &mut InterruptCheck::new(&never))
+            } else {
+                xml_read_memory(b, None, None, 0)
+            };
+            let doc = match parsed {
                 Ok(doc) => doc,
                 Err(e) => {
                     t.mix(&e.code.to_le_bytes());

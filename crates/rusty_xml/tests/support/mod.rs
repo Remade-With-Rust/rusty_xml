@@ -4,8 +4,8 @@ pub mod golden;
 use rusty_xml::{
     xml_ctxt_read_memory_with_interrupt, xml_new_parser_ctxt, xml_read_io_with_interrupt,
     xml_create_push_parser_ctxt, xml_parse_chunk_with_interrupt, xml_parse_dtd_with_interrupt,
-    xml_read_memory_with_interrupt,
-    xml_sax_parse_memory_with_interrupt, InterruptCheck,
+    xml_read_memory_with_interrupt, xml_reader_for_memory_with_interrupt,
+    xml_sax_parse_memory_with_interrupt, xml_xinclude_process_with_interrupt, InterruptCheck,
     InterruptError, SaxRecorder, XmlDoc, XmlError, XML_ERR_USER_STOP,
 };
 use std::path::Path;
@@ -131,6 +131,24 @@ pub fn run_interrupt(dir: &Path, case: &golden::Case) -> String {
                 .collect();
             golden::render_push(&results)
         }
+        "reader" => golden::render_reader_walk(xml_reader_for_memory_with_interrupt(
+            &golden::file(dir, &a[0]),
+            None,
+            None,
+            0,
+            &mut check,
+        )),
+        "xinclude" => match golden::xinclude_inputs(dir, a) {
+            Ok((mut doc, fragment)) => {
+                let r = xml_xinclude_process_with_interrupt(
+                    &mut doc,
+                    |_href| Ok(fragment.clone()),
+                    &mut check,
+                );
+                golden::render_xinclude(r, &doc)
+            }
+            Err(e) => e,
+        },
         "dtd" => golden::render_dtd(xml_parse_dtd_with_interrupt(
             &golden::file(dir, &a[0]),
             None,

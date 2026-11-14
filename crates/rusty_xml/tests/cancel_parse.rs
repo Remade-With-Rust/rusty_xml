@@ -3,7 +3,8 @@ mod support;
 use rusty_xml::{
     xml_ctxt_read_memory_with_interrupt, xml_new_parser_ctxt, xml_read_io_with_interrupt,
     xml_parse_dtd_with_interrupt, xml_read_memory_with_interrupt,
-    xml_sax_parse_memory_with_interrupt, xml_save_doc,
+    xml_reader_for_memory_with_interrupt, xml_sax_parse_memory_with_interrupt, xml_save_doc,
+    xml_xinclude_process_with_interrupt,
     InterruptCheck, SaxEvent, SaxRecorder, XML_ERR_USER_STOP, XML_PARSE_DTDATTR, XML_PARSE_NOENT, XML_PARSE_RECOVER,
 };
 use std::io::Read;
@@ -233,4 +234,47 @@ fn entity_graph_sweep() {
         let _ = parse(&flat, c);
     });
     assert!(delta >= 820, "delta {delta}");
+}
+
+const RSS: &[u8] = include_bytes!("cancel_fixtures/rss-feed.xml");
+
+#[test]
+fn reader_sweep() {
+    sweep(
+        |c| xml_reader_for_memory_with_interrupt(RSS, None, None, 0, c),
+        is_user_stop,
+    );
+}
+
+const FRAGMENT: &[u8] = br#"<f1 a="1" b="2" c="3"><f2 a="1" b="2" c="3"><f3 a="1" b="2" c="3"/></f2><f4 a="1" b="2" c="3"/><f5 a="1" b="2" c="3"/></f1>"#;
+
+fn include_doc() -> rusty_xml::XmlDoc {
+    let text = br#"<root xmlns:xi="http://www.w3.org/2001/XInclude"><xi:include href="a"/><xi:include href="b"/></root>"#;
+    rusty_xml::xml_read_memory(text, None, None, 0).unwrap()
+}
+
+#[test]
+fn xinclude_sweep() {
+    let run = |c: &mut InterruptCheck<'_>| {
+        let mut doc = include_doc();
+        xml_xinclude_process_with_interrupt(&mut doc, |_| Ok(FRAGMENT.to_vec()), c)
+    };
+    sweep(run, is_user_stop);
+    let total = count_checks(|c| {
+        let _ = run(c);
+    });
+    let fragment_parse = count_checks(|c| {
+        let _ = read(FRAGMENT, 0, c);
+    });
+    assert!(total >= 2 * fragment_parse + 10, "total {total}, one fragment parse {fragment_parse}");
+}
+
+#[test]
+fn xinclude_loader_error_distinct() {
+    let mut doc = include_doc();
+    let flag = support::never();
+    let mut check = InterruptCheck::new(&flag);
+    let e = xml_xinclude_process_with_interrupt(&mut doc, |_| Err("nope".to_string()), &mut check)
+        .unwrap_err();
+    assert_ne!(e.code, XML_ERR_USER_STOP);
 }

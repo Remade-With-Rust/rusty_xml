@@ -321,6 +321,46 @@ pub fn push_chunks(dir: &Path, case: &Case) -> Vec<Vec<u8>> {
     text.lines().map(|l| l.as_bytes().to_vec()).collect()
 }
 
+/// Walks a reader to the end, one line per node.
+pub fn render_reader_walk(r: Result<XmlTextReader, XmlError>) -> String {
+    let mut reader = match r {
+        Ok(reader) => reader,
+        Err(e) => return render_err(&e),
+    };
+    let mut seq = Vec::new();
+    while reader.read() == 1 {
+        seq.push((
+            reader.node_type() as i32,
+            format!(
+                "depth {} name {:?} value {:?} empty {} attrs {}",
+                reader.depth(),
+                reader.name(),
+                reader.value(),
+                reader.is_empty_element(),
+                reader.attribute_count()
+            ),
+        ));
+    }
+    render_reader(&seq)
+}
+
+/// The document of an `xinclude` case and the fragment its loader returns for every href.
+pub fn xinclude_inputs(dir: &Path, args: &[String]) -> Result<(XmlDoc, Vec<u8>), String> {
+    let doc = parse_fixture(&file(dir, &args[0]))?;
+    Ok((doc, file(dir, &args[1])))
+}
+
+/// The return value of an XInclude run and the document it edited.
+pub fn render_xinclude(r: Result<i32, XmlError>, doc: &XmlDoc) -> String {
+    let head = match r {
+        Ok(n) => format!("OK {n}
+"),
+        Err(e) => render_err(&e),
+    };
+    format!("{head}{}
+", payload(&xml_save_doc(doc, 0)))
+}
+
 pub fn file(dir: &Path, name: &str) -> Vec<u8> {
     let path = dir.join(name);
     fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
@@ -363,39 +403,14 @@ pub fn run_default(dir: &Path, case: &Case) -> String {
             render_push(&results)
         }
         "dtd" => render_dtd(xml_parse_dtd(&file(dir, &a[0]), None, None)),
-        "reader" => match xml_reader_for_memory(&file(dir, &a[0]), None, None, 0) {
-            Ok(mut r) => {
-                let mut seq = Vec::new();
-                while r.read() == 1 {
-                    seq.push((
-                        r.node_type() as i32,
-                        format!(
-                            "depth {} name {:?} value {:?} empty {} attrs {}",
-                            r.depth(),
-                            r.name(),
-                            r.value(),
-                            r.is_empty_element(),
-                            r.attribute_count()
-                        ),
-                    ));
-                }
-                render_reader(&seq)
+        "reader" => render_reader_walk(xml_reader_for_memory(&file(dir, &a[0]), None, None, 0)),
+        "xinclude" => match xinclude_inputs(dir, a) {
+            Ok((mut doc, fragment)) => {
+                let r = xml_xinclude_process(&mut doc, |_href| Ok(fragment.clone()));
+                render_xinclude(r, &doc)
             }
-            Err(e) => render_err(&e),
+            Err(e) => e,
         },
-        "xinclude" => {
-            let mut doc = match parse_fixture(&file(dir, &a[0])) {
-                Ok(d) => d,
-                Err(e) => return e,
-            };
-            let fragment = file(dir, &a[1]);
-            let r = xml_xinclude_process(&mut doc, |_href| Ok(fragment.clone()));
-            let head = match r {
-                Ok(n) => format!("OK {n}\n"),
-                Err(e) => render_err(&e),
-            };
-            format!("{head}{}\n", payload(&xml_save_doc(&doc, 0)))
-        }
         "xpath" => match parse_fixture(&file(dir, &a[0])) {
             Ok(doc) => {
                 let ctx = XmlXPathContext::xml_xpath_new_context(&doc);

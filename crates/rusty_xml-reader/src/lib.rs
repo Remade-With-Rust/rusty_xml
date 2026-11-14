@@ -2,8 +2,8 @@
 
 #![forbid(unsafe_code)]
 
-use rusty_xml_parser::{xml_read_memory, XmlError};
-use rusty_xml_tree::{NodeId, NodeKind, XmlDoc};
+use rusty_xml_parser::{xml_read_memory, xml_read_memory_with_interrupt, XmlError};
+use rusty_xml_tree::{InterruptCheck, NodeId, NodeKind, XmlDoc};
 
 /// libxml2 `xmlReaderTypes`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -292,6 +292,19 @@ pub fn xml_reader_for_memory(
     options: i32,
 ) -> Result<XmlTextReader, XmlError> {
     XmlTextReader::xml_reader_for_memory(buffer, url, encoding, options)
+}
+
+/// Like [`xml_reader_for_memory`], but fails with `XML_ERR_USER_STOP` once `check` reports an
+/// interrupt. `read` itself does O(1) work per call and takes no check.
+pub fn xml_reader_for_memory_with_interrupt(
+    buffer: &[u8],
+    url: Option<&str>,
+    encoding: Option<&str>,
+    options: i32,
+    check: &mut InterruptCheck<'_>,
+) -> Result<XmlTextReader, XmlError> {
+    let doc = xml_read_memory_with_interrupt(buffer, url, encoding, options, check)?;
+    Ok(XmlTextReader::xml_reader_walker(doc))
 }
 
 /// `xmlReaderForDoc`.

@@ -1,8 +1,9 @@
 //! XInclude 1.0. Resource fetch is caller-supplied; the library never opens the network.
 
-use rusty_xml_tree::{NodeId, NodeKind, XmlDoc};
+use rusty_xml_tree::{InterruptCheck, NodeId, NodeKind, XmlDoc};
+use crate::checker::{stop_error, Checker, NoCheck};
 use crate::error::XmlError;
-use crate::parse::{default_parse_options, xml_read_memory};
+use crate::parse::{default_parse_options, parse_memory_inner};
 
 const XI: &str = "http://www.w3.org/2001/XInclude";
 
@@ -12,13 +13,28 @@ pub fn xml_xinclude_process<F>(doc: &mut XmlDoc, mut loader: F) -> Result<i32, X
 where
     F: FnMut(&str) -> Result<Vec<u8>, String>,
 {
-    xml_xinclude_process_tree(doc, NodeId::DOCUMENT, &mut loader)
+    xml_xinclude_process_tree(doc, NodeId::DOCUMENT, &mut loader, &mut NoCheck)
 }
 
-fn xml_xinclude_process_tree<F>(
+/// Like [`xml_xinclude_process`], but fails with `XML_ERR_USER_STOP` once `check` reports an
+/// interrupt. After any error the document is unspecified (includes already applied stay, and a
+/// stop inside a copy can leave allocated, unlinked nodes): discard it.
+pub fn xml_xinclude_process_with_interrupt<F>(
+    doc: &mut XmlDoc,
+    mut loader: F,
+    check: &mut InterruptCheck<'_>,
+) -> Result<i32, XmlError>
+where
+    F: FnMut(&str) -> Result<Vec<u8>, String>,
+{
+    xml_xinclude_process_tree(doc, NodeId::DOCUMENT, &mut loader, check)
+}
+
+fn xml_xinclude_process_tree<F, C: Checker>(
     doc: &mut XmlDoc,
     start: NodeId,
     loader: &mut F,
+    check: &mut C,
 ) -> Result<i32, XmlError>
 where
     F: FnMut(&str) -> Result<Vec<u8>, String>,
@@ -27,7 +43,8 @@ where
     collect_includes(doc, start, &mut subs);
     let mut n = 0i32;
     for id in subs {
-        if replace_include(doc, id, loader)? {
+        check.tick().map_err(|_| stop_error(0, 0))?;
+        if replace_include(doc, id, loader, check)? {
             n += 1;
         }
     }
@@ -49,7 +66,12 @@ fn collect_includes(doc: &XmlDoc, id: NodeId, out: &mut Vec<NodeId>) {
     }
 }
 
-fn replace_include<F>(doc: &mut XmlDoc, id: NodeId, loader: &mut F) -> Result<bool, XmlError>
+fn replace_include<F, C: Checker>(
+    doc: &mut XmlDoc,
+    id: NodeId,
+    loader: &mut F,
+    check: &mut C,
+) -> Result<bool, XmlError>
 where
     F: FnMut(&str) -> Result<Vec<u8>, String>,
 {
@@ -67,9 +89,10 @@ where
                     doc.xml_unlink_node(id);
                     return Ok(true);
                 }
-                let included = xml_read_memory(&bytes, Some(&h), None, default_parse_options())?;
+                let included =
+                    parse_memory_inner(&bytes, Some(&h), None, default_parse_options(), check)?;
                 if let Some(root) = included.xml_doc_get_root_element() {
-                    graft(doc, parent, id, &included, root);
+                    graft(doc, parent, id, &included, root, check)?;
                     doc.xml_unlink_node(id);
                     return Ok(true);
                 }
@@ -112,12 +135,27 @@ fn find_fallback(doc: &XmlDoc, include: NodeId) -> Option<NodeId> {
     None
 }
 
-fn graft(dst: &mut XmlDoc, _parent: NodeId, before: NodeId, src: &XmlDoc, src_id: NodeId) {
-    let new = copy_node(dst, src, src_id);
+fn graft<C: Checker>(
+    dst: &mut XmlDoc,
+    _parent: NodeId,
+    before: NodeId,
+    src: &XmlDoc,
+    src_id: NodeId,
+    check: &mut C,
+) -> Result<(), XmlError> {
+    let new = copy_node(dst, src, src_id, check)?;
     dst.xml_add_prev_sibling(before, new);
+    Ok(())
 }
 
-fn copy_node(dst: &mut XmlDoc, src: &XmlDoc, id: NodeId) -> NodeId {
+/// One check per copied node: each `xml_set_prop` scans the element's existing attributes.
+fn copy_node<C: Checker>(
+    dst: &mut XmlDoc,
+    src: &XmlDoc,
+    id: NodeId,
+    check: &mut C,
+) -> Result<NodeId, XmlError> {
+    check.tick().map_err(|_| stop_error(0, 0))?;
     let kind = src.kind(id);
     let n = dst.alloc(kind, src.name(id));
     // Prefixes and URIs are interned per document: re-intern through `dst`.
@@ -129,16 +167,16 @@ fn copy_node(dst: &mut XmlDoc, src: &XmlDoc, id: NodeId) -> NodeId {
     }
     let mut a = src.first_attr(id);
     while let Some(x) = a {
-        let an = copy_node(dst, src, x);
+        let an = copy_node(dst, src, x, check)?;
         dst.xml_set_prop(n, src.name(x), src.content(x));
         let _ = an;
         a = src.next_sibling(x);
     }
     let mut c = src.first_child(id);
     while let Some(x) = c {
-        let ch = copy_node(dst, src, x);
+        let ch = copy_node(dst, src, x, check)?;
         dst.xml_add_child(n, ch);
         c = src.next_sibling(x);
     }
-    n
+    Ok(n)
 }

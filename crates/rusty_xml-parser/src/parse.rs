@@ -177,6 +177,18 @@ pub fn xml_read_memory_with_interrupt(
     parse_doc(buffer, url, encoding, options, &mut sink, check)
 }
 
+/// [`xml_read_memory`] for callers inside this crate that carry their own check.
+pub(crate) fn parse_memory_inner<C: Checker>(
+    buffer: &[u8],
+    url: Option<&str>,
+    encoding: Option<&str>,
+    options: i32,
+    check: &mut C,
+) -> Result<XmlDoc, XmlError> {
+    let mut sink = rusty_xml_sax::NullSax;
+    parse_doc(buffer, url, encoding, options, &mut sink, check)
+}
+
 /// `xmlReadDoc`.
 #[doc(alias = "xmlReadDoc")]
 pub fn xml_read_doc(

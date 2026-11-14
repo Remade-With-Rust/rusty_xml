@@ -8,12 +8,12 @@
 //! returned, in order, and the saved bytes. A change that claims to preserve output must leave the
 //! fingerprint byte-identical.
 //!
-//! `--interrupt` runs the parse through the `_with_interrupt` variant with an interrupt that never
-//! fires, at the default interval.
+//! `--interrupt` runs the parse and the save through the `_with_interrupt` variants with an
+//! interrupt that never fires, at the default interval.
 
 use rusty_xml::{
-    xml_read_memory, xml_read_memory_with_interrupt, xml_save_doc, xml_xpath_eval, InterruptCheck,
-    NodeId, XPathObject, XmlDoc, XmlXPathContext,
+    xml_read_memory, xml_read_memory_with_interrupt, xml_save_doc, xml_save_doc_with_interrupt,
+    xml_xpath_eval, InterruptCheck, NodeId, XPathObject, XmlDoc, XmlXPathContext,
 };
 use std::sync::atomic::AtomicBool;
 
@@ -100,7 +100,11 @@ fn main() {
                     Err(e) => t.mix(e.as_bytes()),
                 }
             }
-            let out = xml_save_doc(&doc, 0);
+            let out = if interrupt {
+                xml_save_doc_with_interrupt(&doc, 0, &mut InterruptCheck::new(&never)).expect("save")
+            } else {
+                xml_save_doc(&doc, 0)
+            };
             t.out += out.len() as u64;
             t.mix(&out);
         }

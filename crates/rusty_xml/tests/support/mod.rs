@@ -2,12 +2,15 @@
 pub mod golden;
 
 use rusty_xml::{
-    html_read_memory_with_interrupt, xml_create_push_parser_ctxt,
-    xml_ctxt_read_memory_with_interrupt, xml_new_parser_ctxt, xml_parse_chunk_with_interrupt,
+    html_read_memory, html_read_memory_with_interrupt, xml_c14n_doc_dump_memory_with_interrupt,
+    xml_create_push_parser_ctxt,
+    xml_ctxt_read_memory_with_interrupt, xml_new_parser_ctxt, xml_node_dump_with_interrupt,
+    xml_parse_chunk_with_interrupt,
     xml_parse_dtd, xml_parse_dtd_with_interrupt, xml_read_io_with_interrupt,
     xml_read_memory_with_interrupt, xml_reader_for_memory_with_interrupt,
     xml_relaxng_validate_doc_with_interrupt, xml_sax_parse_memory_with_interrupt,
-    xml_schema_validate_doc_with_interrupt, xml_schematron_validate_doc_with_interrupt,
+    xml_save_doc_with_interrupt, xml_schema_validate_doc_with_interrupt,
+    xml_schematron_validate_doc_with_interrupt,
     xml_validate_document_with_interrupt, xml_validate_dtd_with_interrupt,
     xml_xinclude_process_with_interrupt, xml_xpath_eval_with_interrupt, InterruptCheck,
     InterruptError, SaxRecorder, XmlError, XmlXPathContext, XML_ERR_USER_STOP,
@@ -195,6 +198,45 @@ pub fn run_interrupt(dir: &Path, case: &golden::Case) -> String {
                     _ => xml_schematron_validate_doc_with_interrupt(&schema, &doc, &mut check),
                 }))
             }
+            Err(e) => e,
+        },
+        "c14n" => match golden::parse_fixture(&golden::file(dir, &a[0])) {
+            Ok(doc) => golden::render_bytes(flatten(xml_c14n_doc_dump_memory_with_interrupt(
+                &doc,
+                a[1] == "1",
+                a[2] == "1",
+                &mut check,
+            ))),
+            Err(e) => e,
+        },
+        "save" => {
+            let bytes = golden::file(dir, &a[0]);
+            let doc = if a[0].ends_with(".html") {
+                html_read_memory(&bytes, None, None, 0).map_err(|e| golden::render_err(&e))
+            } else {
+                golden::parse_fixture(&bytes)
+            };
+            match doc {
+                Ok(doc) => match xml_save_doc_with_interrupt(&doc, golden::number(&a[1]), &mut check) {
+                    Ok(out) => format!("{}
+", golden::payload(&out)),
+                    Err(e) => format!("ERR {e}
+"),
+                },
+                Err(e) => e,
+            }
+        }
+        "nodedump" => match golden::parse_fixture(&golden::file(dir, &a[0])) {
+            Ok(doc) => match doc.xml_doc_get_root_element() {
+                Some(root) => match xml_node_dump_with_interrupt(&doc, root, 0, &mut check) {
+                    Ok(out) => format!("{}
+", golden::payload(&out)),
+                    Err(e) => format!("ERR {e}
+"),
+                },
+                None => "NO ROOT
+".to_string(),
+            },
             Err(e) => e,
         },
         "dtd" => golden::render_dtd(xml_parse_dtd_with_interrupt(

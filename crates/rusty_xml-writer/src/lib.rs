@@ -2,7 +2,10 @@
 
 #![forbid(unsafe_code)]
 
-use rusty_xml_tree::{NodeId, NodeKind, XmlDoc};
+use rusty_xml_tree::{InterruptCheck, Interrupted, NodeId, NodeKind, XmlDoc};
+
+mod checker;
+use checker::{plain, Checker, NoCheck};
 
 /// libxml2 `xmlSaveOption` bits.
 pub const XML_SAVE_FORMAT: i32 = 1 << 0;
@@ -152,7 +155,15 @@ enum Step {
 /// frame per level of document nesting, so a 2000-deep tree -- well inside the
 /// parser's own limit of 5000 -- overflowed the stack while being SAVED.
 /// Accepting a document the writer cannot serialize just moves the cliff.
-fn write_node(doc: &XmlDoc, id: NodeId, out: &mut String, opts: i32, level: i32, format: bool) {
+fn write_node(
+    doc: &XmlDoc,
+    id: NodeId,
+    out: &mut String,
+    opts: i32,
+    level: i32,
+    format: bool,
+    check: &mut impl Checker,
+) -> Result<(), Interrupted> {
     let mut stack: Vec<Step> = vec![Step::Open(id, level, format)];
     while let Some(step) = stack.pop() {
         match step {
@@ -167,10 +178,13 @@ fn write_node(doc: &XmlDoc, id: NodeId, out: &mut String, opts: i32, level: i32,
                 out.push('>');
             }
             Step::Open(id, level, format) => {
+                // One check per node emitted.
+                check.tick()?;
                 write_one(doc, id, out, opts, level, format, &mut stack)
             }
         }
     }
+    Ok(())
 }
 
 /// Emit a single node, pushing whatever work its children require.
@@ -334,13 +348,31 @@ fn write_one(
 /// `xmlSaveDoc` / `xmlDocDumpMemory` with `xmlSaveOption` bits.
 #[doc(alias = "xmlSaveDoc")]
 pub fn xml_save_doc(doc: &XmlDoc, options: i32) -> Vec<u8> {
+    plain(save_inner(doc, options, &mut NoCheck))
+}
+
+/// Like [`xml_save_doc`], but returns `Interrupted` once `check` reports an interrupt; no partial
+/// output is returned.
+pub fn xml_save_doc_with_interrupt(
+    doc: &XmlDoc,
+    options: i32,
+    check: &mut InterruptCheck<'_>,
+) -> Result<Vec<u8>, Interrupted> {
+    save_inner(doc, options, check)
+}
+
+fn save_inner(
+    doc: &XmlDoc,
+    options: i32,
+    check: &mut impl Checker,
+) -> Result<Vec<u8>, Interrupted> {
     let mut out = String::new();
     // An HTML document is serialized by HTML rules. It used to go out through
     // the XML writer, which emitted <?xml version="1.0" encoding="HTML"?> --
     // and re-parsing that as HTML turned the declaration into a text node, so
     // the round trip was not stable. C emits the doctype.
     if doc.kind(rusty_xml_tree::NodeId::DOCUMENT) == NodeKind::HtmlDocument {
-        return save_html_doc(doc, options | SAVE_AS_HTML);
+        return save_html_doc(doc, options | SAVE_AS_HTML, check);
     }
     if (options & XML_SAVE_NO_DECL) == 0 {
         out.push_str("<?xml version=\"");
@@ -370,11 +402,11 @@ pub fn xml_save_doc(doc: &XmlDoc, options: i32) -> Vec<u8> {
     let format = (options & XML_SAVE_FORMAT) != 0;
     let mut child = doc.first_child(rusty_xml_tree::NodeId::DOCUMENT);
     while let Some(id) = child {
-        write_node(doc, id, &mut out, options, 0, format);
+        write_node(doc, id, &mut out, options, 0, format, check)?;
         out.push('\n');
         child = doc.next_sibling(id);
     }
-    out.into_bytes()
+    Ok(out.into_bytes())
 }
 
 /// Write the document type declaration.
@@ -448,9 +480,29 @@ pub fn xml_doc_dump_memory(doc: &XmlDoc) -> Vec<u8> {
 /// `xmlNodeDump` of a subtree (no XML declaration).
 #[doc(alias = "xmlNodeDump")]
 pub fn xml_node_dump(doc: &XmlDoc, node: NodeId, options: i32) -> Vec<u8> {
+    plain(node_dump_inner(doc, node, options, &mut NoCheck))
+}
+
+/// Like [`xml_node_dump`], but returns `Interrupted` once `check` reports an interrupt; no partial
+/// output is returned.
+pub fn xml_node_dump_with_interrupt(
+    doc: &XmlDoc,
+    node: NodeId,
+    options: i32,
+    check: &mut InterruptCheck<'_>,
+) -> Result<Vec<u8>, Interrupted> {
+    node_dump_inner(doc, node, options, check)
+}
+
+fn node_dump_inner(
+    doc: &XmlDoc,
+    node: NodeId,
+    options: i32,
+    check: &mut impl Checker,
+) -> Result<Vec<u8>, Interrupted> {
     let mut out = String::new();
-    write_node(doc, node, &mut out, options, 0, (options & XML_SAVE_FORMAT) != 0);
-    out.into_bytes()
+    write_node(doc, node, &mut out, options, 0, (options & XML_SAVE_FORMAT) != 0, check)?;
+    Ok(out.into_bytes())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -742,7 +794,11 @@ fn push_quoted(out: &mut String, s: &str) {
     }
 }
 
-fn save_html_doc(doc: &XmlDoc, options: i32) -> Vec<u8> {
+fn save_html_doc(
+    doc: &XmlDoc,
+    options: i32,
+    check: &mut impl Checker,
+) -> Result<Vec<u8>, Interrupted> {
     let mut out = String::new();
     if (options & XML_SAVE_NO_DECL) == 0 {
         out.push_str("<!DOCTYPE ");
@@ -785,12 +841,12 @@ fn save_html_doc(doc: &XmlDoc, options: i32) -> Vec<u8> {
     let format = (options & XML_SAVE_FORMAT) != 0;
     let mut child = doc.first_child(rusty_xml_tree::NodeId::DOCUMENT);
     while let Some(id) = child {
-        write_node(doc, id, &mut out, options, 0, format);
+        write_node(doc, id, &mut out, options, 0, format, check)?;
         child = doc.next_sibling(id);
     }
     // htmlNodeDumpInternal writes one newline when it climbs back to the
     // document node, not one per top-level node: a comment after </html>,
     // or a second root, follows on the same line.
     out.push('\n');
-    out.into_bytes()
+    Ok(out.into_bytes())
 }

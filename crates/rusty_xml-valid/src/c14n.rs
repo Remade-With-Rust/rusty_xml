@@ -1,7 +1,8 @@
 //! Canonical XML 1.0 / exclusive C14N. Byte-identity vs `xmllint --c14n`.
 
 use std::rc::Rc;
-use rusty_xml_tree::{NodeId, NodeKind, XmlDoc};
+use crate::checker::{plain, Checker, NoCheck};
+use rusty_xml_tree::{InterruptCheck, InterruptError, Interrupted, NodeId, NodeKind, XmlDoc};
 use std::cmp::Ordering;
 
 /// libxml2 `xmlC14NMode`.
@@ -18,8 +19,28 @@ pub fn xml_c14n_doc_dump_memory(
     exclusive: bool,
     with_comments: bool,
 ) -> Result<Vec<u8>, String> {
+    plain(c14n_inner(doc, exclusive, with_comments, &mut NoCheck))
+}
+
+/// Like [`xml_c14n_doc_dump_memory`], but returns `InterruptError::Interrupted` once `check`
+/// reports an interrupt; no partial output is returned.
+pub fn xml_c14n_doc_dump_memory_with_interrupt(
+    doc: &XmlDoc,
+    exclusive: bool,
+    with_comments: bool,
+    check: &mut InterruptCheck<'_>,
+) -> Result<Vec<u8>, InterruptError<String>> {
+    c14n_inner(doc, exclusive, with_comments, check)
+}
+
+fn c14n_inner(
+    doc: &XmlDoc,
+    exclusive: bool,
+    with_comments: bool,
+    check: &mut impl Checker,
+) -> Result<Vec<u8>, InterruptError<String>> {
     let mut out = String::new();
-    emit_node(doc, NodeId::DOCUMENT, exclusive, with_comments, &[], &[], &mut out)?;
+    emit_node(doc, NodeId::DOCUMENT, exclusive, with_comments, &[], &[], &mut out, check)?;
     Ok(out.into_bytes())
 }
 
@@ -59,7 +80,8 @@ fn emit_node(
     vis_prefixes: &[&str],
     rendered: &[(String, String)],
     out: &mut String,
-) -> Result<(), String> {
+    check: &mut impl Checker,
+) -> Result<(), Interrupted> {
     match doc.kind(id) {
         NodeKind::Document | NodeKind::HtmlDocument => {
             let mut kids = Vec::new();
@@ -72,10 +94,11 @@ fn emit_node(
             let mut before_element = true;
             let mut seen_pi_or_comment = false;
             for kid in &kids {
+                check.tick()?;
                 match doc.kind(*kid) {
                     NodeKind::Element => {
                         before_element = false;
-                        emit_node(doc, *kid, exclusive, with_comments, vis_prefixes, rendered, out)?;
+                        emit_node(doc, *kid, exclusive, with_comments, vis_prefixes, rendered, out, check)?;
                         after_element = true;
                     }
                     NodeKind::Pi => {
@@ -103,7 +126,7 @@ fn emit_node(
             }
         }
         NodeKind::Element => {
-            emit_element(doc, id, exclusive, with_comments, vis_prefixes, rendered, out)?
+            emit_element(doc, id, exclusive, with_comments, vis_prefixes, rendered, out, check)?
         }
         NodeKind::Text => out.push_str(&escape_text(doc.content(id))),
         NodeKind::CData => out.push_str(&escape_text(doc.content(id))),
@@ -139,9 +162,12 @@ fn emit_element(
     vis_prefixes: &[&str],
     rendered: &[(String, String)],
     out: &mut String,
-) -> Result<(), String> {
+    check: &mut impl Checker,
+) -> Result<(), Interrupted> {
     let mut stack: Vec<Step> = vec![Step::Open(id, Rc::new(rendered.to_vec()))];
     while let Some(step) = stack.pop() {
+        // One check per node emitted.
+        check.tick()?;
         let (id, rendered) = match step {
             Step::Close(qn) => {
                 out.push_str("</");
@@ -169,7 +195,7 @@ fn emit_element(
         out.push('<');
         out.push_str(&qn);
 
-        let mut ns_attrs = namespaces_to_emit(doc, id, exclusive, vis_prefixes, &rendered);
+        let mut ns_attrs = namespaces_to_emit(doc, id, exclusive, vis_prefixes, &rendered, check)?;
         ns_attrs.sort_by(|a, b| a.0.cmp(&b.0));
         for (pre, href) in &ns_attrs {
             out.push(' ');
@@ -191,6 +217,8 @@ fn emit_element(
         } else {
             let mut v: Vec<(String, String)> = rendered.as_ref().clone();
             for (pre, href) in &ns_attrs {
+                // `retain` per emitted namespace: quadratic in the in-scope count.
+                check.tick()?;
                 v.retain(|(p, _)| p != pre);
                 v.push((pre.clone(), href.clone()));
             }
@@ -240,11 +268,16 @@ fn qname(prefix: Option<&str>, local: &str) -> String {
     }
 }
 
-fn in_scope_ns(doc: &XmlDoc, id: NodeId) -> Vec<(String, String)> {
+fn in_scope_ns(
+    doc: &XmlDoc,
+    id: NodeId,
+    check: &mut impl Checker,
+) -> Result<Vec<(String, String)>, Interrupted> {
     let mut map: Vec<(String, String)> = Vec::new();
     let mut cur = Some(id);
     while let Some(n) = cur {
         for (pre, href) in doc.ns_defs(n).iter().rev() {
+            check.tick()?;
             let key = pre.clone().unwrap_or_default();
             if !map.iter().any(|(k, _)| k == &key) {
                 map.push((key, href.clone()));
@@ -255,7 +288,7 @@ fn in_scope_ns(doc: &XmlDoc, id: NodeId) -> Vec<(String, String)> {
             break;
         }
     }
-    map
+    Ok(map)
 }
 
 fn namespaces_to_emit(
@@ -264,9 +297,15 @@ fn namespaces_to_emit(
     exclusive: bool,
     vis_prefixes: &[&str],
     rendered: &[(String, String)],
-) -> Vec<(String, String)> {
-    let mut map = in_scope_ns(doc, id);
+    check: &mut impl Checker,
+) -> Result<Vec<(String, String)>, Interrupted> {
+    let mut map = in_scope_ns(doc, id, check)?;
+    let mut stopped = false;
     map.retain(|(pre, href)| {
+        if stopped || check.tick().is_err() {
+            stopped = true;
+            return false;
+        }
         if pre == "xml" && href == XML_NS {
             return false;
         }
@@ -287,7 +326,10 @@ fn namespaces_to_emit(
         }
         true
     });
-    map
+    if stopped {
+        return Err(Interrupted);
+    }
+    Ok(map)
 }
 
 fn visibly_used(doc: &XmlDoc, id: NodeId, pre: &str, extra: &[&str]) -> bool {

@@ -38,6 +38,8 @@ pub const XML_ERR_ENCODING_NAME: i32 = 79;
 pub const XML_ERR_HYPHEN_IN_COMMENT: i32 = 80;
 pub const XML_ERR_EXTRA_CONTENT: i32 = 86;
 pub const XML_WAR_NS_URI_RELATIVE: i32 = 100;
+// libxml2 xmlerror.h:295 XML_ERR_USER_STOP; reported when a caller-supplied interrupt fires.
+pub const XML_ERR_USER_STOP: i32 = 111;
 pub const XML_NS_ERR_XML_NAMESPACE: i32 = 200;
 pub const XML_NS_ERR_UNDEFINED_NAMESPACE: i32 = 201;
 pub const XML_NS_ERR_QNAME: i32 = 202;

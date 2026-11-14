@@ -6,6 +6,9 @@
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 
+mod interrupt;
+pub use interrupt::*;
+
 /// libxml2 `xmlElementType` discriminants.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u32)]

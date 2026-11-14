@@ -3,7 +3,8 @@
 
 pub use rusty_xml_parser::*;
 pub use rusty_xml_tree::{
-    AttrDecl, AttrDefault, ElementDecl, Node, NodeId, NodeKind, XmlDoc, XmlDtd,
+    AttrDecl, AttrDefault, ElementDecl, Interrupt, InterruptCheck, InterruptError, Interrupted,
+    NoInterrupt, Node, NodeId, NodeKind, XmlDoc, XmlDtd,
 };
 pub use rusty_xml_sax::*;
 pub use rusty_xml_reader::*;

@@ -238,44 +238,48 @@ fn html_read(
         let (bytes, _) = crate::encoding::xml_convert_to_utf8_cow(buffer, encoding)?;
         utf8_cow(bytes)
     };
-    let (has_cr, has_nul) = scan_cr_nul(text.as_bytes());
+    let (has_cr, has_nul, lt) = scan_cr_nul(text.as_bytes());
     let text = if has_cr {
         normalize_newlines(text)
     } else {
         text
     };
-    html_parse_str(&text, options, has_nul, interrupt, settings.depth_cap(options))
+    html_parse_str(&text, options, has_nul, interrupt, settings.depth_cap(options), lt)
 }
 
 fn interrupted() -> XmlError {
     XmlError::new(crate::error::XML_ERR_USER_STOP, "Parser interrupted", 0, 0)
 }
 
-/// Does the input contain a CR, a NUL? Fixed 64-byte blocks with no exit
-/// inside, so the compare-and-or loop vectorizes. It replaced a memchr gate for
-/// CR plus a NUL memchr in every text run and attribute value: those cost
-/// +2.0% / +6.0% parse Ir, because memchr pays per byte value and per call.
-/// Without a NUL in the input, no run needs a NUL policy at all.
-fn scan_cr_nul(b: &[u8]) -> (bool, bool) {
+/// Does the input contain a CR, a NUL, and how many `<`? Fixed 64-byte blocks
+/// with no exit inside, so the compare-and-or loop vectorizes. It replaced a
+/// memchr gate for CR plus a NUL memchr in every text run and attribute value:
+/// those cost +2.0% / +6.0% parse Ir, because memchr pays per byte value and
+/// per call. Without a NUL in the input, no run needs a NUL policy at all.
+///
+/// The `<` count sizes the node arena (#49). It rides the same loads for
+/// 0.22 Ir per byte; a separate counting pass cost +13.4% pages parse Ir.
+fn scan_cr_nul(b: &[u8]) -> (bool, bool, usize) {
     let (mut cr, mut nul) = (0u8, 0u8);
+    let mut lt = 0usize;
     let mut blocks = b.chunks_exact(64);
     for blk in &mut blocks {
-        let (mut c, mut z) = (0u8, 0u8);
+        let (mut c, mut z, mut l) = (0u8, 0u8, 0u8);
         for &x in blk {
             c |= u8::from(x == b'\r');
             z |= u8::from(x == 0);
+            l += u8::from(x == b'<');
         }
         cr |= c;
         nul |= z;
-        if cr & nul != 0 {
-            break;
-        }
+        lt += usize::from(l);
     }
     for &x in blocks.remainder() {
         cr |= u8::from(x == b'\r');
         nul |= u8::from(x == 0);
+        lt += usize::from(x == b'<');
     }
-    (cr != 0, nul != 0)
+    (cr != 0, nul != 0, lt)
 }
 
 /// `htmlReadDoc`.
@@ -345,11 +349,20 @@ fn html_parse_str(
     has_nul: bool,
     interrupt: Option<&dyn Interrupt>,
     max_depth: usize,
+    lt: usize,
 ) -> Result<XmlDoc, XmlError> {
-    // Sized for the densest markup measured, about one node per 10 input
-    // bytes, so the arena never doubles and copies its way up; the slack
-    // this leaves on lighter pages is released once the tree is built (#22).
-    let mut doc = XmlDoc::with_node_capacity(Some("1.0"), text.len() / 10);
+    // Sized from the markup, two nodes per `<` (#49): an element, its
+    // attributes and the text after it, against end tags that make none.
+    // Real pages run 1.3-2.3 nodes per `<` while their bytes per node vary
+    // 26x (scripts, inline SVG), so this reserves about 1.2x what a page
+    // uses where one node per 10 bytes reserved 2-3x on documentation and
+    // up to 25x on script-heavy pages, committed up front, and the shrink
+    // below then copied the tree out of it: parse Ir -0.5% / -1.7%. Never
+    // more than one node per 2 bytes, the densest markup gets (`<i>x<i>x`,
+    // `<a b c>`), so input made of `<` reserves no more than a real tree of
+    // its size could fill; capping at the old guess instead cost the dense
+    // fragments +5.4%. The slack is released once the tree is built (#22).
+    let mut doc = XmlDoc::with_node_capacity(Some("1.0"), (2 * lt).min(text.len() / 2));
     doc.encoding = Some("HTML".into());
     // Mark it as an HTML document so the serializer can tell: C emits the
     // doctype where XML would emit a declaration.
@@ -1358,4 +1371,22 @@ fn parse_html_doctype(body: &str) -> rusty_xml_tree::XmlDtd {
         dtd.system_id = literal(&mut rest);
     }
     dtd
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scan_cr_nul;
+
+    #[test]
+    fn scan_counts_lt_across_blocks_and_the_remainder() {
+        for len in [0, 1, 63, 64, 65, 127, 128, 200, 1000] {
+            let b: Vec<u8> = (0..len).map(|i| if i % 3 == 0 { b'<' } else { b'a' }).collect();
+            let want = b.iter().filter(|&&c| c == b'<').count();
+            assert_eq!(scan_cr_nul(&b), (false, false, want), "len {len}");
+        }
+        let all = vec![b'<'; 64 * 5 + 7];
+        assert_eq!(scan_cr_nul(&all).2, all.len());
+        let mixed = b"<a>\r\n<b>\0</b>".repeat(20);
+        assert_eq!(scan_cr_nul(&mixed), (true, true, 60));
+    }
 }

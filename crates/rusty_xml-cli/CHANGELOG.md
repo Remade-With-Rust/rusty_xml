@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-cli-v0.9.0...rusty_xml-cli-v0.9.1) - 2026-11-14
+
+### Fixed
+
+- *(parser)* report the error a recovering parse survived; pin #44 and #45
+
 ## [0.8.5](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-cli-v0.8.4...rusty_xml-cli-v0.8.5) - 2026-11-13
 
 ### Other

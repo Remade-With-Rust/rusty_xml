@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-writer-v0.9.0...rusty_xml-writer-v0.9.1) - 2026-11-14
+
+### Added
+
+- *(writer)* add xml_save_doc_interruptible ([#39](https://github.com/Remade-With-Rust/rusty_xml/pull/39))
+
+### Other
+
+- *(writer)* poll through an Option so the save loop is compiled once
+
 ## [0.9.0](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-writer-v0.8.5...rusty_xml-writer-v0.9.0) - 2026-11-13
 
 ### Fixed

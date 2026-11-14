@@ -247,6 +247,13 @@ fn main() {
 
             match parsed {
                 Ok(mut doc) => {
+                    // xmllint --recover reports the error it recovered from
+                    // on stderr and still exits 0 (#46).
+                    if recover && emit {
+                        for w in &doc.warnings {
+                            eprintln!("{w}");
+                        }
+                    }
                     if emit && bench_counts {
                         let elems = (0..doc.len())
                             .filter(|&i| {

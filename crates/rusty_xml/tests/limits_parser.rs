@@ -579,3 +579,82 @@ fn push_parser_matches_one_shot_at_every_tiny_chunk_size() {
         }
     }
 }
+
+/// #44: the push parser rebuilt its entity budget for every chunk, so a bomb
+/// that `xml_read_memory` refuses was accepted in small chunks. The running
+/// total now lives in the push context, as libxml2's `sizeentcopy` does.
+#[test]
+fn push_parser_keeps_the_amplification_total_across_chunks() {
+    let doc = format!(
+        "<!DOCTYPE r [<!ENTITY a \"{}\"><!ENTITY b \"{}\">]><r>{}</r>",
+        "x".repeat(1000),
+        "&a;".repeat(50),
+        "&b;".repeat(3000)
+    )
+    .into_bytes();
+    let opts = default_parse_options();
+    assert_eq!(code(xml_read_memory(&doc, None, None, opts)), XML_ERR_RESOURCE_LIMIT);
+    for size in [4, 512, 1024, 4096] {
+        let chunks: Vec<&[u8]> = doc.chunks(size).collect();
+        let got = push_all(&chunks, opts);
+        assert!(
+            got.iter().any(|r| matches!(r, Err((c, _, _)) if *c == XML_ERR_RESOURCE_LIMIT)),
+            "{size}-byte chunks: {got:?}"
+        );
+    }
+}
+
+/// #45: one parameter entity referenced many times in the internal subset
+/// expanded in full. It now draws on the same allowance as content
+/// references; the bracket is `xmllint`'s (900 accepted, 1,000 refused).
+#[test]
+fn flat_parameter_entity_amplification_matches_libxml2() {
+    let pe = |n: usize| {
+        format!("<!DOCTYPE r [<!ENTITY % p \"<!-- {} -->\">{}]><r/>", "x".repeat(1000), "%p;".repeat(n))
+            .into_bytes()
+    };
+    let opts = default_parse_options();
+    assert_eq!(code(xml_read_memory(&pe(900), None, None, opts)), 0);
+    for n in [1000, 20_000] {
+        assert_eq!(code(xml_read_memory(&pe(n), None, None, opts)), XML_ERR_RESOURCE_LIMIT, "{n} references");
+    }
+}
+
+/// #46: under `XML_PARSE_RECOVER` the read functions returned the tree built
+/// before a fatal error as `Ok` and reported the error nowhere. It is now on
+/// the tree (`XmlDoc::warnings`) and, for a context, in `last_error`, as
+/// libxml2 records it as the last error.
+#[test]
+fn recovering_reads_report_the_error_they_survived() {
+    use rusty_xml::{xml_ctxt_get_last_error, xml_ctxt_read_memory, xml_new_parser_ctxt};
+    let opts = default_parse_options() | XML_PARSE_RECOVER;
+    let bad = b"<a><b></a>";
+
+    let doc = xml_read_memory(bad, None, None, opts).expect("recovered");
+    assert_eq!(doc.warnings.len(), 1, "{:?}", doc.warnings);
+    assert!(doc.warnings[0].contains("error code 76"), "{:?}", doc.warnings);
+    assert!(doc.warnings[0].contains("Opening and ending tag mismatch"), "{:?}", doc.warnings);
+
+    let mut ctxt = xml_new_parser_ctxt();
+    xml_ctxt_read_memory(&mut ctxt, bad, None, None, opts).expect("recovered");
+    assert_eq!(xml_ctxt_get_last_error(&ctxt).map(|e| e.code), Some(76));
+    // A clean parse on the same context clears it.
+    let ok = xml_ctxt_read_memory(&mut ctxt, b"<a/>", None, None, opts).expect("clean");
+    assert!(ok.warnings.is_empty());
+    assert!(xml_ctxt_get_last_error(&ctxt).is_none());
+
+    let chunks: Vec<&[u8]> = bad.chunks(4).collect();
+    let mut push = xml_create_push_parser_ctxt(&[], None, None, opts);
+    let mut last = None;
+    for (i, c) in chunks.iter().enumerate() {
+        if let Some(d) = xml_parse_chunk(&mut push, c, i32::from(i + 1 == chunks.len())).expect("recovered") {
+            last = Some(d);
+        }
+    }
+    let pushed = last.expect("tree on the terminating chunk");
+    assert!(pushed.warnings.iter().any(|w| w.contains("error code 76")), "{:?}", pushed.warnings);
+
+    // The amplification error is reported the same way.
+    let doc = xml_read_memory(&flat_bomb(100_000), None, None, opts).expect("recovered");
+    assert!(doc.warnings.iter().any(|w| w.contains("error code 114")), "{:?}", doc.warnings);
+}

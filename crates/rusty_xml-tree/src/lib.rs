@@ -247,10 +247,12 @@ pub struct XmlDoc {
     /// AND an error must have been reported. Rejecting instead would refuse
     /// input C reads, so they are recorded here for the caller to inspect.
     pub namespace_errors: Vec<String>,
-    /// Non-fatal problems worth telling the caller about -- currently a
-    /// declared encoding that contradicts the byte-order mark. The SAX error
-    /// channel carries these too, but the default handler discards them, so a
-    /// tree-parsing caller had no way to learn of one.
+    /// Problems worth telling a tree-parsing caller about: a declared
+    /// encoding that contradicts the byte-order mark, and, under
+    /// `XML_PARSE_RECOVER`, the fatal error that ended the parse (formatted
+    /// as `XmlError` displays, `line:col: error code N: message`), so a
+    /// truncated tree can be told from a whole one. The SAX error channel
+    /// carries these too, but the default handler discards them.
     pub warnings: Vec<String>,
     pub reference_text: std::collections::HashSet<NodeId>,
     /// Elements whose content included an entity reference, including one that

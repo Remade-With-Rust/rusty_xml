@@ -155,6 +155,9 @@ struct ParseCfg<'a> {
     settings: XmlParseSettings<'a>,
     /// Poll the SAX handler's [`SaxHandler::stop_requested`].
     sax_stop: bool,
+    /// Under `XML_PARSE_RECOVER`, where the fatal error that ended the parse
+    /// goes, so `xml_ctxt_read_memory` can report it as `last_error` (#46).
+    recovered: Option<&'a std::cell::Cell<Option<XmlError>>>,
 }
 
 /// The error a stopped parse reports.
@@ -378,6 +381,7 @@ pub fn xml_read_memory_with(
     let cfg = ParseCfg {
         settings: *settings,
         sax_stop: false,
+        recovered: None,
     };
     parse_doc(buffer, url, encoding, options, &mut sink, cfg)
 }
@@ -442,10 +446,19 @@ pub fn xml_ctxt_read_memory_with(
     settings: &XmlParseSettings<'_>,
 ) -> Result<XmlDoc, XmlError> {
     let opts = if options != 0 { options } else { ctxt.options };
-    match xml_read_memory_with(buffer, url, encoding, opts, settings) {
+    let recovered = std::cell::Cell::new(None);
+    let cfg = ParseCfg {
+        settings: *settings,
+        sax_stop: false,
+        recovered: Some(&recovered),
+    };
+    let mut sink = rusty_xml_sax::NullSax;
+    match parse_doc(buffer, url, encoding, opts, &mut sink, cfg) {
         Ok(doc) => {
             ctxt.doc = Some(doc.clone());
-            ctxt.last_error = None;
+            // libxml2 records the error a recovering parse survived as the
+            // last error; a clean parse leaves none.
+            ctxt.last_error = recovered.take();
             Ok(doc)
         }
         Err(e) => {
@@ -483,6 +496,7 @@ pub fn xml_sax_parse_memory_with(
     let cfg = ParseCfg {
         settings: *settings,
         sax_stop: true,
+        recovered: None,
     };
     parse_doc(buffer, None, None, options, &mut gate, cfg)
 }
@@ -614,7 +628,10 @@ fn push_fail(
     ctxt.buf = Vec::new();
     // A stop is never recovered from.
     if (ctxt.options & XML_PARSE_RECOVER) != 0 && e.code != XML_ERR_USER_STOP {
-        if let Some(doc) = partial {
+        if let Some(mut doc) = partial {
+            // As in a one-shot recovering parse, the tree says it was cut
+            // short (#46).
+            doc.warnings.push(e.to_string());
             if terminate {
                 return Ok(Some(doc));
             }
@@ -667,6 +684,7 @@ fn parse_chunk(
             interrupt,
         },
         sax_stop: false,
+        recovered: None,
     };
     if ctxt.stopped {
         return Err(ctxt
@@ -3224,8 +3242,15 @@ fn parse_utf8(
             }
             if (options & XML_PARSE_RECOVER) != 0 && !p.interrupted {
                 // Hand back everything parsed before the failure. One bad byte
-                // in a large document used to cost the caller all of it.
+                // in a large document used to cost the caller all of it. The
+                // error goes on the tree too, or a caller of the read
+                // functions could not tell a truncated tree from a whole one
+                // (#46).
                 p.sax.error(&e.message);
+                p.doc.warnings.push(e.to_string());
+                if let Some(slot) = cfg.recovered {
+                    slot.set(Some(e));
+                }
                 return Ok(p.doc);
             }
             Err(e)

@@ -41,7 +41,10 @@ pub fn read_manifest(dir: &Path) -> Vec<(String, Case)> {
         }
         let mut head = line.splitn(3, ' ');
         let name = head.next().expect("name").to_string();
-        let kind = head.next().unwrap_or_else(|| panic!("{line}: no kind")).to_string();
+        let kind = head
+            .next()
+            .unwrap_or_else(|| panic!("{line}: no kind"))
+            .to_string();
         let rest = head.next().unwrap_or("");
         let args: Vec<String> = rest.splitn(arity(&kind), ' ').map(str::to_string).collect();
         assert_eq!(args.len(), arity(&kind), "{line}: wrong argument count");
@@ -109,7 +112,12 @@ pub fn read_html5lib_archive_with_header(
         .unwrap_or_else(|e| panic!("{}: cannot decompress: {e}", path.display()));
 
     let mut r = ArchiveReader { rest: &bytes };
-    assert_eq!(r.line(), ARCHIVE_MAGIC, "{}: bad magic line", path.display());
+    assert_eq!(
+        r.line(),
+        ARCHIVE_MAGIC,
+        "{}: bad magic line",
+        path.display()
+    );
     let oracle = r
         .line()
         .strip_prefix("oracle ")
@@ -353,12 +361,17 @@ pub fn xinclude_inputs(dir: &Path, args: &[String]) -> Result<(XmlDoc, Vec<u8>),
 /// The return value of an XInclude run and the document it edited.
 pub fn render_xinclude(r: Result<i32, XmlError>, doc: &XmlDoc) -> String {
     let head = match r {
-        Ok(n) => format!("OK {n}
-"),
+        Ok(n) => format!(
+            "OK {n}
+"
+        ),
         Err(e) => render_err(&e),
     };
-    format!("{head}{}
-", payload(&xml_save_doc(doc, 0)))
+    format!(
+        "{head}{}
+",
+        payload(&xml_save_doc(doc, 0))
+    )
 }
 
 /// One line per html5lib case: its name, and the length and hash of the rendered result of `parse`.
@@ -398,7 +411,12 @@ pub fn parse_fixture(bytes: &[u8]) -> Result<XmlDoc, String> {
 pub fn run_default(dir: &Path, case: &Case) -> String {
     let a = &case.args;
     let text = match case.kind.as_str() {
-        "xml" => render_doc(xml_read_memory(&file(dir, &a[0]), None, None, number(&a[1]))),
+        "xml" => render_doc(xml_read_memory(
+            &file(dir, &a[0]),
+            None,
+            None,
+            number(&a[1]),
+        )),
         "ctxt" => {
             let mut ctxt = xml_new_parser_ctxt();
             let r = xml_ctxt_read_memory(&mut ctxt, &file(dir, &a[0]), None, None, number(&a[1]));

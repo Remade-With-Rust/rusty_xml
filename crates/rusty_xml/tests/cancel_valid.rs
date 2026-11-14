@@ -21,12 +21,22 @@ fn with_dtd(body: &str) -> String {
 
 #[test]
 fn dtd_valid_sweep() {
-    let valid = parse(&with_dtd("<doc><head>h</head><item id=\"1\">a</item></doc>"));
-    let invalid_order = parse(&with_dtd("<doc><item id=\"1\">a</item><head>h</head></doc>"));
+    let valid = parse(&with_dtd(
+        "<doc><head>h</head><item id=\"1\">a</item></doc>",
+    ));
+    let invalid_order = parse(&with_dtd(
+        "<doc><item id=\"1\">a</item><head>h</head></doc>",
+    ));
     let dtd = xml_parse_dtd(DTD.as_bytes(), None, None).expect("dtd parses");
     for doc in [&valid, &invalid_order] {
-        sweep(|c| xml_validate_document_with_interrupt(doc, c), is_interrupted);
-        sweep(|c| xml_validate_dtd_with_interrupt(doc, &dtd, c), is_interrupted);
+        sweep(
+            |c| xml_validate_document_with_interrupt(doc, c),
+            is_interrupted,
+        );
+        sweep(
+            |c| xml_validate_dtd_with_interrupt(doc, &dtd, c),
+            is_interrupted,
+        );
     }
 }
 
@@ -36,15 +46,23 @@ fn dtd_many_attrs_sweep() {
         let names: Vec<String> = (0..40).map(|i| format!("a{i}")).collect();
         let list: String = names.iter().map(|n| format!("{n}=\"x\" ")).collect();
         let attlist: String = if declared {
-            names.iter().map(|n| format!("<!ATTLIST r {n} CDATA #IMPLIED>")).collect()
+            names
+                .iter()
+                .map(|n| format!("<!ATTLIST r {n} CDATA #IMPLIED>"))
+                .collect()
         } else {
             String::new()
         };
-        parse(&format!("<!DOCTYPE r [<!ELEMENT r EMPTY>{attlist}]><r {list}/>"))
+        parse(&format!(
+            "<!DOCTYPE r [<!ELEMENT r EMPTY>{attlist}]><r {list}/>"
+        ))
     };
     let declared = attrs(true);
     let undeclared = attrs(false);
-    sweep(|c| xml_validate_document_with_interrupt(&declared, c), is_interrupted);
+    sweep(
+        |c| xml_validate_document_with_interrupt(&declared, c),
+        is_interrupted,
+    );
     let delta = count_checks(|c| {
         let _ = xml_validate_document_with_interrupt(&declared, c);
     }) - count_checks(|c| {
@@ -63,7 +81,10 @@ fn star_doc(children: usize) -> XmlDoc {
 #[test]
 fn dtd_star_sweep() {
     let doc = star_doc(12);
-    sweep(|c| xml_validate_document_with_interrupt(&doc, c), is_interrupted);
+    sweep(
+        |c| xml_validate_document_with_interrupt(&doc, c),
+        is_interrupted,
+    );
 }
 
 #[test]
@@ -72,13 +93,24 @@ fn latency_dtd_star() {
     let doc = star_doc(32);
     let (result, latency) =
         support::stop_after_100ms(|c| xml_validate_document_with_interrupt(&doc, c));
-    assert!(matches!(result, Err(InterruptError::Interrupted)), "not stopped");
+    assert!(
+        matches!(result, Err(InterruptError::Interrupted)),
+        "not stopped"
+    );
     println!("dtd_star: flag to return {latency:?}");
+    assert!(
+        latency <= support::LATENCY_LIMIT,
+        "dtd_star: {latency:?} over the limit"
+    );
 }
 
 const RNG_NS: &str = "http://relaxng.org/ns/structure/1.0";
 
-fn rng_validate(schema: &str, doc: &XmlDoc, c: &mut InterruptCheck<'_>) -> Result<(), InterruptError<String>> {
+fn rng_validate(
+    schema: &str,
+    doc: &XmlDoc,
+    c: &mut InterruptCheck<'_>,
+) -> Result<(), InterruptError<String>> {
     xml_relaxng_validate_doc_with_interrupt(schema.as_bytes(), doc, c)
 }
 
@@ -126,15 +158,24 @@ fn latency_rng_ref_chain() {
     let doc = parse("<doc/>");
     let schema = ref_chain(22);
     let (result, latency) = support::stop_after_100ms(|c| rng_validate(&schema, &doc, c));
-    assert!(matches!(result, Err(InterruptError::Interrupted)), "not stopped");
+    assert!(
+        matches!(result, Err(InterruptError::Interrupted)),
+        "not stopped"
+    );
     println!("rng_ref_chain: flag to return {latency:?}");
+    assert!(
+        latency <= support::LATENCY_LIMIT,
+        "rng_ref_chain: {latency:?} over the limit"
+    );
 }
 
 #[test]
 fn xsd_many_attrs_sweep() {
     let schema = |declared: bool| {
         let attrs: String = if declared {
-            (0..40).map(|i| format!("<xs:attribute name=\"a{i}\" use=\"required\"/>")).collect()
+            (0..40)
+                .map(|i| format!("<xs:attribute name=\"a{i}\" use=\"required\"/>"))
+                .collect()
         } else {
             String::new()
         };
@@ -155,7 +196,10 @@ fn xsd_many_attrs_sweep() {
         validate - parse_only
     };
     let (a, b) = (schema(true), schema(false));
-    sweep(|c| xml_schema_validate_doc_with_interrupt(a.as_bytes(), &doc, c), is_interrupted);
+    sweep(
+        |c| xml_schema_validate_doc_with_interrupt(a.as_bytes(), &doc, c),
+        is_interrupted,
+    );
     let delta = validate_cost(&a) - validate_cost(&b);
     assert!(delta >= 40, "delta {delta}");
 }
@@ -169,7 +213,10 @@ const SCHEMATRON: &str = "<schema xmlns=\"http://purl.oclc.org/dsdl/schematron\"
 fn schematron_sweep() {
     let items: String = (0..10).map(|i| format!("<item id=\"{i}\"/>")).collect();
     let doc = parse(&format!("<doc>{items}</doc>"));
-    sweep(|c| xml_schematron_validate_doc_with_interrupt(SCHEMATRON.as_bytes(), &doc, c), is_interrupted);
+    sweep(
+        |c| xml_schematron_validate_doc_with_interrupt(SCHEMATRON.as_bytes(), &doc, c),
+        is_interrupted,
+    );
 }
 
 #[test]

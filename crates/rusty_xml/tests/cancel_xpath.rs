@@ -4,9 +4,6 @@ use rusty_xml::{
     xml_read_memory, xml_xpath_eval, xml_xpath_eval_with_interrupt, InterruptCheck, InterruptError,
     XPathObject, XmlDoc, XmlXPathContext,
 };
-use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
-use std::sync::{Arc, Mutex};
-use std::thread;
 use std::time::{Duration, Instant};
 use support::{is_interrupted, sweep};
 
@@ -40,17 +37,26 @@ fn xpath_sweep_cases() {
     // id(): one check per element visited inside the per-token walk.
     let tokens: Vec<String> = (0..50).map(|i| format!("k{i}")).collect();
     let elements: String = tokens.iter().map(|t| format!("<e id=\"{t}\"/>")).collect();
-    sweep_expr(&format!("<r><t>{}</t>{elements}</r>", tokens.join(" ")), "id(//t)");
+    sweep_expr(
+        &format!("<r><t>{}</t>{elements}</r>", tokens.join(" ")),
+        "id(//t)",
+    );
 
     // sum(): one check per node summed.
     let nested = format!("{}{}", "<a>1".repeat(20), "</a>".repeat(20));
     sweep_expr(&format!("<r>{nested}</r>"), "sum(//a)");
 
     // preceding axis: one check per earlier node.
-    sweep_expr(&format!("<r>{}</r>", "<x/>".repeat(60)), "/descendant::x/preceding::*");
+    sweep_expr(
+        &format!("<r>{}</r>", "<x/>".repeat(60)),
+        "/descendant::x/preceding::*",
+    );
 
     // predicates: one check per candidate.
-    sweep_expr(&format!("<r>{}</r>", "<x v=\"1\"/>".repeat(40)), "//x[@v = '1'][position() > 3]");
+    sweep_expr(
+        &format!("<r>{}</r>", "<x v=\"1\"/>".repeat(40)),
+        "//x[@v = '1'][position() > 3]",
+    );
 }
 
 #[test]
@@ -91,22 +97,16 @@ fn latency(label: &str, expr: &str, mut size: usize, build: impl Fn(usize) -> St
             size *= 2;
         }
     };
-    let flag = Arc::new(AtomicBool::new(false));
-    let flagged_at = Arc::new(Mutex::new(None));
-    let setter = {
-        let (flag, flagged_at) = (Arc::clone(&flag), Arc::clone(&flagged_at));
-        thread::spawn(move || {
-            thread::sleep(Duration::from_millis(100));
-            *flagged_at.lock().unwrap() = Some(Instant::now());
-            flag.store(true, Relaxed);
-        })
-    };
-    let result = eval(&doc, expr, &mut InterruptCheck::new(&*flag));
-    let returned_at = Instant::now();
-    setter.join().unwrap();
-    assert!(matches!(result, Err(InterruptError::Interrupted)), "{label}: not stopped");
-    let latency = returned_at.duration_since(flagged_at.lock().unwrap().unwrap());
+    let (result, latency) = support::stop_after_100ms(|c| eval(&doc, expr, c));
+    assert!(
+        matches!(result, Err(InterruptError::Interrupted)),
+        "{label}: not stopped"
+    );
     println!("{label}: size {size}, uninterrupted {uninterrupted:?}, flag to return {latency:?}");
+    assert!(
+        latency <= support::LATENCY_LIMIT,
+        "{label}: {latency:?} over the limit"
+    );
 }
 
 #[test]

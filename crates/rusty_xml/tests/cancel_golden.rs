@@ -14,7 +14,11 @@ fn first_difference(got: &str, want: &str) -> String {
             return format!("line {}: got {:?}, want {:?}", i + 1, g, w);
         }
     }
-    format!("line counts differ: got {}, want {}", got.lines().count(), want.lines().count())
+    format!(
+        "line counts differ: got {}, want {}",
+        got.lines().count(),
+        want.lines().count()
+    )
 }
 
 fn check_all(run: impl Fn(&Path, &Case) -> String) {

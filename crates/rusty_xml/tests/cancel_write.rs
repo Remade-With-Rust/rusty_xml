@@ -32,14 +32,25 @@ fn node_dump_sweep() {
 #[test]
 fn c14n_sweep() {
     let doc = namespaces();
-    sweep(|c| xml_c14n_doc_dump_memory_with_interrupt(&doc, false, false, c), is_interrupted);
-    sweep(|c| xml_c14n_doc_dump_memory_with_interrupt(&doc, true, true, c), is_interrupted);
+    sweep(
+        |c| xml_c14n_doc_dump_memory_with_interrupt(&doc, false, false, c),
+        is_interrupted,
+    );
+    sweep(
+        |c| xml_c14n_doc_dump_memory_with_interrupt(&doc, true, true, c),
+        is_interrupted,
+    );
 }
 
 #[test]
 fn html_save_sweep() {
-    let doc = html_read_memory(b"<!DOCTYPE html><p class=a>x<!--c--><br><b>y</b></p>", None, None, 0)
-        .expect("html parses");
+    let doc = html_read_memory(
+        b"<!DOCTYPE html><p class=a>x<!--c--><br><b>y</b></p>",
+        None,
+        None,
+        0,
+    )
+    .expect("html parses");
     sweep(|c| xml_save_doc_with_interrupt(&doc, 0, c), stop);
 }
 

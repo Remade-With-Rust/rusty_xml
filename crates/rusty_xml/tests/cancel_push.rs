@@ -27,21 +27,39 @@ fn feed(
 fn push_stop_is_sticky() {
     let mut ctxt = ctxt();
     let calm = || false;
-    assert!(feed(&mut ctxt, b"<r>", 0, &mut InterruptCheck::with_interval(&calm, ONE)).unwrap().is_none());
+    assert!(feed(
+        &mut ctxt,
+        b"<r>",
+        0,
+        &mut InterruptCheck::with_interval(&calm, ONE)
+    )
+    .unwrap()
+    .is_none());
 
     let calls = Cell::new(0u32);
     let stop_on_second = || {
         calls.set(calls.get() + 1);
         calls.get() >= 2
     };
-    let stopped = feed(&mut ctxt, b"<a>text</a>", 0, &mut InterruptCheck::with_interval(&stop_on_second, ONE))
-        .unwrap_err();
+    let stopped = feed(
+        &mut ctxt,
+        b"<a>text</a>",
+        0,
+        &mut InterruptCheck::with_interval(&stop_on_second, ONE),
+    )
+    .unwrap_err();
     assert_eq!(stopped.code, XML_ERR_USER_STOP);
     assert_eq!(ctxt.last_error(), Some(&stopped));
 
     let mut never = InterruptCheck::new(&NoInterrupt);
-    assert_eq!(feed(&mut ctxt, b"more", 0, &mut never).unwrap_err(), stopped);
-    assert_eq!(feed(&mut ctxt, b"</r>", 1, &mut never).unwrap_err(), stopped);
+    assert_eq!(
+        feed(&mut ctxt, b"more", 0, &mut never).unwrap_err(),
+        stopped
+    );
+    assert_eq!(
+        feed(&mut ctxt, b"</r>", 1, &mut never).unwrap_err(),
+        stopped
+    );
     assert_eq!(xml_parse_chunk(&mut ctxt, b"x", 1).unwrap_err(), stopped);
 }
 
@@ -54,7 +72,14 @@ fn push_sweep_terminate() {
 #[test]
 fn push_prolog_sweep() {
     let total = sweep(
-        |c| feed(&mut ctxt(), b"<?xml version=\"1.0\"?><!--a--><!--b-->", 0, c),
+        |c| {
+            feed(
+                &mut ctxt(),
+                b"<?xml version=\"1.0\"?><!--a--><!--b-->",
+                0,
+                c,
+            )
+        },
         is_user_stop,
     );
     assert!(total >= 3, "total {total}");

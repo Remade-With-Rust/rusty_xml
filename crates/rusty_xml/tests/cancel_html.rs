@@ -1,8 +1,6 @@
 mod support;
 
-use rusty_xml::{
-    html_read_memory, html_read_memory_with_interrupt, xml_save_doc, InterruptCheck,
-};
+use rusty_xml::{html_read_memory, html_read_memory_with_interrupt, xml_save_doc, InterruptCheck};
 use std::fs;
 use std::path::{Path, PathBuf};
 use support::golden::{read_html5lib_archive, render_doc};
@@ -24,12 +22,16 @@ fn inputs() -> Vec<(String, Vec<u8>)> {
             .map(|e| e.expect("entry").path())
             .filter(|p| {
                 let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                (name.ends_with(".html") || name.ends_with(".htm")) && !name.ends_with(".xmllint.html")
+                (name.ends_with(".html") || name.ends_with(".htm"))
+                    && !name.ends_with(".xmllint.html")
             })
             .collect();
         paths.sort();
         for p in paths {
-            out.push((format!("{set}/{}", p.display()), fs::read(&p).expect("read input")));
+            out.push((
+                format!("{set}/{}", p.display()),
+                fs::read(&p).expect("read input"),
+            ));
         }
     }
     for (name, input, _) in read_html5lib_archive(&fixtures().join("html5lib-9329e64.zst")) {
@@ -53,10 +55,18 @@ fn html_variant_matches_default() {
             _ => false,
         };
         if !same_bytes {
-            differing.push(format!("{name}: {}", render_doc(default).lines().next().unwrap_or("")));
+            differing.push(format!(
+                "{name}: {}",
+                render_doc(default).lines().next().unwrap_or("")
+            ));
         }
     }
-    assert!(differing.is_empty(), "{} of {} differ: {differing:?}", differing.len(), all.len());
+    assert!(
+        differing.is_empty(),
+        "{} of {} differ: {differing:?}",
+        differing.len(),
+        all.len()
+    );
 }
 
 #[test]

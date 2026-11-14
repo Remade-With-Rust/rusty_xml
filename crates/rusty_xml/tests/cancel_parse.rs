@@ -1,18 +1,22 @@
 mod support;
 
 use rusty_xml::{
-    xml_ctxt_read_memory_with_interrupt, xml_new_parser_ctxt, xml_read_io_with_interrupt,
-    xml_parse_dtd_with_interrupt, xml_read_memory_with_interrupt,
-    xml_reader_for_memory_with_interrupt, xml_sax_parse_memory_with_interrupt, xml_save_doc,
-    xml_xinclude_process_with_interrupt,
-    InterruptCheck, SaxEvent, SaxRecorder, XML_ERR_USER_STOP, XML_PARSE_DTDATTR, XML_PARSE_NOENT, XML_PARSE_RECOVER,
+    xml_ctxt_read_memory_with_interrupt, xml_new_parser_ctxt, xml_parse_dtd_with_interrupt,
+    xml_read_io_with_interrupt, xml_read_memory_with_interrupt,
+    xml_reader_for_memory_with_interrupt, xml_save_doc, xml_sax_parse_memory_with_interrupt,
+    xml_xinclude_process_with_interrupt, InterruptCheck, SaxEvent, SaxRecorder, XML_ERR_USER_STOP,
+    XML_PARSE_DTDATTR, XML_PARSE_NOENT, XML_PARSE_RECOVER,
 };
 use std::io::Read;
 use support::{count_checks, is_user_stop, sweep};
 
 const DOC: &[u8] = b"<r a=\"1\"><!--c--><?p d?><e>&lt;t&amp;</e>tail</r>";
 
-fn read(doc: &[u8], options: i32, check: &mut InterruptCheck<'_>) -> Result<(), rusty_xml::XmlError> {
+fn read(
+    doc: &[u8],
+    options: i32,
+    check: &mut InterruptCheck<'_>,
+) -> Result<(), rusty_xml::XmlError> {
     xml_read_memory_with_interrupt(doc, None, None, options, check).map(|_| ())
 }
 
@@ -30,7 +34,8 @@ fn recover_sweep() {
 
 #[test]
 fn entity_expansion_sweep() {
-    let with_entities = br#"<!DOCTYPE r [<!ENTITY a "<x/><x/>"><!ENTITY b "&a;&a;">]><r>&b;&b;</r>"#;
+    let with_entities =
+        br#"<!DOCTYPE r [<!ENTITY a "<x/><x/>"><!ENTITY b "&a;&a;">]><r>&b;&b;</r>"#;
     let written_out = b"<r><x/><x/><x/><x/><x/><x/><x/><x/></r>";
     sweep(|c| read(with_entities, XML_PARSE_NOENT, c), is_user_stop);
     let a = count_checks(|c| {
@@ -99,7 +104,10 @@ fn ctxt_sweep() {
             ctxt.doc = Some(previous.clone());
             let r = xml_ctxt_read_memory_with_interrupt(&mut ctxt, DOC, None, None, 0, c);
             if r.is_err() {
-                assert_eq!(ctxt.last_error.as_ref().map(|e| e.code), Some(XML_ERR_USER_STOP));
+                assert_eq!(
+                    ctxt.last_error.as_ref().map(|e| e.code),
+                    Some(XML_ERR_USER_STOP)
+                );
                 assert_eq!(xml_save_doc(ctxt.doc.as_ref().unwrap(), 0), previous_bytes);
             }
             r
@@ -108,7 +116,11 @@ fn ctxt_sweep() {
     );
 }
 
-fn read_io(bytes: &'static [u8], step: usize, check: &mut InterruptCheck<'_>) -> Result<(), rusty_xml::XmlError> {
+fn read_io(
+    bytes: &'static [u8],
+    step: usize,
+    check: &mut InterruptCheck<'_>,
+) -> Result<(), rusty_xml::XmlError> {
     let mut cursor = std::io::Cursor::new(bytes);
     xml_read_io_with_interrupt(
         |buf: &mut [u8]| {
@@ -138,7 +150,6 @@ fn read_io_loop_checked() {
     });
     assert!(many_reads >= one_read + 4, "{many_reads} vs {one_read}");
 }
-
 
 fn chain(values: impl Fn(usize) -> String) -> String {
     (0..40)
@@ -207,7 +218,9 @@ fn pe_chain() -> String {
 #[test]
 fn pe_expansion_sweep() {
     let chained = pe_chain();
-    let direct: String = (1..=9).map(|i| format!("<!ELEMENT x{i} (#PCDATA)>")).collect();
+    let direct: String = (1..=9)
+        .map(|i| format!("<!ELEMENT x{i} (#PCDATA)>"))
+        .collect();
     let parse = |text: &str, c: &mut InterruptCheck<'_>| {
         xml_parse_dtd_with_interrupt(text.as_bytes(), None, None, c).map(|_| ())
     };
@@ -266,7 +279,10 @@ fn xinclude_sweep() {
     let fragment_parse = count_checks(|c| {
         let _ = read(FRAGMENT, 0, c);
     });
-    assert!(total >= 2 * fragment_parse + 10, "total {total}, one fragment parse {fragment_parse}");
+    assert!(
+        total >= 2 * fragment_parse + 10,
+        "total {total}, one fragment parse {fragment_parse}"
+    );
 }
 
 #[test]

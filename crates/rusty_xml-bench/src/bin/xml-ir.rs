@@ -56,7 +56,9 @@ fn main() {
     let interrupt = args.iter().any(|a| a == "--interrupt");
     args.retain(|a| a != "--interrupt");
     let mut args = args.into_iter();
-    let list = args.next().expect("usage: xml-ir LIST [REPS] [--interrupt]");
+    let list = args
+        .next()
+        .expect("usage: xml-ir LIST [REPS] [--interrupt]");
     let reps: u32 = args.next().map_or(1, |r| r.parse().expect("reps"));
     let never = AtomicBool::new(false);
     let names = std::fs::read_to_string(&list).expect("read list");
@@ -101,7 +103,8 @@ fn main() {
                 }
             }
             let out = if interrupt {
-                xml_save_doc_with_interrupt(&doc, 0, &mut InterruptCheck::new(&never)).expect("save")
+                xml_save_doc_with_interrupt(&doc, 0, &mut InterruptCheck::new(&never))
+                    .expect("save")
             } else {
                 xml_save_doc(&doc, 0)
             };

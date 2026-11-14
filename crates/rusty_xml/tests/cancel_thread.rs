@@ -35,7 +35,7 @@ fn stopped_from_another_thread(
     };
     let result = parse(&mut InterruptCheck::new(&probe));
     setter.join().expect("setter thread");
-    result.err().expect("the stop must surface as an error")
+    result.expect_err("the stop must surface as an error")
 }
 
 const LEN: usize = 32 * 1024 * 1024;
@@ -43,13 +43,17 @@ const LEN: usize = 32 * 1024 * 1024;
 #[test]
 fn cross_thread_xml() {
     let doc = format!("<r>{}</r>", "<a>x</a>".repeat(LEN / 8));
-    let e = stopped_from_another_thread(|c| xml_read_memory_with_interrupt(doc.as_bytes(), None, None, 0, c));
+    let e = stopped_from_another_thread(|c| {
+        xml_read_memory_with_interrupt(doc.as_bytes(), None, None, 0, c)
+    });
     assert_eq!(e.code, XML_ERR_USER_STOP);
 }
 
 #[test]
 fn cross_thread_html() {
     let doc = format!("<!DOCTYPE html><body>{}", "<p>x</p>".repeat(LEN / 8));
-    let e = stopped_from_another_thread(|c| html_read_memory_with_interrupt(doc.as_bytes(), None, None, 0, c));
+    let e = stopped_from_another_thread(|c| {
+        html_read_memory_with_interrupt(doc.as_bytes(), None, None, 0, c)
+    });
     assert_eq!(e.code, XML_ERR_USER_STOP);
 }

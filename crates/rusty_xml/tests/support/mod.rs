@@ -3,23 +3,21 @@ pub mod golden;
 
 use rusty_xml::{
     html_read_memory, html_read_memory_with_interrupt, xml_c14n_doc_dump_memory_with_interrupt,
-    xml_create_push_parser_ctxt,
-    xml_ctxt_read_memory_with_interrupt, xml_new_parser_ctxt, xml_node_dump_with_interrupt,
-    xml_parse_chunk_with_interrupt,
-    xml_parse_dtd, xml_parse_dtd_with_interrupt, xml_read_io_with_interrupt,
-    xml_read_memory_with_interrupt, xml_reader_for_memory_with_interrupt,
-    xml_relaxng_validate_doc_with_interrupt, xml_sax_parse_memory_with_interrupt,
-    xml_save_doc_with_interrupt, xml_schema_validate_doc_with_interrupt,
-    xml_schematron_validate_doc_with_interrupt,
+    xml_create_push_parser_ctxt, xml_ctxt_read_memory_with_interrupt, xml_new_parser_ctxt,
+    xml_node_dump_with_interrupt, xml_parse_chunk_with_interrupt, xml_parse_dtd,
+    xml_parse_dtd_with_interrupt, xml_read_io_with_interrupt, xml_read_memory_with_interrupt,
+    xml_reader_for_memory_with_interrupt, xml_relaxng_validate_doc_with_interrupt,
+    xml_save_doc_with_interrupt, xml_sax_parse_memory_with_interrupt,
+    xml_schema_validate_doc_with_interrupt, xml_schematron_validate_doc_with_interrupt,
     xml_validate_document_with_interrupt, xml_validate_dtd_with_interrupt,
     xml_xinclude_process_with_interrupt, xml_xpath_eval_with_interrupt, InterruptCheck,
     InterruptError, SaxRecorder, XmlError, XmlXPathContext, XML_ERR_USER_STOP,
 };
-use std::path::Path;
 use std::cell::Cell;
 use std::fmt::Debug;
 use std::num::NonZeroU32;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -61,7 +59,11 @@ pub fn sweep<T, E: Debug>(
             Ok(Ok(_)) => panic!("k={k} total={total} returned Ok"),
             Ok(Err(e)) => assert!(is_stop(&e), "k={k} total={total} wrong error {e:?}"),
         }
-        assert_eq!(calls.get(), k, "k={k} total={total}: interrupt consulted after the stop");
+        assert_eq!(
+            calls.get(),
+            k,
+            "k={k} total={total}: interrupt consulted after the stop"
+        );
     }
     total
 }
@@ -77,7 +79,6 @@ pub fn is_user_stop(e: &XmlError) -> bool {
 pub fn is_interrupted<E>(e: &InterruptError<E>) -> bool {
     matches!(e, InterruptError::Interrupted)
 }
-
 
 fn flatten<T>(r: Result<T, InterruptError<String>>) -> Result<T, String> {
     r.map_err(|e| match e {
@@ -136,7 +137,9 @@ pub fn run_interrupt(dir: &Path, case: &golden::Case) -> String {
             let results: Vec<_> = chunks
                 .iter()
                 .enumerate()
-                .map(|(i, c)| xml_parse_chunk_with_interrupt(&mut ctxt, c, i32::from(i == last), &mut check))
+                .map(|(i, c)| {
+                    xml_parse_chunk_with_interrupt(&mut ctxt, c, i32::from(i == last), &mut check)
+                })
                 .collect();
             golden::render_push(&results)
         }
@@ -171,21 +174,25 @@ pub fn run_interrupt(dir: &Path, case: &golden::Case) -> String {
         "xpath" => match golden::parse_fixture(&golden::file(dir, &a[0])) {
             Ok(doc) => {
                 let ctx = XmlXPathContext::xml_xpath_new_context(&doc);
-                golden::render_xpath(flatten(xml_xpath_eval_with_interrupt(&a[1], &ctx, &mut check)))
+                golden::render_xpath(flatten(xml_xpath_eval_with_interrupt(
+                    &a[1], &ctx, &mut check,
+                )))
             }
             Err(e) => e,
         },
         "dtdvalid" => match golden::parse_fixture(&golden::file(dir, &a[0])) {
-            Ok(doc) => golden::render_unit(flatten(xml_validate_document_with_interrupt(&doc, &mut check))),
+            Ok(doc) => golden::render_unit(flatten(xml_validate_document_with_interrupt(
+                &doc, &mut check,
+            ))),
             Err(e) => e,
         },
         "validatedtd" => match (
             golden::parse_fixture(&golden::file(dir, &a[0])),
             xml_parse_dtd(&golden::file(dir, &a[1]), None, None),
         ) {
-            (Ok(doc), Ok(dtd)) => {
-                golden::render_unit(flatten(xml_validate_dtd_with_interrupt(&doc, &dtd, &mut check)))
-            }
+            (Ok(doc), Ok(dtd)) => golden::render_unit(flatten(xml_validate_dtd_with_interrupt(
+                &doc, &dtd, &mut check,
+            ))),
             (Err(e), _) => e,
             (_, Err(e)) => golden::render_err(&e),
         },
@@ -217,25 +224,38 @@ pub fn run_interrupt(dir: &Path, case: &golden::Case) -> String {
                 golden::parse_fixture(&bytes)
             };
             match doc {
-                Ok(doc) => match xml_save_doc_with_interrupt(&doc, golden::number(&a[1]), &mut check) {
-                    Ok(out) => format!("{}
-", golden::payload(&out)),
-                    Err(e) => format!("ERR {e}
-"),
-                },
+                Ok(doc) => {
+                    match xml_save_doc_with_interrupt(&doc, golden::number(&a[1]), &mut check) {
+                        Ok(out) => format!(
+                            "{}
+",
+                            golden::payload(&out)
+                        ),
+                        Err(e) => format!(
+                            "ERR {e}
+"
+                        ),
+                    }
+                }
                 Err(e) => e,
             }
         }
         "nodedump" => match golden::parse_fixture(&golden::file(dir, &a[0])) {
             Ok(doc) => match doc.xml_doc_get_root_element() {
                 Some(root) => match xml_node_dump_with_interrupt(&doc, root, 0, &mut check) {
-                    Ok(out) => format!("{}
-", golden::payload(&out)),
-                    Err(e) => format!("ERR {e}
-"),
+                    Ok(out) => format!(
+                        "{}
+",
+                        golden::payload(&out)
+                    ),
+                    Err(e) => format!(
+                        "ERR {e}
+"
+                    ),
                 },
                 None => "NO ROOT
-".to_string(),
+"
+                .to_string(),
             },
             Err(e) => e,
         },
@@ -250,8 +270,19 @@ pub fn run_interrupt(dir: &Path, case: &golden::Case) -> String {
     golden::finish(text)
 }
 
-/// Runs `run` with an interrupt that another thread sets 100 ms after the call starts, at the
-/// default interval. Returns its result and the time from setting the flag to the return.
+/// The consultation interval of the latency tests: `CANCEL_INTERVAL` when set, else the default.
+pub fn latency_interval() -> NonZeroU32 {
+    std::env::var("CANCEL_INTERVAL")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(InterruptCheck::DEFAULT_INTERVAL)
+}
+
+/// The latency every release-only test must stay within.
+pub const LATENCY_LIMIT: Duration = Duration::from_millis(50);
+
+/// Runs `run` with an interrupt that another thread sets 100 ms after the call starts, at
+/// `latency_interval()`. Returns its result and the time from setting the flag to the return.
 pub fn stop_after_100ms<R>(run: impl FnOnce(&mut InterruptCheck<'_>) -> R) -> (R, Duration) {
     let flag = Arc::new(AtomicBool::new(false));
     let flagged_at = Arc::new(Mutex::new(None));
@@ -263,9 +294,15 @@ pub fn stop_after_100ms<R>(run: impl FnOnce(&mut InterruptCheck<'_>) -> R) -> (R
             flag.store(true, Relaxed);
         })
     };
-    let result = run(&mut InterruptCheck::new(&*flag));
+    let result = run(&mut InterruptCheck::with_interval(
+        &*flag,
+        latency_interval(),
+    ));
     let returned_at = Instant::now();
     setter.join().unwrap();
-    let flagged_at = flagged_at.lock().unwrap().expect("the flag was set before the call returned");
+    let flagged_at = flagged_at
+        .lock()
+        .unwrap()
+        .expect("the flag was set before the call returned");
     (result, returned_at.duration_since(flagged_at))
 }

@@ -88,8 +88,10 @@ pub struct InterruptCheck<'a> {
 }
 
 impl InterruptCheck<'_> {
-    /// Consultation interval used by [`InterruptCheck::new`], in checks.
-    pub const DEFAULT_INTERVAL: NonZeroU32 = NonZeroU32::new(256).unwrap();
+    /// Consultation interval used by [`InterruptCheck::new`], in checks. The worst-case time from a
+    /// stop request to the return is this many checks times the cost of the costliest check, about
+    /// 5 us in the quadratic XPath case; larger values trade stop latency for fewer consultations.
+    pub const DEFAULT_INTERVAL: NonZeroU32 = NonZeroU32::new(4096).unwrap();
 }
 
 impl<'a> InterruptCheck<'a> {

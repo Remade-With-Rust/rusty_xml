@@ -4,9 +4,7 @@
 //! counters, runs the API alone over its list, and prints `<api> allocs N peak_bytes N`.
 //! `realloc` counts as one allocation. Peak is the largest growth over the bytes live at the reset.
 
-use rusty_xml::{
-    html_read_memory, xml_read_memory, xml_xpath_eval, XmlDoc, XmlXPathContext,
-};
+use rusty_xml::{html_read_memory, xml_read_memory, xml_xpath_eval, XmlDoc, XmlXPathContext};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicIsize, AtomicU64, Ordering::Relaxed};
 

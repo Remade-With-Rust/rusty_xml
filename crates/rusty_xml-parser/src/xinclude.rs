@@ -34,18 +34,40 @@ where
     Ok(n)
 }
 
-fn collect_includes(doc: &XmlDoc, id: NodeId, out: &mut Vec<NodeId>) {
-    if doc.kind(id) == NodeKind::Element
-        && doc.name(id) == "include"
-        && (doc.ns_uri(id) == Some(XI) || doc.prefix(id) == Some("xi"))
-    {
-        out.push(id);
-        return; // do not recurse into include (fallback stays nested)
-    }
-    let mut c = doc.first_child(id);
-    while let Some(x) = c {
-        collect_includes(doc, x, out);
-        c = doc.next_sibling(x);
+/// Every `xi:include` element under `start`, in document order, without
+/// descending into one (its fallback stays nested).
+///
+/// Walks first-child / next-sibling / parent links rather than recursing:
+/// under `XML_PARSE_HUGE` a document may nest 1,000,000 deep, and recursion
+/// per level overflowed the stack at about 20,000 (#34).
+fn collect_includes(doc: &XmlDoc, start: NodeId, out: &mut Vec<NodeId>) {
+    let is_include = |id: NodeId| {
+        doc.kind(id) == NodeKind::Element
+            && doc.name(id) == "include"
+            && (doc.ns_uri(id) == Some(XI) || doc.prefix(id) == Some("xi"))
+    };
+    let mut cur = start;
+    loop {
+        if is_include(cur) {
+            out.push(cur);
+        } else if let Some(c) = doc.first_child(cur) {
+            cur = c;
+            continue;
+        }
+        // Next in document order that is not inside `cur`, staying under start.
+        loop {
+            if cur == start {
+                return;
+            }
+            if let Some(n) = doc.next_sibling(cur) {
+                cur = n;
+                break;
+            }
+            match doc.parent(cur) {
+                Some(p) => cur = p,
+                None => return,
+            }
+        }
     }
 }
 
@@ -117,7 +139,41 @@ fn graft(dst: &mut XmlDoc, _parent: NodeId, before: NodeId, src: &XmlDoc, src_id
     dst.xml_add_prev_sibling(before, new);
 }
 
+/// Copy `id` and its subtree from `src` into `dst`, returning the unlinked
+/// copy. Iterative, for the same reason as [`collect_includes`]; nodes are
+/// allocated in document order, as the recursive form allocated them.
 fn copy_node(dst: &mut XmlDoc, src: &XmlDoc, id: NodeId) -> NodeId {
+    let root = copy_one(dst, src, id);
+    // (source child, destination parent), next to visit on top.
+    let mut stack: Vec<(NodeId, NodeId)> = Vec::new();
+    let mut kids: Vec<NodeId> = Vec::new();
+    push_children(src, id, root, &mut stack, &mut kids);
+    while let Some((s, parent)) = stack.pop() {
+        let n = copy_one(dst, src, s);
+        dst.xml_add_child(parent, n);
+        push_children(src, s, n, &mut stack, &mut kids);
+    }
+    root
+}
+
+fn push_children(
+    src: &XmlDoc,
+    id: NodeId,
+    copy: NodeId,
+    stack: &mut Vec<(NodeId, NodeId)>,
+    kids: &mut Vec<NodeId>,
+) {
+    kids.clear();
+    let mut c = src.first_child(id);
+    while let Some(x) = c {
+        kids.push(x);
+        c = src.next_sibling(x);
+    }
+    stack.extend(kids.iter().rev().map(|&k| (k, copy)));
+}
+
+/// One node with its namespace data and attributes, not its children.
+fn copy_one(dst: &mut XmlDoc, src: &XmlDoc, id: NodeId) -> NodeId {
     let kind = src.kind(id);
     let n = dst.alloc(kind, src.name(id));
     // Prefixes and URIs are interned per document: re-intern through `dst`.
@@ -127,18 +183,13 @@ fn copy_node(dst: &mut XmlDoc, src: &XmlDoc, id: NodeId) -> NodeId {
     for (p, u) in src.ns_defs(id) {
         dst.push_ns_def(n, p.clone(), u.clone());
     }
+    // xml_set_prop builds the attribute node. This used to copy each
+    // attribute first as well, leaving an unlinked node in the arena per
+    // attribute.
     let mut a = src.first_attr(id);
     while let Some(x) = a {
-        let an = copy_node(dst, src, x);
         dst.xml_set_prop(n, src.name(x), src.content(x));
-        let _ = an;
         a = src.next_sibling(x);
-    }
-    let mut c = src.first_child(id);
-    while let Some(x) = c {
-        let ch = copy_node(dst, src, x);
-        dst.xml_add_child(n, ch);
-        c = src.next_sibling(x);
     }
     n
 }

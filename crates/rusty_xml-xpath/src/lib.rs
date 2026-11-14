@@ -1200,7 +1200,7 @@ fn sort_unique<C: Checker>(
         check.tick()?;
         keyed.push((order.iter().position(|x| x == n).unwrap_or(usize::MAX), i, *n));
     }
-    // The input index keeps equal ranks in input order, as the stable sort did.
+    // The input index breaks rank ties, so equal ranks keep input order.
     keyed.sort_unstable_by_key(|&(rank, i, _)| (rank, i));
     for (slot, entry) in v.iter_mut().zip(keyed) {
         *slot = entry.2;
@@ -1378,7 +1378,7 @@ fn axis_nodes<C: Checker>(
             }
         }
     }
-    // Filtered in place, as `into_iter().filter().collect()` was: no second allocation.
+    // In place: reuses the source buffer, no second allocation.
     let mut kept = 0;
     for i in 0..raw.len() {
         check.tick()?;

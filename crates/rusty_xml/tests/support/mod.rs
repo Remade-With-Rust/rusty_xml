@@ -5,8 +5,9 @@ use rusty_xml::{
     html_read_memory_with_interrupt, xml_ctxt_read_memory_with_interrupt, xml_new_parser_ctxt, xml_read_io_with_interrupt,
     xml_create_push_parser_ctxt, xml_parse_chunk_with_interrupt, xml_parse_dtd_with_interrupt,
     xml_read_memory_with_interrupt, xml_reader_for_memory_with_interrupt,
-    xml_sax_parse_memory_with_interrupt, xml_xinclude_process_with_interrupt, InterruptCheck,
-    InterruptError, SaxRecorder, XmlDoc, XmlError, XML_ERR_USER_STOP,
+    xml_sax_parse_memory_with_interrupt, xml_xinclude_process_with_interrupt,
+    xml_xpath_eval_with_interrupt, InterruptCheck,
+    InterruptError, SaxRecorder, XmlError, XmlXPathContext, XML_ERR_USER_STOP,
 };
 use std::path::Path;
 use std::cell::Cell;
@@ -70,7 +71,7 @@ pub fn is_interrupted<E>(e: &InterruptError<E>) -> bool {
 }
 
 
-fn unwrap_other(r: Result<XmlDoc, InterruptError<String>>) -> Result<XmlDoc, String> {
+fn flatten<T>(r: Result<T, InterruptError<String>>) -> Result<T, String> {
     r.map_err(|e| match e {
         InterruptError::Other(s) => s,
         InterruptError::Interrupted => "interrupted".to_string(),
@@ -159,6 +160,13 @@ pub fn run_interrupt(dir: &Path, case: &golden::Case) -> String {
         "html5lib" => golden::render_html5lib(dir, &a[0], |input| {
             html_read_memory_with_interrupt(input, None, None, 0, &mut check)
         }),
+        "xpath" => match golden::parse_fixture(&golden::file(dir, &a[0])) {
+            Ok(doc) => {
+                let ctx = XmlXPathContext::xml_xpath_new_context(&doc);
+                golden::render_xpath(flatten(xml_xpath_eval_with_interrupt(&a[1], &ctx, &mut check)))
+            }
+            Err(e) => e,
+        },
         "dtd" => golden::render_dtd(xml_parse_dtd_with_interrupt(
             &golden::file(dir, &a[0]),
             None,

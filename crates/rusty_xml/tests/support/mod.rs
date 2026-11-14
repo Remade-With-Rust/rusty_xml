@@ -6,8 +6,8 @@ use rusty_xml::{
     xml_create_push_parser_ctxt, xml_parse_chunk_with_interrupt, xml_parse_dtd_with_interrupt,
     xml_read_memory_with_interrupt, xml_reader_for_memory_with_interrupt,
     xml_sax_parse_memory_with_interrupt, xml_xinclude_process_with_interrupt,
-    xml_xpath_eval_with_interrupt, InterruptCheck,
-    InterruptError, SaxRecorder, XmlError, XmlXPathContext, XML_ERR_USER_STOP,
+    xml_parse_dtd, xml_validate_document_with_interrupt, xml_validate_dtd_with_interrupt,
+    xml_xpath_eval_with_interrupt, InterruptCheck,    InterruptError, SaxRecorder, XmlError, XmlXPathContext, XML_ERR_USER_STOP,
 };
 use std::path::Path;
 use std::cell::Cell;
@@ -166,6 +166,20 @@ pub fn run_interrupt(dir: &Path, case: &golden::Case) -> String {
                 golden::render_xpath(flatten(xml_xpath_eval_with_interrupt(&a[1], &ctx, &mut check)))
             }
             Err(e) => e,
+        },
+        "dtdvalid" => match golden::parse_fixture(&golden::file(dir, &a[0])) {
+            Ok(doc) => golden::render_unit(flatten(xml_validate_document_with_interrupt(&doc, &mut check))),
+            Err(e) => e,
+        },
+        "validatedtd" => match (
+            golden::parse_fixture(&golden::file(dir, &a[0])),
+            xml_parse_dtd(&golden::file(dir, &a[1]), None, None),
+        ) {
+            (Ok(doc), Ok(dtd)) => {
+                golden::render_unit(flatten(xml_validate_dtd_with_interrupt(&doc, &dtd, &mut check)))
+            }
+            (Err(e), _) => e,
+            (_, Err(e)) => golden::render_err(&e),
         },
         "dtd" => golden::render_dtd(xml_parse_dtd_with_interrupt(
             &golden::file(dir, &a[0]),

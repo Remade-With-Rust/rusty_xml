@@ -7,7 +7,13 @@ mod rng;
 mod xsd;
 mod schematron;
 
-use rusty_xml_tree::{AttrDefault, ElementDecl, NodeId, NodeKind, XmlDoc, XmlDtd};
+use rusty_xml_tree::{
+    AttrDefault, ElementDecl, InterruptCheck, InterruptError, Interrupted, NodeId, NodeKind, XmlDoc,
+    XmlDtd,
+};
+
+mod checker;
+use checker::{other, plain, Checker, NoCheck};
 
 pub use c14n::*;
 pub use rng::*;
@@ -17,21 +23,55 @@ pub use schematron::*;
 /// `xmlValidateDocument` against the document's attached DTD.
 #[doc(alias = "xmlValidateDocument")]
 pub fn xml_validate_document(doc: &XmlDoc) -> Result<(), String> {
-    let dtd = doc.dtd.as_ref().ok_or("no DTD")?;
-    xml_validate_dtd(doc, dtd)
+    plain(validate_document_inner(doc, &mut NoCheck))
+}
+
+/// Like [`xml_validate_document`], but returns `InterruptError::Interrupted` once `check` reports
+/// an interrupt; a stop is never a verdict.
+pub fn xml_validate_document_with_interrupt(
+    doc: &XmlDoc,
+    check: &mut InterruptCheck<'_>,
+) -> Result<(), InterruptError<String>> {
+    validate_document_inner(doc, check)
+}
+
+fn validate_document_inner<C: Checker>(
+    doc: &XmlDoc,
+    check: &mut C,
+) -> Result<(), InterruptError<String>> {
+    let dtd = doc.dtd.as_ref().ok_or_else(|| other("no DTD"))?;
+    validate_dtd_inner(doc, dtd, check)
 }
 
 /// `xmlValidateDtd`.
 #[doc(alias = "xmlValidateDtd")]
 pub fn xml_validate_dtd(doc: &XmlDoc, dtd: &XmlDtd) -> Result<(), String> {
+    plain(validate_dtd_inner(doc, dtd, &mut NoCheck))
+}
+
+/// Like [`xml_validate_dtd`], but returns `InterruptError::Interrupted` once `check` reports an
+/// interrupt; a stop is never a verdict.
+pub fn xml_validate_dtd_with_interrupt(
+    doc: &XmlDoc,
+    dtd: &XmlDtd,
+    check: &mut InterruptCheck<'_>,
+) -> Result<(), InterruptError<String>> {
+    validate_dtd_inner(doc, dtd, check)
+}
+
+fn validate_dtd_inner<C: Checker>(
+    doc: &XmlDoc,
+    dtd: &XmlDtd,
+    check: &mut C,
+) -> Result<(), InterruptError<String>> {
     let root = doc
         .xml_doc_get_root_element()
-        .ok_or("document has no root")?;
+        .ok_or_else(|| other("document has no root"))?;
     if let Some(n) = &dtd.name {
         // The DOCTYPE names a QName, so `<!DOCTYPE xml:foo>` must be compared
         // against `xml:foo` and not against the local part alone.
         if doc.qname(root) != *n {
-            return Err(format!("root element {} does not match DOCTYPE {n}", doc.qname(root)));
+            return Err(other(format!("root element {} does not match DOCTYPE {n}", doc.qname(root))));
         }
     }
     // Constraints on the DECLARATIONS themselves, before any instance of them
@@ -41,14 +81,14 @@ pub fn xml_validate_dtd(doc: &XmlDoc, dtd: &XmlDtd) -> Result<(), String> {
     // subset was incomplete -- it stopped being a well-formedness one, but it
     // did not stop being an error.
     if let Some(e) = doc.undeclared_entity_refs.first() {
-        return Err(format!("Entity '{e}' not defined"));
+        return Err(other(format!("Entity '{e}' not defined")));
     }
     // "Notation Declared": a notation named by an NDATA annotation or by a
     // NOTATION attribute type has to have been declared. We were parsing
     // <!NOTATION> and throwing the name away, so nothing could tell.
     for n in &dtd.ndata_notations {
         if !dtd.notations.contains(n) {
-            return Err(format!("Notation {n} is not declared"));
+            return Err(other(format!("Notation {n} is not declared")));
         }
     }
     for ((elem, aname), ad) in &dtd.attributes {
@@ -57,16 +97,16 @@ pub fn xml_validate_dtd(doc: &XmlDoc, dtd: &XmlDtd) -> Result<(), String> {
         }
         for n in &ad.enumerated {
             if !dtd.notations.contains(n) {
-                return Err(format!(
+                return Err(other(format!(
                     "Notation {n} in attribute {aname} of {elem} is not declared"
-                ));
+                )));
             }
         }
     }
     // "Unique Element Type Declaration": no element type may be declared more
     // than once. A HashMap cannot say so on its own, so the parser records it.
     if let Some(dup) = dtd.duplicate_elements.first() {
-        return Err(format!("Redefinition of element {dup}"));
+        return Err(other(format!("Redefinition of element {dup}")));
     }
     // "No Duplicate Types": a mixed content model may not name the same
     // element twice.
@@ -75,9 +115,9 @@ pub fn xml_validate_dtd(doc: &XmlDoc, dtd: &XmlDtd) -> Result<(), String> {
             let mut seen = std::collections::HashSet::new();
             for n in names {
                 if !seen.insert(n) {
-                    return Err(format!(
+                    return Err(other(format!(
                         "Definition of {elem} has duplicate references of {n}"
-                    ));
+                    )));
                 }
             }
         }
@@ -87,9 +127,9 @@ pub fn xml_validate_dtd(doc: &XmlDoc, dtd: &XmlDtd) -> Result<(), String> {
         let mut seen = std::collections::HashSet::new();
         for e in &ad.enumerated {
             if !seen.insert(e) {
-                return Err(format!(
+                return Err(other(format!(
                     "attribute {aname} of {elem}: enumeration value token {e} duplicated"
-                ));
+                )));
             }
         }
         // "ID Attribute Default": an ID attribute must be #IMPLIED or
@@ -98,17 +138,17 @@ pub fn xml_validate_dtd(doc: &XmlDoc, dtd: &XmlDtd) -> Result<(), String> {
         if ad.att_type == "ID"
             && matches!(ad.default, AttrDefault::Value | AttrDefault::Fixed)
         {
-            return Err(format!(
+            return Err(other(format!(
                 "ID attribute {aname} of {elem} is not valid, must be #IMPLIED or #REQUIRED"
-            ));
+            )));
         }
         // "No Notation on Empty Element": an element declared EMPTY cannot
         // carry a NOTATION attribute, since it can never have content for the
         // notation to describe.
         if ad.att_type == "NOTATION" && matches!(dtd.elements.get(elem), Some(ElementDecl::Empty)) {
-            return Err(format!(
+            return Err(other(format!(
                 "NOTATION attribute type declared for EMPTY element {elem}"
-            ));
+            )));
         }
         // "Attribute Default Value Syntactically Correct": the default has to
         // satisfy the type it is declared with.
@@ -129,10 +169,10 @@ pub fn xml_validate_dtd(doc: &XmlDoc, dtd: &XmlDtd) -> Result<(), String> {
             _ => true,
         };
         if !ok {
-            return Err(format!("invalid default value for attribute {aname} of {elem}"));
+            return Err(other(format!("invalid default value for attribute {aname} of {elem}")));
         }
         if !ad.enumerated.is_empty() && !ad.enumerated.iter().any(|e| e == def) {
-            return Err(format!("invalid default value for attribute {aname} of {elem}"));
+            return Err(other(format!("invalid default value for attribute {aname} of {elem}")));
         }
     }
 
@@ -142,7 +182,8 @@ pub fn xml_validate_dtd(doc: &XmlDoc, dtd: &XmlDtd) -> Result<(), String> {
     let mut idrefs: Vec<String> = Vec::new();
     let mut stack = vec![root];
     while let Some(id) = stack.pop() {
-        validate_element(doc, id, dtd, &mut ids, &mut idrefs)?;
+        check.tick()?;
+        validate_element(doc, id, dtd, &mut ids, &mut idrefs, check)?;
         let mut c = doc.last_child(id);
         while let Some(x) = c {
             if doc.kind(x) == NodeKind::Element {
@@ -155,7 +196,7 @@ pub fn xml_validate_dtd(doc: &XmlDoc, dtd: &XmlDtd) -> Result<(), String> {
     // document. This was never checked at all.
     for r in &idrefs {
         if !ids.contains_key(r) {
-            return Err(format!("IDREF attribute references unknown ID \"{r}\""));
+            return Err(other(format!("IDREF attribute references unknown ID \"{r}\"")));
         }
     }
     Ok(())
@@ -204,7 +245,8 @@ fn validate_element(
     dtd: &XmlDtd,
     ids: &mut std::collections::HashMap<String, ()>,
     idrefs: &mut Vec<String>,
-) -> Result<(), String> {
+    check: &mut impl Checker,
+) -> Result<(), InterruptError<String>> {
     if doc.kind(id) != NodeKind::Element {
         return Ok(());
     }
@@ -220,7 +262,7 @@ fn validate_element(
     // reports. Requiring a non-empty map let a DTD of pure entity declarations
     // validate any document at all.
     if !dtd.elements.contains_key(&name) {
-        return Err(format!("No declaration for element {name}"));
+        return Err(other(format!("No declaration for element {name}")));
     }
     if let Some(decl) = dtd.elements.get(&name) {
         match decl {
@@ -231,7 +273,7 @@ fn validate_element(
                 if doc.first_child(id).is_some()
                     || doc.elements_with_entity_refs.contains(&id)
                 {
-                    return Err(format!("element {name} must be EMPTY"));
+                    return Err(other(format!("element {name} must be EMPTY")));
                 }
             }
             ElementDecl::Any => {}
@@ -242,7 +284,7 @@ fn validate_element(
                         NodeKind::Element => {
                             if let ElementDecl::Mixed(allowed) = decl {
                                 if !allowed.is_empty() && !allowed.iter().any(|n| *n == doc.qname(x)) {
-                                    return Err(format!("element {} not allowed in mixed {name}", doc.qname(x)));
+                                    return Err(other(format!("element {} not allowed in mixed {name}", doc.qname(x))));
                                 }
                             }
                         }
@@ -265,21 +307,21 @@ fn validate_element(
                             // Whitespace that arrived as `&#32;` is character
                             // data, not the ignorable indentation beside it,
                             // and only the parser can tell them apart.
-                            return Err(format!("character data not allowed in {name}"));
+                            return Err(other(format!("character data not allowed in {name}")));
                         } else if doc.kind(x) == NodeKind::CData {
                             // A CDATA section is character data whatever is in
                             // it. Whitespace inside one is never the ignorable
                             // kind, so an empty `<![CDATA[]]>` still breaks an
                             // element-only content model -- and we were only
                             // looking at Text nodes.
-                            return Err(format!("character data not allowed in {name}"));
+                            return Err(other(format!("character data not allowed in {name}")));
                         }
                         c = doc.next_sibling(x);
                     }
                     v
                 };
-                if !match_children_spec(spec, &kids) {
-                    return Err(format!("content of {name} does not match {spec}"));
+                if !match_children_spec(spec, &kids, check)? {
+                    return Err(other(format!("content of {name} does not match {spec}")));
                 }
             }
         }
@@ -288,6 +330,8 @@ fn validate_element(
         if elem != &name {
             continue;
         }
+        // One check per declared attribute: each pass scans the element's attributes.
+        check.tick()?;
         // An ATTLIST declares a QName, so `xml:lang` is looked up as
         // `xml:lang`. xml_get_prop is xmlGetProp -- it matches unprefixed
         // attributes only -- so every prefixed declared attribute looked
@@ -307,12 +351,12 @@ fn validate_element(
         };
         match ad.default {
             AttrDefault::Required if have.is_none() => {
-                return Err(format!("attribute {aname} of {name} is required"));
+                return Err(other(format!("attribute {aname} of {name} is required")));
             }
             AttrDefault::Fixed => {
                 if let (Some(v), Some(fix)) = (&have, &ad.default_value) {
                     if v != fix {
-                        return Err(format!("attribute {aname} must be {fix}"));
+                        return Err(other(format!("attribute {aname} must be {fix}")));
                     }
                 }
             }
@@ -320,7 +364,7 @@ fn validate_element(
         }
         if let Some(v) = &have {
             if !ad.enumerated.is_empty() && !ad.enumerated.iter().any(|e| e == v) {
-                return Err(format!("attribute {aname} value not in enumeration"));
+                return Err(other(format!("attribute {aname} value not in enumeration")));
             }
             // The tokenized types carry validity constraints on their VALUES,
             // and not one of them was enforced -- the ID branch said
@@ -333,18 +377,18 @@ fn validate_element(
                     // it is a VALIDITY constraint, so it costs nothing at
                     // parse time and refuses no document anyone can read.
                     if v.contains(':') {
-                        return Err(format!(
+                        return Err(other(format!(
                             "Value {v} for attribute {aname} of {name} is not an NCName"
-                        ));
+                        )));
                     }
                     if !is_name(v) {
-                        return Err(format!(
+                        return Err(other(format!(
                             "Syntax of value for attribute {aname} of {name} is not valid"
-                        ));
+                        )));
                     }
                     if ad.att_type == "ID" {
                         if ids.insert(v.clone(), ()).is_some() {
-                            return Err(format!("ID {v} already defined"));
+                            return Err(other(format!("ID {v} already defined")));
                         }
                     } else {
                         idrefs.push(v.clone());
@@ -355,50 +399,50 @@ fn validate_element(
                     for part in v.split_space() {
                         any = true;
                         if part.contains(':') {
-                            return Err(format!(
+                            return Err(other(format!(
                                 "Value {part} for attribute {aname} of {name} is not an NCName"
-                            ));
+                            )));
                         }
                         if !is_name(part) {
-                            return Err(format!(
+                            return Err(other(format!(
                                 "Syntax of value for attribute {aname} of {name} is not valid"
-                            ));
+                            )));
                         }
                         idrefs.push(part.to_string());
                     }
                     if !any {
-                        return Err(format!(
+                        return Err(other(format!(
                             "Syntax of value for attribute {aname} of {name} is not valid"
-                        ));
+                        )));
                     }
                 }
                 "NMTOKEN" => {
                     if !is_nmtoken(v) {
-                        return Err(format!(
+                        return Err(other(format!(
                             "Syntax of value for attribute {aname} of {name} is not valid"
-                        ));
+                        )));
                     }
                 }
                 "NMTOKENS" => {
                     if v.split_space().next().is_none()
                         || !v.split_space().all(is_nmtoken)
                     {
-                        return Err(format!(
+                        return Err(other(format!(
                             "Syntax of value for attribute {aname} of {name} is not valid"
-                        ));
+                        )));
                     }
                 }
                 "ENTITY" | "ENTITIES" => {
                     for part in v.split_space() {
                         if !is_name(part) {
-                            return Err(format!(
+                            return Err(other(format!(
                                 "Syntax of value for attribute {aname} of {name} is not valid"
-                            ));
+                            )));
                         }
                         if !dtd.unparsed_entities.contains(part) {
-                            return Err(format!(
+                            return Err(other(format!(
                                 "ENTITY attribute {aname} references an unknown entity \"{part}\""
-                            ));
+                            )));
                         }
                     }
                 }
@@ -419,14 +463,14 @@ fn validate_element(
             None => "xmlns".to_string(),
         };
         match dtd.attributes.get(&(name.clone(), q.clone())) {
-            None => return Err(format!("No declaration for attribute {q} of element {name}")),
+            None => return Err(other(format!("No declaration for attribute {q} of element {name}"))),
             Some(ad) => {
                 if ad.default == AttrDefault::Fixed {
                     if let Some(fix) = ad.default_value.as_deref() {
                         if uri != fix {
-                            return Err(format!(
+                            return Err(other(format!(
                                 "Value for attribute {q} of {name} is different from default {fix}"
-                            ));
+                            )));
                         }
                     }
                 }
@@ -438,7 +482,7 @@ fn validate_element(
         while let Some(x) = a {
             let q = doc.qname(x);
             if !dtd.attributes.contains_key(&(name.clone(), q.clone())) {
-                return Err(format!("No declaration for attribute {q} of element {name}"));
+                return Err(other(format!("No declaration for attribute {q} of element {name}")));
             }
             a = doc.next_sibling(x);
         }
@@ -451,14 +495,18 @@ fn validate_element(
         .filter(|((e, _), ad)| e == &name && ad.att_type == "ID")
         .count();
     if id_attrs > 1 {
-        return Err(format!("Element {name} has {id_attrs} ID attributes"));
+        return Err(other(format!("Element {name} has {id_attrs} ID attributes")));
     }
     Ok(())
 }
 
-fn match_children_spec(spec: &str, kids: &[String]) -> bool {
+fn match_children_spec(
+    spec: &str,
+    kids: &[String],
+    check: &mut impl Checker,
+) -> Result<bool, Interrupted> {
     let toks = tokenize_content(spec);
-    match_seq(&toks, kids, 0).contains(&kids.len())
+    Ok(match_seq(&toks, kids, 0, check)?.contains(&kids.len()))
 }
 
 #[derive(Clone, Debug)]
@@ -576,39 +624,45 @@ fn tokenize_content(spec: &str) -> Vec<Tok> {
     parse_choice(&mut tmp)
 }
 
-fn match_seq(toks: &[Tok], kids: &[String], i: usize) -> Vec<usize> {
+fn match_seq(
+    toks: &[Tok],
+    kids: &[String],
+    i: usize,
+    check: &mut impl Checker,
+) -> Result<Vec<usize>, Interrupted> {
+    check.tick()?;
     if toks.is_empty() {
-        return vec![i];
+        return Ok(vec![i]);
     }
     match &toks[0] {
         Tok::Star => {
             let rest = &toks[1..];
             // Star applies to previous — encoded as Seq(inner, Star). Handle Seq instead.
-            match_seq(rest, kids, i)
+            match_seq(rest, kids, i, check)
         }
-        Tok::Plus | Tok::Q => match_seq(&toks[1..], kids, i),
+        Tok::Plus | Tok::Q => match_seq(&toks[1..], kids, i, check),
         Tok::Name(n) => {
             if i < kids.len() && &kids[i] == n {
-                match_seq(&toks[1..], kids, i + 1)
+                match_seq(&toks[1..], kids, i + 1, check)
             } else {
-                vec![]
+                Ok(vec![])
             }
         }
         Tok::Seq(inner) => {
             let (body, quant) = split_quant(inner);
-            apply_quant(body, quant, &toks[1..], kids, i)
+            apply_quant(body, quant, &toks[1..], kids, i, check)
         }
         Tok::Choice(alts) => {
             let mut out = Vec::new();
             for a in alts {
-                let one = match_seq(&[a.clone()], kids, i);
+                let one = match_seq(&[a.clone()], kids, i, check)?;
                 for pos in one {
-                    out.extend(match_seq(&toks[1..], kids, pos));
+                    out.extend(match_seq(&toks[1..], kids, pos, check)?);
                 }
             }
             out.sort();
             out.dedup();
-            out
+            Ok(out)
         }
     }
 }
@@ -632,47 +686,56 @@ fn split_quant(inner: &[Tok]) -> (&[Tok], Quant) {
     (inner, Quant::One)
 }
 
-fn apply_quant(body: &[Tok], q: Quant, rest: &[Tok], kids: &[String], i: usize) -> Vec<usize> {
+fn apply_quant(
+    body: &[Tok],
+    q: Quant,
+    rest: &[Tok],
+    kids: &[String],
+    i: usize,
+    check: &mut impl Checker,
+) -> Result<Vec<usize>, Interrupted> {
     match q {
         Quant::One => {
             let mut out = Vec::new();
-            for p in match_seq(body, kids, i) {
-                out.extend(match_seq(rest, kids, p));
+            for p in match_seq(body, kids, i, check)? {
+                out.extend(match_seq(rest, kids, p, check)?);
             }
-            out
+            Ok(out)
         }
         Quant::Q => {
-            let mut out = match_seq(rest, kids, i);
-            for p in match_seq(body, kids, i) {
-                out.extend(match_seq(rest, kids, p));
+            let mut out = match_seq(rest, kids, i, check)?;
+            for p in match_seq(body, kids, i, check)? {
+                out.extend(match_seq(rest, kids, p, check)?);
             }
             out.sort();
             out.dedup();
-            out
+            Ok(out)
         }
         Quant::Star => {
-            let mut out = match_seq(rest, kids, i);
+            let mut out = match_seq(rest, kids, i, check)?;
             let mut frontier = vec![i];
             while let Some(p) = frontier.pop() {
-                for n in match_seq(body, kids, p) {
+                // The frontier has no visited set and grows exponentially.
+                check.tick()?;
+                for n in match_seq(body, kids, p, check)? {
                     if n > p {
-                        out.extend(match_seq(rest, kids, n));
+                        out.extend(match_seq(rest, kids, n, check)?);
                         frontier.push(n);
                     }
                 }
             }
             out.sort();
             out.dedup();
-            out
+            Ok(out)
         }
         Quant::Plus => {
             let mut out = Vec::new();
-            for p in match_seq(body, kids, i) {
-                out.extend(apply_quant(body, Quant::Star, rest, kids, p));
+            for p in match_seq(body, kids, i, check)? {
+                out.extend(apply_quant(body, Quant::Star, rest, kids, p, check)?);
             }
             out.sort();
             out.dedup();
-            out
+            Ok(out)
         }
     }
 }

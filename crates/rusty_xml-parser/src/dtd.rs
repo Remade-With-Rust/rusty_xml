@@ -19,17 +19,31 @@ pub fn xml_parse_dtd(
 
 /// Parse a DTD internal/external subset into declarations.
 pub fn parse_dtd_subset(src: &str, old10: bool) -> Result<XmlDtd, XmlError> {
-    parse_subset(src, true, old10)
+    parse_subset(src, true, old10, crate::parse::XML_MAX_AMPLIFICATION_DEFAULT)
+}
+
+/// [`parse_dtd_subset`] with the parse's entity amplification factor.
+pub(crate) fn parse_dtd_subset_ampl(
+    src: &str,
+    old10: bool,
+    max_ampl: u32,
+) -> Result<XmlDtd, XmlError> {
+    parse_subset(src, true, old10, max_ampl)
 }
 
 /// Parse an external subset, where conditional sections are legal and a
 /// parameter entity may supply part of a declaration.
 pub fn parse_external_subset(src: &str, old10: bool) -> Result<XmlDtd, XmlError> {
-    parse_subset(src, false, old10)
+    parse_subset(src, false, old10, crate::parse::XML_MAX_AMPLIFICATION_DEFAULT)
 }
 
-fn parse_subset(src: &str, internal: bool, old10: bool) -> Result<XmlDtd, XmlError> {
-    let expanded = expand_pe(src, internal)?;
+fn parse_subset(
+    src: &str,
+    internal: bool,
+    old10: bool,
+    max_ampl: u32,
+) -> Result<XmlDtd, XmlError> {
+    let expanded = expand_pe(src, internal, max_ampl)?;
     let mut dtd = XmlDtd::default();
     dtd.int_subset = Some(src.to_string());
     let mut p = DtdParser {
@@ -51,13 +65,50 @@ fn parse_subset(src: &str, internal: bool, old10: bool) -> Result<XmlDtd, XmlErr
     Ok(dtd)
 }
 
-fn expand_pe(src: &str, internal: bool) -> Result<String, XmlError> {
+/// Parameter entity amplification, charged as libxml2's
+/// `xmlParserEntityCheck` charges a PE reference: the replacement's length
+/// plus the fixed cost, failing past 1,000,000 bytes once the total exceeds
+/// `max_ampl` times the subset's length.
+struct PeAmpl {
+    expanded: u64,
+    consumed: u64,
+    max_ampl: u64,
+}
+
+impl PeAmpl {
+    fn charge(&mut self, len: usize) -> Result<(), XmlError> {
+        self.expanded = self.expanded.saturating_add(len as u64).saturating_add(20);
+        if self.expanded > 1_000_000
+            && (self.expanded == u64::MAX || self.expanded / self.max_ampl > self.consumed)
+        {
+            return Err(XmlError::new(
+                crate::error::XML_ERR_RESOURCE_LIMIT,
+                "Maximum entity amplification factor exceeded, see xmlCtxtSetMaxAmplification.",
+                0,
+                0,
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn expand_pe(src: &str, internal: bool, max_ampl: u32) -> Result<String, XmlError> {
     // Multi-pass PE expansion so `%percent;` can invent new PE names.
+    //
+    // Every pass expands one more level, so ten references per entity grow
+    // the subset tenfold per pass: 639 bytes became 17 MB at six levels, and
+    // each further level is another factor of ten. The expansion is charged
+    // as libxml2 charges it; xmllint refuses the five-level form.
+    let mut ampl = PeAmpl {
+        expanded: 0,
+        consumed: src.len() as u64,
+        max_ampl: u64::from(max_ampl.max(1)),
+    };
     let mut cur = src.to_string();
     for _ in 0..16 {
         let mut pes: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         harvest_pe(&cur, &mut pes);
-        let next = subst_pe(&cur, &pes, internal)?;
+        let next = subst_pe(&cur, &pes, internal, &mut ampl)?;
         if next == cur {
             return Ok(cur);
         }
@@ -113,6 +164,7 @@ fn subst_pe(
     src: &str,
     pes: &std::collections::HashMap<String, String>,
     internal: bool,
+    ampl: &mut PeAmpl,
 ) -> Result<String, XmlError> {
     let mut out = String::new();
     let mut chars = src.chars().peekable();
@@ -245,6 +297,7 @@ fn subst_pe(
                 ));
             }
             if let Some(v) = pes.get(&name) {
+                ampl.charge(v.len())?;
                 out.push_str(v);
             } else {
                 out.push('%');
@@ -1229,15 +1282,19 @@ fn check_entity_graph(dtd: &XmlDtd) -> Result<(), XmlError> {
     let err = |m: String| XmlError::new(crate::error::XML_ERR_UNDECLARED_ENTITY, m, 0, 0);
 
     // Every reference in a literal must name a declared, parsed entity.
+    // Only entity values form the reference graph: an ATTLIST default cannot
+    // be referenced, so it cannot close a cycle. Keying both by bare name made
+    // an attribute `a` and an entity `a` share an entry, which reported a loop
+    // that does not exist.
     let mut refs: std::collections::HashMap<&str, Vec<String>> = Default::default();
     let literals = dtd
         .entities
         .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .map(|(k, v)| (Some(k.as_str()), v.as_str()))
         .chain(
             dtd.attributes
-                .iter()
-                .filter_map(|((_, a), d)| d.default_value.as_deref().map(|v| (a.as_str(), v))),
+                .values()
+                .filter_map(|d| d.default_value.as_deref().map(|v| (None, v))),
         );
     for (owner, text) in literals {
         for name in entity_refs_in(text) {
@@ -1250,24 +1307,59 @@ fn check_entity_graph(dtd: &XmlDtd) -> Result<(), XmlError> {
             if !dtd.entities.contains_key(&name) {
                 return Err(err(format!("Entity '{name}' not defined")));
             }
-            refs.entry(owner).or_default().push(name);
+            if let Some(owner) = owner {
+                refs.entry(owner).or_default().push(name);
+            }
         }
     }
 
     // A cycle in the reference graph is a well-formedness error, not something
-    // to discover by running out of depth.
-    for start in dtd.entities.keys() {
-        let mut seen = std::collections::HashSet::new();
-        let mut stack = vec![start.as_str()];
-        while let Some(cur) = stack.pop() {
-            if !seen.insert(cur) {
-                continue;
-            }
-            for next in refs.get(cur).into_iter().flatten() {
-                if next == start {
-                    return Err(err("Detected an entity reference loop".into()));
+    // to discover by running out of depth. One depth-first pass with three
+    // colours visits each entity and reference once. The previous form
+    // walked the graph afresh from every entity, which is quadratic: a chain
+    // of 20,000 entities took 38 s to load.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Mark {
+        Active,
+        Done,
+    }
+    let mut mark: std::collections::HashMap<&str, Mark> =
+        std::collections::HashMap::with_capacity(dtd.entities.len());
+    let mut names: Vec<&str> = dtd.entities.keys().map(String::as_str).collect();
+    // HashMap order is random; sorting makes the reported error repeatable.
+    names.sort_unstable();
+    for start in names {
+        if mark.contains_key(start) {
+            continue;
+        }
+        // (entity, index of the next reference to follow)
+        let mut stack: Vec<(&str, usize)> = vec![(start, 0)];
+        mark.insert(start, Mark::Active);
+        while let Some(top) = stack.last_mut() {
+            let (cur, idx) = *top;
+            match refs.get(cur).and_then(|v| v.get(idx)) {
+                Some(n) => {
+                    top.1 += 1;
+                    match mark.get(n.as_str()) {
+                        Some(Mark::Active) => {
+                            return Err(XmlError::new(
+                                crate::error::XML_ERR_ENTITY_LOOP,
+                                "Detected an entity reference loop",
+                                0,
+                                0,
+                            ));
+                        }
+                        Some(Mark::Done) => {}
+                        None => {
+                            mark.insert(n.as_str(), Mark::Active);
+                            stack.push((n.as_str(), 0));
+                        }
+                    }
                 }
-                stack.push(next.as_str());
+                None => {
+                    mark.insert(cur, Mark::Done);
+                    stack.pop();
+                }
             }
         }
     }

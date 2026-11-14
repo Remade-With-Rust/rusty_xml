@@ -93,8 +93,24 @@ What we *do* gate hard, and what those numbers cost nothing:
   one deliberate divergence: we serialize the internal DTD subset verbatim
   where C re-serializes and reorders it.
 - **0 `unsafe`** in all twelve crates.
-- Nothing on the parse, save, format, XPath, stream or canonicalize path
-  recurses per level of nesting, so document depth cannot exhaust the stack.
+- Nothing on the parse, save, format, XPath, stream, canonicalize, XInclude,
+  DTD, XSD or Schematron path recurses per level of nesting, so document depth
+  cannot exhaust the stack. RelaxNG matching backtracks, so it does recurse,
+  and it refuses documents nested past 320–640 levels (depending on the
+  grammar) instead of overflowing.
+- Untrusted input cannot drive unbounded work:
+  - **Entity expansion** is bounded as libxml2 bounds it. Past 1,000,000
+    bytes, expansion may not exceed 5× the input consumed, for general and
+    parameter entities alike (`XmlParseSettings::max_amplification`).
+  - **DTD content models** match in one pass, in time linear in the number of
+    children, and non-deterministic models are reported with libxml2's
+    message.
+  - **XPath** sorts by a document-order index, so steps are not quadratic, and
+    `XmlXPathContext::set_op_limit` caps the work, as libxml2's `opLimit` does.
+- **Long-running calls can be cancelled.** Parsing, XPath, the validators,
+  C14N and save have `*_interruptible` variants that take an `Interrupt`: an
+  `AtomicBool`, a closure or `NeverInterrupt`. A SAX handler can end a parse
+  with `stop_requested`.
 - A seeded fuzzer (`--bin fuzz`) holds four invariants: no panics, chunked
   parsing equals whole parsing at every chunk size, the XML round trip is a
   fixed point, and the HTML round trip reaches one after a second pass, as

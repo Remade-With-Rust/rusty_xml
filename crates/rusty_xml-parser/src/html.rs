@@ -21,7 +21,7 @@
 use std::borrow::Cow;
 use std::collections::HashSet;
 
-use rusty_xml_tree::{NodeId, NodeKind, XmlDoc};
+use rusty_xml_tree::{Interrupt, NodeId, NodeKind, XmlDoc};
 
 use crate::error::XmlError;
 use crate::html_entities::{decode_html, Nul};
@@ -100,7 +100,34 @@ pub fn html_read_memory(
     encoding: Option<&str>,
     options: i32,
 ) -> Result<XmlDoc, XmlError> {
+    html_read(buffer, url, encoding, options, None)
+}
+
+/// [`html_read_memory`] that polls `interrupt` at token boundaries and fails
+/// with `XML_ERR_USER_STOP` (111) once it fires. Not interrupted, it returns
+/// exactly what [`html_read_memory`] returns.
+pub fn html_read_memory_interruptible(
+    buffer: &[u8],
+    url: Option<&str>,
+    encoding: Option<&str>,
+    options: i32,
+    interrupt: &dyn Interrupt,
+) -> Result<XmlDoc, XmlError> {
+    html_read(buffer, url, encoding, options, Some(interrupt))
+}
+
+fn html_read(
+    buffer: &[u8],
+    url: Option<&str>,
+    encoding: Option<&str>,
+    options: i32,
+    interrupt: Option<&dyn Interrupt>,
+) -> Result<XmlDoc, XmlError> {
     let _ = url;
+    // Decoding is one linear pass and is not polled; check either side.
+    if interrupt.is_some_and(|i| i.is_interrupted()) {
+        return Err(interrupted());
+    }
     // A BOM, the `encoding` argument or a leading `<?xm` decide the encoding
     // up front. Otherwise libxml2 decides as it parses: a `<meta>` charset, or
     // a guess at the first non-ASCII byte (`html_encoding`, #27).
@@ -121,7 +148,11 @@ pub fn html_read_memory(
     } else {
         text
     };
-    Ok(html_parse_str(&text, options, has_nul))
+    html_parse_str(&text, options, has_nul, interrupt)
+}
+
+fn interrupted() -> XmlError {
+    XmlError::new(crate::error::XML_ERR_USER_STOP, "Parser interrupted", 0, 0)
 }
 
 /// Does the input contain a CR, a NUL? Fixed 64-byte blocks with no exit
@@ -212,7 +243,12 @@ fn normalize_newlines(s: Cow<'_, str>) -> Cow<'_, str> {
     Cow::Owned(out)
 }
 
-fn html_parse_str(text: &str, options: i32, has_nul: bool) -> XmlDoc {
+fn html_parse_str(
+    text: &str,
+    options: i32,
+    has_nul: bool,
+    interrupt: Option<&dyn Interrupt>,
+) -> Result<XmlDoc, XmlError> {
     // Sized for the densest markup measured, about one node per 10 input
     // bytes, so the arena never doubles and copies its way up; the slack
     // this leaves on lighter pages is released once the tree is built (#22).
@@ -233,16 +269,106 @@ fn html_parse_str(text: &str, options: i32, has_nul: bool) -> XmlDoc {
         noimplied: (options & HTML_PARSE_NOIMPLIED) != 0,
         attrs: Vec::new(),
         has_nul,
+        interrupt,
+        limit: if interrupt.is_some() { POLL_BYTES.min(text.len()) } else { text.len() },
+        stopped: false,
+        deep: None,
     };
     p.document();
+    if p.stopped {
+        return Err(interrupted());
+    }
     p.doc.shrink_nodes();
-    p.doc
+    Ok(p.doc)
 }
 
 #[derive(Clone, Copy)]
 struct Open {
     node: NodeId,
     tag: Tag,
+}
+
+/// Input bytes parsed between two polls of an interruptible parse.
+const POLL_BYTES: usize = 16 * 1024;
+
+/// Stack depth at which the open-element stack gets an index.
+///
+/// libxml2 caps HTML nesting at 256 (2048 with `XML_PARSE_HUGE`), so its
+/// linear scans of the stack stay cheap. This parser has no cap, and the same
+/// scans made an end tag that matches nothing, or a stray `<body>`, cost the
+/// whole depth: 80,000 unmatched end tags under 80,000 open elements took
+/// 3.8 s (#41). Below this depth the scans are faster than any index.
+const DEEP: usize = 256;
+
+/// End priorities in use (`tags::end_priority`), one slot each.
+const PRI_SLOTS: [u8; 8] = [100, 150, 160, 170, 180, 190, 200, 220];
+
+fn pri_slot(p: u8) -> usize {
+    PRI_SLOTS.iter().position(|&x| x == p).unwrap_or(0)
+}
+
+/// Where each tag, unknown name and end priority sits on a deep stack: the
+/// positions of its open elements, the top one last.
+struct DeepIndex {
+    by_tag: Vec<Vec<u32>>,
+    by_name: std::collections::HashMap<String, Vec<u32>>,
+    by_pri: [Vec<u32>; 8],
+}
+
+impl DeepIndex {
+    fn build(stack: &[Open], doc: &XmlDoc) -> Self {
+        let mut d = DeepIndex {
+            by_tag: vec![Vec::new(); tags::NT],
+            by_name: std::collections::HashMap::new(),
+            by_pri: Default::default(),
+        };
+        for (i, o) in stack.iter().enumerate() {
+            d.push(i, *o, doc);
+        }
+        d
+    }
+
+    fn push(&mut self, i: usize, o: Open, doc: &XmlDoc) {
+        let i = i as u32;
+        if o.tag == UNKNOWN {
+            self.by_name.entry(doc.name(o.node).to_string()).or_default().push(i);
+        } else {
+            self.by_tag[o.tag as usize].push(i);
+        }
+        self.by_pri[pri_slot(tags::end_priority(o.tag))].push(i);
+    }
+
+    fn pop(&mut self, o: Open, doc: &XmlDoc) {
+        if o.tag == UNKNOWN {
+            if let Some(v) = self.by_name.get_mut(doc.name(o.node)) {
+                v.pop();
+            }
+        } else {
+            self.by_tag[o.tag as usize].pop();
+        }
+        self.by_pri[pri_slot(tags::end_priority(o.tag))].pop();
+    }
+
+    fn top_of(&self, tag: Tag, name: &str) -> Option<usize> {
+        let v = if tag == UNKNOWN {
+            self.by_name.get(name)?
+        } else {
+            &self.by_tag[tag as usize]
+        };
+        v.last().map(|&i| i as usize)
+    }
+
+    fn has(&self, tag: Tag) -> bool {
+        !self.by_tag[tag as usize].is_empty()
+    }
+
+    /// Is there an element above `at` whose end priority exceeds `pri`?
+    fn higher_above(&self, at: usize, pri: u8) -> bool {
+        PRI_SLOTS
+            .iter()
+            .zip(&self.by_pri)
+            .any(|(&p, v)| p > pri && v.last().is_some_and(|&i| i as usize > at))
+    }
 }
 
 struct Parser<'a> {
@@ -263,6 +389,15 @@ struct Parser<'a> {
     attrs: Vec<(Cow<'a, str>, Option<Cow<'a, str>>)>,
     /// The input has a NUL somewhere; without one, no run needs scanning.
     has_nul: bool,
+    interrupt: Option<&'a dyn Interrupt>,
+    /// Where the content loop stops to poll the interrupt: the end of the
+    /// input without one, so the plain parse pays nothing per token and the
+    /// loop is compiled once for both paths.
+    limit: usize,
+    /// The interrupt fired.
+    stopped: bool,
+    /// Present only while the stack is deep; see [`DEEP`].
+    deep: Option<Box<DeepIndex>>,
 }
 
 impl<'a> Parser<'a> {
@@ -303,9 +438,31 @@ impl<'a> Parser<'a> {
 
     // ---- document and content (htmlParseDocument, htmlParseContent) ----
 
+    /// Poll the interrupt and move `limit` on by [`POLL_BYTES`]; true once
+    /// it has fired.
+    #[cold]
+    #[inline(never)]
+    fn poll(&mut self) -> bool {
+        if let Some(i) = self.interrupt {
+            if i.is_interrupted() {
+                self.stopped = true;
+                return true;
+            }
+        }
+        self.limit = if self.interrupt.is_some() {
+            self.pos.saturating_add(POLL_BYTES).min(self.b.len())
+        } else {
+            self.b.len()
+        };
+        false
+    }
+
     fn document(&mut self) {
         self.skip_blanks();
         while self.peek(0) == Some(b'<') {
+            if self.pos >= self.limit && self.poll() {
+                return;
+            }
             match self.peek(1) {
                 Some(b'!') => {
                     if self.b[self.pos..].starts_with(b"<!--") {
@@ -330,7 +487,17 @@ impl<'a> Parser<'a> {
     }
 
     fn content(&mut self) {
-        while self.pos < self.b.len() {
+        loop {
+            self.content_until_limit();
+            if self.pos >= self.b.len() || self.poll() {
+                return;
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn content_until_limit(&mut self) {
+        while self.pos < self.limit {
             if self.mode != 0 || self.b[self.pos] != b'<' {
                 self.char_data();
                 continue;
@@ -374,6 +541,7 @@ impl<'a> Parser<'a> {
 
     /// Create an element under the current node (the document if none) and
     /// make it current.
+    #[inline]
     fn open(&mut self, name: &str, tag: Tag) -> NodeId {
         let el = self.doc.xml_new_node(None, name);
         let parent = self.top().map_or(NodeId::DOCUMENT, |o| o.node);
@@ -384,8 +552,67 @@ impl<'a> Parser<'a> {
         if tag == BODY && self.insert < INSERT_IN_BODY {
             self.insert = INSERT_IN_BODY;
         }
-        self.stack.push(Open { node: el, tag });
+        self.push_open(Open { node: el, tag });
         el
+    }
+
+    #[inline]
+    fn push_open(&mut self, o: Open) {
+        self.stack.push(o);
+        // One compare on the common path: the index exists only at or past
+        // DEEP, so a shallower stack can skip both arms.
+        if self.stack.len() >= DEEP {
+            self.push_deep(o);
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn push_deep(&mut self, o: Open) {
+        if let Some(d) = self.deep.as_mut() {
+            d.push(self.stack.len() - 1, o, &self.doc);
+        } else {
+            self.deep = Some(Box::new(DeepIndex::build(&self.stack, &self.doc)));
+        }
+    }
+
+    #[inline]
+    fn pop_open(&mut self) {
+        if let Some(o) = self.stack.pop() {
+            if self.deep.is_some() {
+                self.pop_deep(o);
+            }
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn pop_deep(&mut self, o: Open) {
+        if let Some(d) = self.deep.as_mut() {
+            d.pop(o, &self.doc);
+            // Hysteresis: hovering around DEEP does not rebuild per tag.
+            if self.stack.len() < DEEP / 2 {
+                self.deep = None;
+            }
+        }
+    }
+
+    fn truncate_open(&mut self, at: usize) {
+        if self.deep.is_none() {
+            self.stack.truncate(at);
+            return;
+        }
+        while self.stack.len() > at {
+            self.pop_open();
+        }
+    }
+
+    /// Is an element with this (known) tag open?
+    fn is_open(&self, tag: Tag) -> bool {
+        match &self.deep {
+            Some(d) => d.has(tag),
+            None => self.stack.iter().any(|o| o.tag == tag),
+        }
     }
 
     fn open_implied(&mut self, tag: Tag) {
@@ -401,7 +628,7 @@ impl<'a> Parser<'a> {
             if !tags::start_closes(new, o.tag) {
                 break;
             }
-            self.stack.pop();
+            self.pop_open();
         }
     }
 
@@ -425,7 +652,7 @@ impl<'a> Parser<'a> {
             if self.insert >= INSERT_IN_BODY {
                 return;
             }
-            if self.stack.iter().any(|o| o.tag == BODY || o.tag == HEAD) {
+            if self.is_open(BODY) || self.is_open(HEAD) {
                 return;
             }
             self.open_implied(BODY);
@@ -636,7 +863,7 @@ impl<'a> Parser<'a> {
         if tag == HEAD && self.stack.len() != 1 {
             discard = true;
         }
-        if tag == BODY && self.stack.iter().any(|o| o.tag == BODY) {
+        if tag == BODY && self.is_open(BODY) {
             discard = true;
         }
         if discard {
@@ -656,7 +883,7 @@ impl<'a> Parser<'a> {
         let Some(top) = self.top() else { return };
         if self.b[self.pos..].starts_with(b"/>") {
             self.pos += 2;
-            self.stack.pop();
+            self.pop_open();
             return;
         }
         if self.b[self.pos] != b'>' {
@@ -664,7 +891,7 @@ impl<'a> Parser<'a> {
         }
         self.pos += 1;
         if tags::is_empty(top.tag) {
-            self.stack.pop();
+            self.pop_open();
         } else {
             self.mode = tags::data_mode(top.tag);
         }
@@ -755,6 +982,16 @@ impl<'a> Parser<'a> {
         let tag = tags::tag_of(name.as_bytes());
         if self.depth > 0 && (tag == HTML || tag == BODY || tag == HEAD) {
             self.depth -= 1;
+            return;
+        }
+        if let Some(d) = &self.deep {
+            let Some(at) = d.top_of(tag, name.as_ref()) else {
+                return;
+            };
+            if d.higher_above(at, tags::end_priority(tag)) {
+                return;
+            }
+            self.truncate_open(at);
             return;
         }
         // Known elements match by tag; only unknown ones compare names.

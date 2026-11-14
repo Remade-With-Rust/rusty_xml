@@ -1,7 +1,7 @@
 //! UTF-8 well-formed document parser. No DTD / HTML / XInclude / recovery (M1).
 
 use rusty_xml_sax::{SaxAttr, SaxHandler};
-use rusty_xml_tree::{NodeId, NodeKind, XmlDoc};
+use rusty_xml_tree::{Interrupt, InterruptPoll, NodeId, NodeKind, XmlDoc};
 
 use crate::chvalid::{xml_is_char, xml_is_name_char, xml_is_name_start_char};
 use crate::error::*;
@@ -62,32 +62,237 @@ const XMLNS_NS: &str = "http://www.w3.org/2000/xmlns/";
 /// content loop is iterative now and document depth costs no stack, so the cap
 /// is a POLICY limit again rather than a crash guard.
 ///
-/// 5000 matches what libxml2 permits by default and is beyond any real markup;
-/// `XML_PARSE_HUGE` lifts it, which it can now do safely.
+/// 5000 is deliberately above libxml2's default of 256 (2048 under
+/// `XML_PARSE_HUGE`; `xmllint` 2.15.3 fails at 257 and 2049 with "Excessive
+/// depth in document") and beyond any real markup. `XML_PARSE_HUGE` raises it
+/// to [`MAX_DEPTH_HUGE`], which is safe because no walk over a parsed tree
+/// recurses per level of nesting.
 const MAX_DEPTH: u32 = 5_000;
 
 /// The ceiling `XML_PARSE_HUGE` raises the nesting limit to. Bounded rather
 /// than unlimited so a hostile document cannot make the arena grow without end.
 const MAX_DEPTH_HUGE: u32 = 1_000_000;
 
-/// `XML_PARSE_HUGE` deliberately does **not** lift the nesting limit.
-///
-/// A depth cap only protects you when the cap is BELOW the stack limit. The
-/// element parser is recursive descent, and a debug build overflows around 95
-/// levels, so any cap above that is not a limit at all -- the process aborts
-/// before the check fires, and a stack overflow cannot be caught. Raising the
-/// cap to 256 or 512 therefore did not give callers deeper documents, it gave
-/// them a crash instead of an error.
-///
-/// HUGE still lifts the other limits it guards (name length, text length).
-/// Genuinely deeper nesting requires an iterative parser; that is the fix, and
-/// a larger constant is not a substitute for it.
-
 const MAX_NAME: usize = 50_000;
 const MAX_TEXT: usize = 10_000_000;
 /// A start tag with more attributes than this checks for duplicates through
 /// hash sets. The pairwise scan is cheaper on ordinary tags, but quadratic.
 const ATTR_SCAN_MAX: usize = 32;
+
+/// libxml2's `XML_MAX_AMPLIFICATION_DEFAULT`: by default, entity expansion
+/// may produce at most five times the input consumed so far, once it has
+/// passed [`XML_PARSER_ALLOWED_EXPANSION`].
+pub const XML_MAX_AMPLIFICATION_DEFAULT: u32 = 5;
+/// libxml2's `XML_PARSER_ALLOWED_EXPANSION`: expansion below this many bytes
+/// is never refused, whatever the ratio.
+const XML_PARSER_ALLOWED_EXPANSION: u64 = 1_000_000;
+/// libxml2's `XML_ENT_FIXED_COST`, charged on every entity reference so that
+/// many short entities cost as much as a few long ones.
+const XML_ENT_FIXED_COST: u64 = 20;
+/// Entity nesting limit, for expansion and for re-parsing a replacement.
+const MAX_ENTITY_DEPTH: u32 = 40;
+
+/// Settings libxml2 keeps on `xmlParserCtxt` beyond the option bits.
+///
+/// Pass one to the `*_with` entry points. Build it from [`Default`] (or
+/// [`XmlParseSettings::new`]) and the `with_*` methods; the struct is
+/// `#[non_exhaustive]` so later settings can be added without a break.
+#[derive(Clone, Copy)]
+#[non_exhaustive]
+pub struct XmlParseSettings<'a> {
+    /// `xmlCtxtSetMaxAmplification`: the entity amplification factor, default
+    /// [`XML_MAX_AMPLIFICATION_DEFAULT`]. Once entity expansion passes
+    /// 1,000,000 bytes, the parse fails if the expanded size divided by this
+    /// factor exceeds the input consumed so far. 0 is treated as 1. Raise it
+    /// only for trusted input.
+    pub max_amplification: u32,
+    /// Cooperative cancellation: polled at token boundaries; when it fires
+    /// the parse fails with `XML_ERR_USER_STOP` (111), even under
+    /// `XML_PARSE_RECOVER`.
+    pub interrupt: Option<&'a dyn Interrupt>,
+}
+
+impl Default for XmlParseSettings<'_> {
+    fn default() -> Self {
+        Self {
+            max_amplification: XML_MAX_AMPLIFICATION_DEFAULT,
+            interrupt: None,
+        }
+    }
+}
+
+impl std::fmt::Debug for XmlParseSettings<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("XmlParseSettings")
+            .field("max_amplification", &self.max_amplification)
+            .field("interrupt", &self.interrupt.is_some())
+            .finish()
+    }
+}
+
+impl<'a> XmlParseSettings<'a> {
+    /// The defaults: amplification factor 5, no interrupt.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the entity amplification factor (`xmlCtxtSetMaxAmplification`).
+    pub fn with_max_amplification(mut self, max_amplification: u32) -> Self {
+        self.max_amplification = max_amplification;
+        self
+    }
+
+    /// Sets the interrupt the parse polls.
+    pub fn with_interrupt(mut self, interrupt: &'a dyn Interrupt) -> Self {
+        self.interrupt = Some(interrupt);
+        self
+    }
+}
+
+/// What a parse needs from its caller beyond the option bits.
+#[derive(Clone, Copy, Default)]
+struct ParseCfg<'a> {
+    settings: XmlParseSettings<'a>,
+    /// Poll the SAX handler's [`SaxHandler::stop_requested`].
+    sax_stop: bool,
+    /// Under `XML_PARSE_RECOVER`, where the fatal error that ended the parse
+    /// goes, so `xml_ctxt_read_memory` can report it as `last_error` (#46).
+    recovered: Option<&'a std::cell::Cell<Option<XmlError>>>,
+}
+
+/// The error a stopped parse reports.
+fn user_stop_error(line: u32, col: u32) -> XmlError {
+    XmlError::new(XML_ERR_USER_STOP, "Parser stopped", line, col)
+}
+
+/// libxml2's entity amplification accounting (`sizeentcopy`, `maxAmpl`,
+/// `ent->expandedSize`), carried across push chunks.
+#[derive(Clone, Default)]
+struct Ampl {
+    /// Bytes of entity expansion charged so far, with the fixed cost.
+    expanded: u64,
+    max_ampl: u32,
+    /// Input bytes consumed before the current buffer (push parsing).
+    consumed_base: u64,
+    /// A sub-parser over an entity's replacement text: the reference that
+    /// started it was charged for the whole expansion already.
+    off: bool,
+    /// `ent->expandedSize`: each entity's length plus, for every entity
+    /// reference in it, that entity's expanded size and the fixed cost.
+    sizes: std::collections::HashMap<String, u64>,
+}
+
+impl Ampl {
+    fn new(max_ampl: u32) -> Self {
+        Self {
+            max_ampl: max_ampl.max(1),
+            ..Self::default()
+        }
+    }
+
+    fn sub() -> Self {
+        Self {
+            max_ampl: 1,
+            off: true,
+            ..Self::default()
+        }
+    }
+}
+
+/// A SAX handler wrapper for `xml_sax_parse_memory`: once the handler asks to
+/// stop, no event but `end_document` reaches it, as with libxml2's
+/// `disableSAX = 2` (where `endDocument` is still called).
+struct StopGate<'h> {
+    inner: &'h mut dyn SaxHandler,
+    stopped: bool,
+}
+
+impl StopGate<'_> {
+    #[inline]
+    fn after(&mut self) {
+        if self.inner.stop_requested() {
+            self.stopped = true;
+        }
+    }
+}
+
+impl SaxHandler for StopGate<'_> {
+    fn set_document_locator(&mut self) {
+        if !self.stopped {
+            self.inner.set_document_locator();
+            self.after();
+        }
+    }
+    fn start_document(&mut self) {
+        if !self.stopped {
+            self.inner.start_document();
+            self.after();
+        }
+    }
+    fn end_document(&mut self) {
+        self.inner.end_document();
+    }
+    fn start_element_ns(
+        &mut self,
+        local: &str,
+        prefix: Option<&str>,
+        uri: Option<&str>,
+        namespaces: &[(Option<String>, String)],
+        attributes: &[SaxAttr],
+        nb_defaulted: i32,
+    ) {
+        if !self.stopped {
+            self.inner
+                .start_element_ns(local, prefix, uri, namespaces, attributes, nb_defaulted);
+            self.after();
+        }
+    }
+    fn end_element_ns(&mut self, local: &str, prefix: Option<&str>, uri: Option<&str>) {
+        if !self.stopped {
+            self.inner.end_element_ns(local, prefix, uri);
+            self.after();
+        }
+    }
+    fn characters(&mut self, data: &str) {
+        if !self.stopped {
+            self.inner.characters(data);
+            self.after();
+        }
+    }
+    fn cdata_block(&mut self, data: &str) {
+        if !self.stopped {
+            self.inner.cdata_block(data);
+            self.after();
+        }
+    }
+    fn comment(&mut self, data: &str) {
+        if !self.stopped {
+            self.inner.comment(data);
+            self.after();
+        }
+    }
+    fn processing_instruction(&mut self, target: &str, data: Option<&str>) {
+        if !self.stopped {
+            self.inner.processing_instruction(target, data);
+            self.after();
+        }
+    }
+    fn warning(&mut self, msg: &str) {
+        if !self.stopped {
+            self.inner.warning(msg);
+            self.after();
+        }
+    }
+    fn error(&mut self, msg: &str) {
+        if !self.stopped {
+            self.inner.error(msg);
+            self.after();
+        }
+    }
+    fn stop_requested(&self) -> bool {
+        self.stopped
+    }
+}
 
 /// Safe defaults: no network, no XXE.
 pub fn default_parse_options() -> i32 {
@@ -160,7 +365,39 @@ pub fn xml_read_memory(
     options: i32,
 ) -> Result<XmlDoc, XmlError> {
     let mut sink = rusty_xml_sax::NullSax;
-    parse_doc(buffer, url, encoding, options, &mut sink)
+    parse_doc(buffer, url, encoding, options, &mut sink, ParseCfg::default())
+}
+
+/// [`xml_read_memory`] with [`XmlParseSettings`]: the entity amplification
+/// factor (`xmlCtxtSetMaxAmplification`) and an optional interrupt.
+pub fn xml_read_memory_with(
+    buffer: &[u8],
+    url: Option<&str>,
+    encoding: Option<&str>,
+    options: i32,
+    settings: &XmlParseSettings<'_>,
+) -> Result<XmlDoc, XmlError> {
+    let mut sink = rusty_xml_sax::NullSax;
+    let cfg = ParseCfg {
+        settings: *settings,
+        sax_stop: false,
+        recovered: None,
+    };
+    parse_doc(buffer, url, encoding, options, &mut sink, cfg)
+}
+
+/// [`xml_read_memory`] that polls `interrupt` at token boundaries and fails
+/// with `XML_ERR_USER_STOP` (111) once it fires. Not interrupted, it returns
+/// exactly what [`xml_read_memory`] returns.
+pub fn xml_read_memory_interruptible(
+    buffer: &[u8],
+    url: Option<&str>,
+    encoding: Option<&str>,
+    options: i32,
+    interrupt: &dyn Interrupt,
+) -> Result<XmlDoc, XmlError> {
+    let settings = XmlParseSettings::new().with_interrupt(interrupt);
+    xml_read_memory_with(buffer, url, encoding, options, &settings)
 }
 
 /// `xmlReadDoc`.
@@ -196,11 +433,32 @@ pub fn xml_ctxt_read_memory(
     encoding: Option<&str>,
     options: i32,
 ) -> Result<XmlDoc, XmlError> {
+    xml_ctxt_read_memory_with(ctxt, buffer, url, encoding, options, &XmlParseSettings::new())
+}
+
+/// [`xml_ctxt_read_memory`] with [`XmlParseSettings`].
+pub fn xml_ctxt_read_memory_with(
+    ctxt: &mut XmlParserCtxt,
+    buffer: &[u8],
+    url: Option<&str>,
+    encoding: Option<&str>,
+    options: i32,
+    settings: &XmlParseSettings<'_>,
+) -> Result<XmlDoc, XmlError> {
     let opts = if options != 0 { options } else { ctxt.options };
-    match xml_read_memory(buffer, url, encoding, opts) {
+    let recovered = std::cell::Cell::new(None);
+    let cfg = ParseCfg {
+        settings: *settings,
+        sax_stop: false,
+        recovered: Some(&recovered),
+    };
+    let mut sink = rusty_xml_sax::NullSax;
+    match parse_doc(buffer, url, encoding, opts, &mut sink, cfg) {
         Ok(doc) => {
             ctxt.doc = Some(doc.clone());
-            ctxt.last_error = None;
+            // libxml2 records the error a recovering parse survived as the
+            // last error; a clean parse leaves none.
+            ctxt.last_error = recovered.take();
             Ok(doc)
         }
         Err(e) => {
@@ -210,13 +468,48 @@ pub fn xml_ctxt_read_memory(
     }
 }
 
-/// Parse and record SAX events (for the event-exact gate).
+/// Parse, delivering SAX events to `sax`.
+///
+/// The handler can end the parse from any callback by returning `true` from
+/// [`SaxHandler::stop_requested`] (libxml2's `xmlStopParser`): no event but
+/// `end_document` follows, and the parse fails with `XML_ERR_USER_STOP` (111)
+/// unless an error came first.
 pub fn xml_sax_parse_memory(
     buffer: &[u8],
     options: i32,
     sax: &mut dyn SaxHandler,
 ) -> Result<XmlDoc, XmlError> {
-    parse_doc(buffer, None, None, options, sax)
+    xml_sax_parse_memory_with(buffer, options, sax, &XmlParseSettings::new())
+}
+
+/// [`xml_sax_parse_memory`] with [`XmlParseSettings`].
+pub fn xml_sax_parse_memory_with(
+    buffer: &[u8],
+    options: i32,
+    sax: &mut dyn SaxHandler,
+    settings: &XmlParseSettings<'_>,
+) -> Result<XmlDoc, XmlError> {
+    let mut gate = StopGate {
+        inner: sax,
+        stopped: false,
+    };
+    let cfg = ParseCfg {
+        settings: *settings,
+        sax_stop: true,
+        recovered: None,
+    };
+    parse_doc(buffer, None, None, options, &mut gate, cfg)
+}
+
+/// [`xml_sax_parse_memory`] that also polls `interrupt`.
+pub fn xml_sax_parse_memory_interruptible(
+    buffer: &[u8],
+    options: i32,
+    sax: &mut dyn SaxHandler,
+    interrupt: &dyn Interrupt,
+) -> Result<XmlDoc, XmlError> {
+    let settings = XmlParseSettings::new().with_interrupt(interrupt);
+    xml_sax_parse_memory_with(buffer, options, sax, &settings)
 }
 
 /// Push parser context (`xmlCreatePushParserCtxt`).
@@ -234,6 +527,19 @@ pub struct XmlPushParserCtxt {
     /// streaming path works on raw bytes and cannot convert as it goes, so
     /// those documents are buffered whole, as they were before streaming.
     no_stream: bool,
+    /// A fatal error (or [`xml_stop_parser`]) ended the parse. As in libxml2,
+    /// where a fatal error sets `disableSAX` and `xmlParseChunk` returns
+    /// `errNo` from then on, every later chunk reports the same error instead
+    /// of parsing the leftover bytes as the start of a new document.
+    stopped: bool,
+    /// Under `XML_PARSE_RECOVER`, the tree built before a fatal error. Later
+    /// chunks are discarded and the terminating chunk returns it, as a
+    /// one-shot recovering parse of the same bytes does.
+    recovered: Option<XmlDoc>,
+    /// libxml2's `maxAmpl`, see [`xml_ctxt_set_max_amplification`].
+    max_ampl: u32,
+    /// Buffer length at the last attempt to parse the prolog.
+    prolog_tried: usize,
 }
 
 impl XmlPushParserCtxt {
@@ -273,7 +579,75 @@ pub fn xml_create_push_parser_ctxt(
         state: None,
         consumed: 0,
         no_stream: false,
+        stopped: false,
+        recovered: None,
+        max_ampl: XML_MAX_AMPLIFICATION_DEFAULT,
+        prolog_tried: 0,
     }
+}
+
+/// `xmlStopParser` for a push context: ends the parse between chunks. Every
+/// later [`xml_parse_chunk`] returns the error that stopped it, which is
+/// `XML_ERR_USER_STOP` unless a fatal error came first.
+///
+/// A SAX handler stops a [`xml_sax_parse_memory`] parse from inside a callback
+/// with [`SaxHandler::stop_requested`] instead.
+#[doc(alias = "xmlStopParser")]
+pub fn xml_stop_parser(ctxt: &mut XmlPushParserCtxt) {
+    if !ctxt.stopped {
+        ctxt.stopped = true;
+        ctxt.recovered = None;
+        if ctxt.last_error.is_none() {
+            ctxt.last_error = Some(user_stop_error(0, 0));
+        }
+    }
+}
+
+/// `xmlCtxtIsStopped`: whether the push parse has ended, by a fatal error or
+/// by [`xml_stop_parser`], so that every later chunk fails.
+#[doc(alias = "xmlCtxtIsStopped")]
+pub fn xml_ctxt_is_stopped(ctxt: &XmlPushParserCtxt) -> bool {
+    ctxt.stopped
+}
+
+/// Record a fatal push-parse error.
+///
+/// Without `XML_PARSE_RECOVER` the context stops and the error is returned,
+/// now and for every later chunk. With it, the error is recorded in
+/// `last_error` and `partial` -- the tree built before the error -- is what
+/// the terminating chunk returns, exactly as a one-shot recovering parse of
+/// the same bytes returns its partial tree as `Ok`.
+fn push_fail(
+    ctxt: &mut XmlPushParserCtxt,
+    e: XmlError,
+    partial: Option<XmlDoc>,
+    terminate: bool,
+) -> Result<Option<XmlDoc>, XmlError> {
+    ctxt.last_error = Some(e.clone());
+    ctxt.state = None;
+    ctxt.buf = Vec::new();
+    // A stop is never recovered from.
+    if (ctxt.options & XML_PARSE_RECOVER) != 0 && e.code != XML_ERR_USER_STOP {
+        if let Some(mut doc) = partial {
+            // As in a one-shot recovering parse, the tree says it was cut
+            // short (#46).
+            doc.warnings.push(e.to_string());
+            if terminate {
+                return Ok(Some(doc));
+            }
+            ctxt.recovered = Some(doc);
+            return Ok(None);
+        }
+    }
+    ctxt.stopped = true;
+    Err(e)
+}
+
+/// `xmlCtxtSetMaxAmplification` for a push context; see
+/// [`XmlParseSettings::max_amplification`]. 0 is treated as 1.
+#[doc(alias = "xmlCtxtSetMaxAmplification")]
+pub fn xml_ctxt_set_max_amplification(ctxt: &mut XmlPushParserCtxt, max_ampl: u32) {
+    ctxt.max_ampl = max_ampl.max(1);
 }
 
 /// `xmlParseChunk`. `terminate != 0` finishes the document.
@@ -283,14 +657,75 @@ pub fn xml_parse_chunk(
     chunk: &[u8],
     terminate: i32,
 ) -> Result<Option<XmlDoc>, XmlError> {
-    ctxt.buf.extend_from_slice(chunk);
+    parse_chunk(ctxt, chunk, terminate, None)
+}
+
+/// [`xml_parse_chunk`] that polls `interrupt` while it parses this chunk.
+/// When it fires the chunk fails with `XML_ERR_USER_STOP` (111) and the
+/// context stops, so later chunks report the same error.
+pub fn xml_parse_chunk_interruptible(
+    ctxt: &mut XmlPushParserCtxt,
+    chunk: &[u8],
+    terminate: i32,
+    interrupt: &dyn Interrupt,
+) -> Result<Option<XmlDoc>, XmlError> {
+    parse_chunk(ctxt, chunk, terminate, Some(interrupt))
+}
+
+fn parse_chunk(
+    ctxt: &mut XmlPushParserCtxt,
+    chunk: &[u8],
+    terminate: i32,
+    interrupt: Option<&dyn Interrupt>,
+) -> Result<Option<XmlDoc>, XmlError> {
+    let cfg = ParseCfg {
+        settings: XmlParseSettings {
+            max_amplification: ctxt.max_ampl,
+            interrupt,
+        },
+        sax_stop: false,
+        recovered: None,
+    };
+    if ctxt.stopped {
+        return Err(ctxt
+            .last_error
+            .clone()
+            .unwrap_or_else(|| user_stop_error(0, 0)));
+    }
+    // A chunk too small to reach a poll still sees an interrupt that fired.
+    if interrupt.is_some_and(|i| i.is_interrupted()) {
+        let e = XmlError::new(XML_ERR_USER_STOP, "Parser interrupted", 0, 0);
+        return push_fail(ctxt, e, None, true);
+    }
     let terminate = terminate != 0;
+    if ctxt.recovered.is_some() {
+        // A recovering parse already hit a fatal error; like the one-shot
+        // parse, it keeps what came before and ignores the rest.
+        if !terminate {
+            return Ok(None);
+        }
+        return Ok(ctxt.recovered.take());
+    }
+    ctxt.buf.extend_from_slice(chunk);
     let opts = ctxt.options;
 
     // Phase 1 -- prolog. Nothing can stream until the root's start tag is in
     // hand, so buffer until it parses. The prolog is small, and re-parsing it
     // per chunk is cheap; the body, which is not small, is never re-parsed.
+    // Until the root's start tag is in hand the whole buffer is re-parsed,
+    // so a large internal subset fed in small chunks was quadratic: 1.5 MB in
+    // 4 KB chunks took 2.0 s (#41). Waiting until the buffer has doubled
+    // since the last attempt keeps the total linear and changes nothing else:
+    // an error here is only ever reported by the terminating chunk.
+    if ctxt.state.is_none()
+        && !ctxt.no_stream
+        && !terminate
+        && ctxt.buf.len() < ctxt.prolog_tried.saturating_mul(2)
+    {
+        return Ok(None);
+    }
     if ctxt.state.is_none() && !ctxt.no_stream {
+        ctxt.prolog_tried = ctxt.buf.len();
         // Conversion is stateful and the streaming path hands raw bytes to the
         // parser, so anything that is not already plain UTF-8 is buffered.
         match crate::encoding::xml_convert_to_utf8_cow(&ctxt.buf, ctxt.encoding.as_deref()) {
@@ -303,7 +738,7 @@ pub fn xml_parse_chunk(
     if ctxt.state.is_none() && !ctxt.no_stream {
         let mut sink = rusty_xml_sax::NullSax;
         let started = {
-            let mut p = fresh_parser(&ctxt.buf, opts, &mut sink);
+            let mut p = fresh_parser(&ctxt.buf, opts, &mut sink, cfg);
             match p.parse_prolog().and_then(|()| p.open_element(NodeId::DOCUMENT)) {
                 Ok(Some(root)) => {
                     let at = p.pos;
@@ -325,7 +760,7 @@ pub fn xml_parse_chunk(
                 if !terminate {
                     return Ok(None);
                 }
-                return finish_whole(ctxt);
+                return finish_whole(ctxt, cfg);
             }
         }
     }
@@ -334,7 +769,7 @@ pub fn xml_parse_chunk(
         if !terminate {
             return Ok(None);
         }
-        return finish_whole(ctxt);
+        return finish_whole(ctxt, cfg);
     }
 
     // Phase 2 -- content, streamed. Parse as far as the buffer allows, then
@@ -344,7 +779,7 @@ pub fn xml_parse_chunk(
     let mut st = ctxt.state.take().expect("state is present past the prolog");
     let mut open = std::mem::take(&mut st.open);
     let was_closed = st.root_closed;
-    let mut p = Parser::resume(&ctxt.buf, opts, &mut sink, st);
+    let mut p = Parser::resume(&ctxt.buf, opts, &mut sink, st, ctxt.consumed, cfg);
 
     // Once the root has closed, everything left is epilogue; re-entering the
     // content loop would parse trailing whitespace as document content.
@@ -354,8 +789,8 @@ pub fn xml_parse_chunk(
         match p.parse_content_inner(NodeId::DOCUMENT, &mut open, !terminate, true) {
             Ok(at) => at,
             Err(e) => {
-                ctxt.last_error = Some(e.clone());
-                return Err(e);
+                let partial = p.suspend(open, true).doc;
+                return push_fail(ctxt, e, Some(partial), terminate);
             }
         }
     };
@@ -365,7 +800,13 @@ pub fn xml_parse_chunk(
         let at = safe.min(ctxt.buf.len());
         ctxt.state = Some(p.suspend(open, root_closed));
         ctxt.buf.drain(..at);
-        ctxt.buf.shrink_to_fit();
+        // Shrinking on every chunk made the next chunk's append copy the
+        // whole unparsed tail, which is quadratic while one large construct
+        // arrives in many chunks (#41). Release memory only once most of the
+        // capacity is unused.
+        if ctxt.buf.capacity() > 4 * ctxt.buf.len() + (64 << 10) {
+            ctxt.buf.shrink_to_fit();
+        }
         ctxt.consumed += at;
         return Ok(None);
     }
@@ -376,17 +817,19 @@ pub fn xml_parse_chunk(
             XML_ERR_TAG_NOT_FINISHED,
             format!("Premature end of data in tag {local}"),
         );
-        ctxt.last_error = Some(e.clone());
-        return Err(e);
+        let partial = p.suspend(open, true).doc;
+        return push_fail(ctxt, e, Some(partial), true);
     }
 
     if let Err(e) = p.parse_epilog() {
-        ctxt.last_error = Some(e.clone());
-        return Err(e);
+        let partial = p.suspend(open, true).doc;
+        return push_fail(ctxt, e, Some(partial), true);
     }
     let total = ctxt.consumed + ctxt.buf.len();
     let mut doc = p.suspend(open, true).doc;
-    apply_dtd_defaults(&mut doc, total, ctxt.options)?;
+    if let Err(e) = apply_dtd_defaults(&mut doc, total, ctxt.options) {
+        return push_fail(ctxt, e, None, true);
+    }
     normalize_tokenized_attrs(&mut doc);
     ctxt.buf = Vec::new();
     ctxt.buf.shrink_to_fit();
@@ -399,6 +842,7 @@ fn fresh_parser<'a>(
     input: &'a [u8],
     options: i32,
     sax: &'a mut dyn SaxHandler,
+    cfg: ParseCfg<'a>,
 ) -> Parser<'a> {
     Parser {
         input,
@@ -408,7 +852,7 @@ fn fresh_parser<'a>(
         options,
         old10: (options & XML_PARSE_OLD10) != 0,
         depth: 0,
-        ns_stack: Vec::new(),
+        ns_stack: NsScope::default(),
         sax,
         doc: XmlDoc::with_node_capacity(
             Some("1.0"),
@@ -423,9 +867,12 @@ fn fresh_parser<'a>(
         char_buf_from_reference: false,
         no_tree: (options & XML_PARSE_NO_TREE) != 0,
         recover: (options & XML_PARSE_RECOVER) != 0,
-        // libxml2 bounds entity amplification at a small multiple of the input
-        // for the same reason; without a bound, nesting is a bomb.
-        entity_budget: input.len().saturating_mul(10).max(1 << 16),
+        ampl: Ampl::new(cfg.settings.max_amplification),
+        ent_depth: 0,
+        watch: cfg.sax_stop || cfg.settings.interrupt.is_some(),
+        interrupt: cfg.settings.interrupt.map(InterruptPoll::new),
+        interrupted: false,
+        scan_hint: None,
         scratch_raw: Vec::new(),
         scratch_sax: Vec::new(),
         started: false,
@@ -433,12 +880,16 @@ fn fresh_parser<'a>(
 }
 
 /// Parse the accumulated buffer as one whole document.
-fn finish_whole(ctxt: &mut XmlPushParserCtxt) -> Result<Option<XmlDoc>, XmlError> {
-    match xml_read_memory(
+fn finish_whole(
+    ctxt: &mut XmlPushParserCtxt,
+    cfg: ParseCfg<'_>,
+) -> Result<Option<XmlDoc>, XmlError> {
+    match xml_read_memory_with(
         &ctxt.buf,
         ctxt.url.as_deref(),
         ctxt.encoding.as_deref(),
         ctxt.options,
+        &cfg.settings,
     ) {
         Ok(doc) => {
             ctxt.buf = Vec::new();
@@ -447,7 +898,11 @@ fn finish_whole(ctxt: &mut XmlPushParserCtxt) -> Result<Option<XmlDoc>, XmlError
             Ok(Some(doc))
         }
         Err(e) => {
+            // finish_whole never sees XML_PARSE_RECOVER fail: a recovering
+            // one-shot parse returns its partial tree as Ok.
             ctxt.last_error = Some(e.clone());
+            ctxt.stopped = true;
+            ctxt.buf = Vec::new();
             Err(e)
         }
     }
@@ -483,6 +938,96 @@ pub fn xml_ctxt_reset(ctxt: &mut XmlParserCtxt) {
     ctxt.last_error = None;
 }
 
+/// The namespace declarations in scope: one frame per open element.
+///
+/// Lookup walked every frame from the innermost out, so an element whose
+/// prefix (or default namespace) was declared far up, or nowhere, cost the
+/// whole depth: 200,000 nested elements under `XML_PARSE_HUGE` took 9.8 s,
+/// and the HUGE cap is 1,000,000 (#41). Lookup now walks only frames that
+/// declare something, and once more than [`NS_WALK`] declarations are in
+/// scope it switches to a prefix index, kept until they drop below half.
+#[derive(Default)]
+struct NsScope {
+    frames: Vec<Vec<(Option<String>, String)>>,
+    /// Indices of the frames that declare something, innermost last.
+    declaring: Vec<u32>,
+    /// Declarations in scope.
+    count: usize,
+    /// Prefix (`""` for the default namespace) to its URIs in scope,
+    /// innermost last. Present only while `count` is large.
+    index: Option<std::collections::HashMap<String, Vec<String>>>,
+}
+
+/// Declarations in scope beyond which lookup uses the prefix index.
+const NS_WALK: usize = 32;
+
+impl NsScope {
+    fn push(&mut self, frame: Vec<(Option<String>, String)>) {
+        if !frame.is_empty() {
+            self.declaring.push(self.frames.len() as u32);
+            self.count += frame.len();
+            if let Some(ix) = self.index.as_mut() {
+                for (p, u) in &frame {
+                    ix.entry(p.clone().unwrap_or_default()).or_default().push(u.clone());
+                }
+            }
+        }
+        self.frames.push(frame);
+        if self.index.is_none() && self.count > NS_WALK {
+            let mut ix: std::collections::HashMap<String, Vec<String>> =
+                std::collections::HashMap::new();
+            for &fi in &self.declaring {
+                for (p, u) in &self.frames[fi as usize] {
+                    ix.entry(p.clone().unwrap_or_default()).or_default().push(u.clone());
+                }
+            }
+            self.index = Some(ix);
+        }
+    }
+
+    fn pop(&mut self) {
+        let Some(frame) = self.frames.pop() else {
+            return;
+        };
+        if frame.is_empty() {
+            return;
+        }
+        self.declaring.pop();
+        self.count -= frame.len();
+        if let Some(ix) = self.index.as_mut() {
+            for (p, _) in &frame {
+                if let Some(v) = ix.get_mut(p.as_deref().unwrap_or("")) {
+                    v.pop();
+                }
+            }
+            if self.count < NS_WALK / 2 {
+                self.index = None;
+            }
+        }
+    }
+
+    fn last(&self) -> Option<&Vec<(Option<String>, String)>> {
+        self.frames.last()
+    }
+
+    fn lookup(&self, prefix: Option<&str>) -> Option<&str> {
+        if let Some(ix) = &self.index {
+            return ix
+                .get(prefix.unwrap_or(""))
+                .and_then(|v| v.last())
+                .map(String::as_str);
+        }
+        for &fi in self.declaring.iter().rev() {
+            for (p, uri) in self.frames[fi as usize].iter().rev() {
+                if p.as_deref() == prefix {
+                    return Some(uri);
+                }
+            }
+        }
+        None
+    }
+}
+
 /// Parser state that survives between push chunks.
 ///
 /// Everything the parser needs to carry across a chunk boundary is owned data,
@@ -490,13 +1035,17 @@ pub fn xml_ctxt_reset(ctxt: &mut XmlParserCtxt) {
 /// on the call stack.
 struct PushState {
     doc: XmlDoc,
-    ns_stack: Vec<Vec<(Option<String>, String)>>,
+    ns_stack: NsScope,
     stack: Vec<NodeId>,
     open: Vec<OpenElem>,
     char_buf: String,
     line: u32,
     col: u32,
     depth: u32,
+    /// Entity amplification so far; the ratio spans the whole document.
+    ampl: Ampl,
+    /// How far the construct the chunk stopped at was already scanned.
+    scan_hint: Option<ScanHint>,
     /// The root's end tag has been consumed. Without this, a later chunk would
     /// re-enter the content loop with an empty stack and parse the document's
     /// trailing whitespace as content, adding a stray text node.
@@ -536,7 +1085,7 @@ struct Parser<'a> {
     options: i32,
     old10: bool,
     depth: u32,
-    ns_stack: Vec<Vec<(Option<String>, String)>>,
+    ns_stack: NsScope,
     sax: &'a mut dyn SaxHandler,
     doc: XmlDoc,
     stack: Vec<NodeId>,
@@ -550,9 +1099,33 @@ struct Parser<'a> {
     /// entity reference. Referenced text is never ignorable whitespace, and
     /// the text itself cannot say so.
     char_buf_from_reference: bool,
-    /// Bytes of entity expansion still permitted. Expanding nested entities
-    /// creates the billion-laughs vector, so it is bounded from the start.
-    entity_budget: usize,
+    /// Entity amplification accounting, as libxml2 keeps it.
+    ampl: Ampl,
+    /// How many entity replacements this parser is nested inside.
+    ent_depth: u32,
+    /// Poll [`Parser::poll`] at token boundaries: set only when there is an
+    /// interrupt or a SAX handler that may stop, so the plain path pays one
+    /// predictable branch per token.
+    watch: bool,
+    interrupt: Option<InterruptPoll<'a>>,
+    /// The interrupt fired: fail even under `XML_PARSE_RECOVER`.
+    interrupted: bool,
+    /// See [`ScanHint`].
+    scan_hint: Option<ScanHint>,
+}
+
+/// Progress of [`Parser::incomplete_construct`] on the construct a push
+/// chunk stopped at, carried to the next chunk, where that construct starts
+/// the buffer. Without it each chunk rescanned the construct from its start,
+/// so a 2 MB comment cost ten times more in 4 KB chunks than in 64 KB ones
+/// (#41); libxml2 keeps `checkIndex` for the same reason.
+#[derive(Clone, Copy)]
+struct ScanHint {
+    /// Bytes from the construct's start already scanned without finding
+    /// its end.
+    scanned: usize,
+    /// Inside a start tag: the open attribute quote at `scanned`.
+    quote: Option<u8>,
 }
 
 impl<'a> Parser<'a> {
@@ -803,14 +1376,7 @@ impl<'a> Parser<'a> {
         if prefix == Some("xmlns") {
             return Some(XMLNS_NS.into());
         }
-        for frame in self.ns_stack.iter().rev() {
-            for (p, uri) in frame.iter().rev() {
-                if p.as_deref() == prefix {
-                    return Some(uri.clone());
-                }
-            }
-        }
-        None
+        self.ns_stack.lookup(prefix).map(str::to_string)
     }
 
     fn uri_has_scheme(uri: &str) -> bool {
@@ -1083,6 +1649,151 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    /// Poll the SAX handler's stop request and the interrupt. Only called when
+    /// `watch` is set, so the plain path never pays for it.
+    #[cold]
+    #[inline(never)]
+    fn poll(&mut self) -> Result<(), XmlError> {
+        if self.sax.stop_requested() {
+            return Err(self.err(XML_ERR_USER_STOP, "Parser stopped"));
+        }
+        if let Some(p) = self.interrupt.as_mut() {
+            if p.tick().is_err() {
+                self.interrupted = true;
+                return Err(self.err(XML_ERR_USER_STOP, "Parser interrupted"));
+            }
+        }
+        Ok(())
+    }
+
+    fn ampl_error(&self) -> XmlError {
+        self.err(
+            XML_ERR_RESOURCE_LIMIT,
+            "Maximum entity amplification factor exceeded, see xmlCtxtSetMaxAmplification.",
+        )
+    }
+
+    /// libxml2's `xmlParserEntityCheck` for a reference to the declared
+    /// entity `name` in content or in an attribute value: add the entity's
+    /// expanded size and the fixed cost to the running total, and fail once
+    /// the total passes 1,000,000 bytes and exceeds `maxAmpl` times the input
+    /// consumed so far.
+    ///
+    /// The old budget charged only references found INSIDE a replacement, so
+    /// one large entity referenced many times at top level cost nothing:
+    /// 300 KB of input expanded to 100 MB (#32).
+    fn charge_entity(&mut self, name: &str) -> Result<(), XmlError> {
+        if self.ampl.off {
+            return Ok(());
+        }
+        let mut stack = Vec::new();
+        let size = self.entity_size(name, &mut stack)?;
+        let a = &mut self.ampl;
+        a.expanded = a
+            .expanded
+            .saturating_add(size)
+            .saturating_add(XML_ENT_FIXED_COST);
+        let consumed = a.consumed_base.saturating_add(self.pos as u64);
+        if a.expanded > XML_PARSER_ALLOWED_EXPANSION
+            && (a.expanded == u64::MAX || a.expanded / u64::from(a.max_ampl) > consumed)
+        {
+            return Err(self.ampl_error());
+        }
+        Ok(())
+    }
+
+    /// libxml2's `ent->expandedSize`: the entity's length plus, for each
+    /// entity reference in its replacement text, that entity's expanded size
+    /// and the fixed cost. Computed once per entity and cached, so it costs
+    /// nothing like the expansion it bounds.
+    ///
+    /// While summing, it applies libxml2's check inside the entity: nested
+    /// expansion past 1,000,000 bytes that exceeds `maxAmpl` times the
+    /// entity text read so far fails, which is what refuses billion laughs
+    /// before anything is expanded. A reference loop fails with
+    /// `XML_ERR_ENTITY_LOOP`, as in libxml2.
+    fn entity_size(&mut self, name: &str, stack: &mut Vec<String>) -> Result<u64, XmlError> {
+        if let Some(&n) = self.ampl.sizes.get(name) {
+            return Ok(n);
+        }
+        let Some(raw) = self
+            .doc
+            .dtd
+            .as_ref()
+            .and_then(|d| d.entities.get(name))
+            .cloned()
+        else {
+            return Ok(0);
+        };
+        if stack.len() as u32 >= MAX_ENTITY_DEPTH {
+            // The expansion itself reports the nesting error.
+            return Ok(raw.len() as u64);
+        }
+        stack.push(name.to_string());
+        let max_ampl = u64::from(self.ampl.max_ampl);
+        let mut nested: u64 = 0;
+        let b = raw.as_bytes();
+        let mut i = 0usize;
+        while i < b.len() {
+            // Markup the re-parse treats as literal holds no reference.
+            let skip_to: Option<&[u8]> = if b[i..].starts_with(b"<![CDATA[") {
+                Some(b"]]>")
+            } else if b[i..].starts_with(b"<!--") {
+                Some(b"-->")
+            } else if b[i..].starts_with(b"<?") {
+                Some(b"?>")
+            } else {
+                None
+            };
+            if let Some(end) = skip_to {
+                i = match b[i + 2..].windows(end.len()).position(|w| w == end) {
+                    Some(k) => i + 2 + k + end.len(),
+                    None => b.len(),
+                };
+                continue;
+            }
+            if b[i] != b'&' {
+                i += 1;
+                continue;
+            }
+            let Some(semi) = b[i..].iter().position(|&c| c == b';').map(|k| i + k) else {
+                break;
+            };
+            let inner = &raw[i + 1..semi];
+            i = semi + 1;
+            if inner.starts_with('#')
+                || matches!(inner, "lt" | "gt" | "amp" | "apos" | "quot")
+            {
+                continue;
+            }
+            if stack.iter().any(|s| s == inner) {
+                stack.pop();
+                return Err(self.err(XML_ERR_ENTITY_LOOP, "Detected an entity reference loop"));
+            }
+            let declared = self
+                .doc
+                .dtd
+                .as_ref()
+                .is_some_and(|d| d.entities.contains_key(inner));
+            if !declared {
+                continue;
+            }
+            let inner = inner.to_string();
+            let n = self.entity_size(&inner, stack)?;
+            nested = nested.saturating_add(n).saturating_add(XML_ENT_FIXED_COST);
+            if nested > XML_PARSER_ALLOWED_EXPANSION
+                && (nested == u64::MAX || nested / max_ampl > i as u64)
+            {
+                stack.pop();
+                return Err(self.ampl_error());
+            }
+        }
+        stack.pop();
+        let size = (raw.len() as u64).saturating_add(nested);
+        self.ampl.sizes.insert(name.to_string(), size);
+        Ok(size)
+    }
+
     fn parse_reference(&mut self) -> Result<String, XmlError> {
         self.expect_byte(b'&', XML_ERR_ENTITYREF_NO_NAME, "& expected")?;
         if self.peek_byte() == Some(b'#') {
@@ -1149,6 +1860,9 @@ impl<'a> Parser<'a> {
                     .and_then(|d| d.entities.get(&name))
                     .cloned();
                 if let Some(raw) = raw {
+                    // Charged before anything is expanded: the cached size
+                    // says what the expansion will produce.
+                    self.charge_entity(&name)?;
                     // The replacement was returned VERBATIM, so a nested
                     // reference landed in the tree as literal text and came
                     // back out escaped: `&b;&b;` became `&amp;b;&amp;b;`.
@@ -1196,12 +1910,13 @@ impl<'a> Parser<'a> {
         self.doc.dtd.as_ref()?.entities.get(name).cloned()
     }
 
-    /// Step over `&name;` without expanding it.
+    /// Step over `&name;` without expanding it, charging the expansion the
+    /// re-parse will produce.
     fn consume_reference(&mut self) -> Result<(), XmlError> {
         self.expect_byte(b'&', XML_ERR_ENTITYREF_NO_NAME, "& expected")?;
-        let _ = self.parse_name()?;
+        let name = self.parse_name()?;
         self.expect_byte(b';', XML_ERR_ENTITYREF_SEMICOL_MISSING, "';' required")?;
-        Ok(())
+        self.charge_entity(&name)
     }
 
     /// Parse an entity's replacement text as content and graft the result in.
@@ -1215,20 +1930,13 @@ impl<'a> Parser<'a> {
     /// isolated parse, so an undefined-prefix failure falls back to the old
     /// text behaviour rather than rejecting a document libxml2 accepts.
     fn splice_entity(&mut self, repl: &str, parent: NodeId) -> Result<(), XmlError> {
-        // The splice path bypasses expand_entity, which is where the
-        // amplification budget was charged -- so a bomb whose replacement
-        // contains '&' stopped being charged at all and expanded freely. It is
-        // charged here instead, and the sub-parser inherits and returns what
-        // is left so nesting draws on one pool.
-        self.entity_budget = match self.entity_budget.checked_sub(repl.len()) {
-            Some(n) => n,
-            None => {
-                return Err(self.err(
-                    XML_ERR_UNDECLARED_ENTITY,
-                    "Entity expansion budget exceeded",
-                ));
-            }
-        };
+        // The reference was charged for its whole expansion, nested
+        // entities included, before this was called; the sub-parser does not
+        // charge again. Nesting is bounded here, because a replacement that
+        // references itself would otherwise re-parse without end.
+        if self.ent_depth >= MAX_ENTITY_DEPTH {
+            return Err(self.err(XML_ERR_ENTITY_LOOP, "Detected an entity reference loop"));
+        }
         let wrapped = format!("<rusty-xml-entity>{repl}</rusty-xml-entity>");
         let mut null = rusty_xml_sax::NullSax;
         let mut sub = Parser {
@@ -1239,7 +1947,7 @@ impl<'a> Parser<'a> {
             options: self.options,
             old10: self.old10,
             depth: self.depth + 1,
-            ns_stack: Vec::new(),
+            ns_stack: NsScope::default(),
             sax: &mut null,
             doc: XmlDoc::with_node_capacity(Some("1.0"), 8),
             stack: Vec::new(),
@@ -1250,13 +1958,19 @@ impl<'a> Parser<'a> {
             started: false,
             no_tree: false,
             recover: self.recover,
-            // The nested expansion draws on the SAME budget, so an entity that
-            // splices markup cannot buy itself a fresh allowance.
-            entity_budget: self.entity_budget,
+            ampl: Ampl::sub(),
+            ent_depth: self.ent_depth + 1,
+            watch: false,
+            interrupt: None,
+            interrupted: false,
+            scan_hint: None,
         };
-        sub.doc.dtd = self.doc.dtd.clone();
+        // Lent, not cloned: copying the whole DTD for every reference made
+        // 100,000 references to `<!ENTITY s "<b/>">` under a 500 KB subset
+        // take 6.5 s. The sub-parse reads the DTD and never changes it.
+        sub.doc.dtd = self.doc.dtd.take();
         let r = sub.parse_document();
-        self.entity_budget = sub.entity_budget;
+        self.doc.dtd = sub.doc.dtd.take();
         match r {
             Ok(()) => {
                 if let Some(root) = sub.doc.xml_doc_get_root_element() {
@@ -1275,9 +1989,9 @@ impl<'a> Parser<'a> {
     /// Expand an entity's replacement text, resolving references inside it.
     ///
     /// Bounded twice, because recursion here IS the billion-laughs vector: by
-    /// nesting depth, and by a byte budget proportional to the document.
+    /// nesting depth, and by the amplification check the caller made with
+    /// [`Parser::charge_entity`] before calling this.
     fn expand_entity(&mut self, name: &str, raw: &str, depth: u32) -> Result<String, XmlError> {
-        const MAX_ENTITY_DEPTH: u32 = 40;
         if depth > MAX_ENTITY_DEPTH {
             return Err(self.err(
                 XML_ERR_UNDECLARED_ENTITY,
@@ -1339,16 +2053,9 @@ impl<'a> Parser<'a> {
                 }
             };
             match replacement {
-                Some(r) => {
-                    if r.len() > self.entity_budget {
-                        return Err(self.err(
-                            XML_ERR_INTERNAL_ERROR,
-                            "Maximum entity amplification exceeded",
-                        ));
-                    }
-                    self.entity_budget -= r.len();
-                    out.push_str(&r);
-                }
+                // The reference that started this expansion was charged for
+                // all of it, nested references included.
+                Some(r) => out.push_str(&r),
                 None if self.recover => out.push_str(&raw[i..=semi]),
                 None => {
                     return Err(self.err(
@@ -1572,7 +2279,7 @@ impl<'a> Parser<'a> {
             // entities and ATTLIST defaults it declared just vanished and the
             // failure surfaced later as a bogus "entity not defined". Recovery
             // mode still tolerates it, because that is what recovery is for.
-            match crate::dtd::parse_dtd_subset(subset, self.old10) {
+            match crate::dtd::parse_dtd_subset_ampl(subset, self.old10, self.ampl.max_ampl) {
                 Ok(d) => d,
                 Err(_) if self.recover => rusty_xml_tree::XmlDtd::default(),
                 Err(e) => return Err(e),
@@ -1996,7 +2703,12 @@ impl<'a> Parser<'a> {
         options: i32,
         sax: &'a mut dyn SaxHandler,
         st: PushState,
+        consumed: usize,
+        cfg: ParseCfg<'a>,
     ) -> Self {
+        let mut ampl = st.ampl;
+        ampl.consumed_base = consumed as u64;
+        ampl.max_ampl = cfg.settings.max_amplification.max(1);
         let _ = st.root_closed;
         Parser {
             input,
@@ -2014,9 +2726,12 @@ impl<'a> Parser<'a> {
             char_buf_from_reference: false,
             no_tree: (options & XML_PARSE_NO_TREE) != 0,
             recover: (options & XML_PARSE_RECOVER) != 0,
-        // libxml2 bounds entity amplification at a small multiple of the input
-        // for the same reason; without a bound, nesting is a bomb.
-        entity_budget: input.len().saturating_mul(10).max(1 << 16),
+            ampl,
+            ent_depth: 0,
+            watch: cfg.sax_stop || cfg.settings.interrupt.is_some(),
+            interrupt: cfg.settings.interrupt.map(InterruptPoll::new),
+            interrupted: false,
+            scan_hint: st.scan_hint,
             scratch_raw: Vec::new(),
             scratch_sax: Vec::new(),
             started: true,
@@ -2025,6 +2740,8 @@ impl<'a> Parser<'a> {
 
     fn suspend(self, open: Vec<OpenElem>, root_closed: bool) -> PushState {
         PushState {
+            ampl: self.ampl,
+            scan_hint: self.scan_hint,
             root_closed,
             doc: self.doc,
             ns_stack: self.ns_stack,
@@ -2043,54 +2760,64 @@ impl<'a> Parser<'a> {
     /// Only consulted while streaming. Character data is never "incomplete":
     /// the run scanner stops at `<`, `&` and `]`, and pending text is kept in
     /// `char_buf` rather than flushed, so more of it can simply be appended.
-    fn incomplete_construct(&self) -> bool {
+    fn incomplete_construct(&mut self) -> bool {
+        // A hint describes the construct at the start of a resumed buffer.
+        let hint = if self.pos == 0 { self.scan_hint.take() } else { None };
         let r = &self.input[self.pos..];
-        fn has(h: &[u8], n: &[u8]) -> bool {
-            h.len() >= n.len() && h.windows(n.len()).any(|w| w == n)
+        /// Is `n` in `h[from..]`? `from` steps back so a terminator split
+        /// across the previous scan's end is still found.
+        fn has_from(h: &[u8], n: &[u8], min: usize, scanned: usize) -> bool {
+            let from = min.max(scanned.saturating_sub(n.len() - 1));
+            h.len() >= from + n.len() && h[from..].windows(n.len()).any(|w| w == n)
         }
         // A tag ends at the first '>' that is not inside an attribute value.
-        fn tag_complete(r: &[u8]) -> bool {
-            let mut quote: Option<u8> = None;
-            for &b in &r[1..] {
+        // Err carries the quote state at the end of the input.
+        fn tag_complete(r: &[u8], from: usize, mut quote: Option<u8>) -> Result<(), Option<u8>> {
+            for &b in &r[from..] {
                 match quote {
                     Some(q) if b == q => quote = None,
                     Some(_) => {}
                     None => match b {
                         b'"' | 0x27 => quote = Some(b),
-                        b'>' => return true,
+                        b'>' => return Ok(()),
                         _ => {}
                     },
                 }
             }
-            false
+            Err(quote)
         }
-        match r.first() {
+        let scanned = hint.map_or(0, |h| h.scanned);
+        let (incomplete, quote) = match r.first() {
             Some(b'<') => {
                 if r.len() < 2 {
-                    return true;
+                    (true, None)
+                } else if r.starts_with(b"<!--") {
+                    (!has_from(r, b"-->", 4, scanned), None)
+                } else if r.starts_with(b"<![CDATA[") {
+                    (!has_from(r, b"]]>", 9, scanned), None)
+                } else if r.starts_with(b"<?") {
+                    (!has_from(r, b"?>", 2, scanned), None)
+                } else if r[1] == b'!' && r.len() < 9 {
+                    // `<!` could still become a comment, CDATA or a doctype.
+                    (true, None)
+                } else {
+                    let (from, q) = match hint {
+                        Some(h) if h.scanned >= 1 => (h.scanned, h.quote),
+                        _ => (1, None),
+                    };
+                    match tag_complete(r, from.min(r.len()), q) {
+                        Ok(()) => (false, None),
+                        Err(q) => (true, q),
+                    }
                 }
-                if r.starts_with(b"<!--") {
-                    return !has(&r[4..], b"-->");
-                }
-                if r.starts_with(b"<![CDATA[") {
-                    return !has(&r[9..], b"]]>");
-                }
-                if r.starts_with(b"<?") {
-                    return !has(&r[2..], b"?>");
-                }
-                // `<!` could still become a comment, CDATA or a doctype.
-                if r[1] == b'!' && r.len() < 9 {
-                    return true;
-                }
-                !tag_complete(r)
             }
-            Some(b'&') => !r.contains(&b';'),
+            Some(b'&') => (!has_from(r, b";", 0, scanned), None),
             // `]` might yet become `]]>`.
-            Some(b']') => r.len() < 3,
+            Some(b']') => (r.len() < 3, None),
             // XML 1.0 2.11 folds CRLF to a single LF. A trailing CR gives no
             // way to know whether the LF follows, and guessing turned every
             // CRLF that landed on a chunk boundary into two newlines.
-            Some(0x0D) => r.len() < 2,
+            Some(0x0D) => (r.len() < 2, None),
             // A multi-byte character split across chunks: the lead byte says
             // how many continuation bytes belong to it, and without them the
             // scalar cannot be decoded.
@@ -2106,10 +2833,17 @@ impl<'a> Parser<'a> {
                 } else {
                     1
                 };
-                r.len() < need
+                (r.len() < need, None)
             }
-            None => false,
+            None => (false, None),
+        };
+        if incomplete {
+            self.scan_hint = Some(ScanHint {
+                scanned: r.len(),
+                quote,
+            });
         }
+        incomplete
     }
 
     /// The content loop, with the open-element stack supplied by the caller so
@@ -2135,6 +2869,9 @@ impl<'a> Parser<'a> {
         let outer = parent;
         let mut parent = open.last().map(|f| f.elem).unwrap_or(parent);
         loop {
+            if self.watch {
+                self.poll()?;
+            }
             let safe = self.pos;
             if self.eof() {
                 if stop_at_eof {
@@ -2316,6 +3053,9 @@ impl<'a> Parser<'a> {
 
     fn parse_misc(&mut self, parent: NodeId) -> Result<(), XmlError> {
         loop {
+            if self.watch {
+                self.poll()?;
+            }
             self.skip_s()?;
             if self.starts_with(b"<!--") {
                 self.pos += 4;
@@ -2371,6 +3111,8 @@ impl<'a> Parser<'a> {
         if self.starts_with(b"<!DOCTYPE") {
             self.pos += 9;
             self.col += 9;
+            // The internal subset is one linear pass and is not polled;
+            // parse_misc polls right after it.
             self.skip_doctype()?;
             self.parse_misc(NodeId::DOCUMENT)?;
         }
@@ -2388,6 +3130,11 @@ impl<'a> Parser<'a> {
         if !self.eof() {
             return Err(self.err(XML_ERR_EXTRA_CONTENT, "Extra content at the end of the document"));
         }
+        // A handler that asked to stop on the root's end tag still stopped
+        // the parse, as xmlStopParser does from any callback.
+        if self.watch && self.sax.stop_requested() {
+            return Err(self.err(XML_ERR_USER_STOP, "Parser stopped"));
+        }
         self.sax.end_document();
         Ok(())
     }
@@ -2399,9 +3146,16 @@ fn parse_doc(
     encoding: Option<&str>,
     options: i32,
     sax: &mut dyn SaxHandler,
+    cfg: ParseCfg<'_>,
 ) -> Result<XmlDoc, XmlError> {
+    // Conversion is one linear pass and is not polled; check either side.
+    if let Some(i) = cfg.settings.interrupt {
+        if i.is_interrupted() {
+            return Err(XmlError::new(XML_ERR_USER_STOP, "Parser interrupted", 0, 0));
+        }
+    }
     let (converted, enc_name) = crate::encoding::xml_convert_to_utf8_cow(buffer, encoding)?;
-    parse_utf8(&converted, enc_name.as_deref(), options, sax)
+    parse_utf8(&converted, enc_name.as_deref(), options, sax, cfg)
 }
 
 fn parse_utf8(
@@ -2409,6 +3163,7 @@ fn parse_utf8(
     enc_name: Option<&str>,
     options: i32,
     sax: &mut dyn SaxHandler,
+    cfg: ParseCfg<'_>,
 ) -> Result<XmlDoc, XmlError> {
     let options = options | XML_PARSE_NONET | XML_PARSE_NO_XXE;
     let mut p = Parser {
@@ -2419,7 +3174,7 @@ fn parse_utf8(
         options,
         old10: (options & XML_PARSE_OLD10) != 0,
         depth: 0,
-        ns_stack: Vec::new(),
+        ns_stack: NsScope::default(),
         sax,
         // Reserving a full arena is the dominant cost of a no-tree parse --
         // pre-allocating a tree only to leave it empty.
@@ -2439,9 +3194,12 @@ fn parse_utf8(
         char_buf_from_reference: false,
         no_tree: (options & XML_PARSE_NO_TREE) != 0,
         recover: (options & XML_PARSE_RECOVER) != 0,
-        // libxml2 bounds entity amplification at a small multiple of the input
-        // for the same reason; without a bound, nesting is a bomb.
-        entity_budget: buffer.len().saturating_mul(10).max(1 << 16),
+        ampl: Ampl::new(cfg.settings.max_amplification),
+        ent_depth: 0,
+        watch: cfg.sax_stop || cfg.settings.interrupt.is_some(),
+        interrupt: cfg.settings.interrupt.map(InterruptPoll::new),
+        interrupted: false,
+        scan_hint: None,
         scratch_raw: Vec::new(),
         scratch_sax: Vec::new(),
         started: false,
@@ -2482,10 +3240,17 @@ fn parse_utf8(
             if p.started {
                 p.sax.end_document();
             }
-            if (options & XML_PARSE_RECOVER) != 0 {
+            if (options & XML_PARSE_RECOVER) != 0 && !p.interrupted {
                 // Hand back everything parsed before the failure. One bad byte
-                // in a large document used to cost the caller all of it.
+                // in a large document used to cost the caller all of it. The
+                // error goes on the tree too, or a caller of the read
+                // functions could not tell a truncated tree from a whole one
+                // (#46).
                 p.sax.error(&e.message);
+                p.doc.warnings.push(e.to_string());
+                if let Some(slot) = cfg.recovered {
+                    slot.set(Some(e));
+                }
                 return Ok(p.doc);
             }
             Err(e)

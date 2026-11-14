@@ -6,6 +6,9 @@
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 
+mod interrupt;
+pub use interrupt::{Interrupt, InterruptPoll, Interrupted, NeverInterrupt, INTERRUPT_POLL_EVERY};
+
 /// libxml2 `xmlElementType` discriminants.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u32)]
@@ -244,10 +247,12 @@ pub struct XmlDoc {
     /// AND an error must have been reported. Rejecting instead would refuse
     /// input C reads, so they are recorded here for the caller to inspect.
     pub namespace_errors: Vec<String>,
-    /// Non-fatal problems worth telling the caller about -- currently a
-    /// declared encoding that contradicts the byte-order mark. The SAX error
-    /// channel carries these too, but the default handler discards them, so a
-    /// tree-parsing caller had no way to learn of one.
+    /// Problems worth telling a tree-parsing caller about: a declared
+    /// encoding that contradicts the byte-order mark, and, under
+    /// `XML_PARSE_RECOVER`, the fatal error that ended the parse (formatted
+    /// as `XmlError` displays, `line:col: error code N: message`), so a
+    /// truncated tree can be told from a whole one. The SAX error channel
+    /// carries these too, but the default handler discards them.
     pub warnings: Vec<String>,
     pub reference_text: std::collections::HashSet<NodeId>,
     /// Elements whose content included an entity reference, including one that
@@ -778,15 +783,38 @@ impl XmlDoc {
         }
     }
 
+    /// Append the text and CDATA under `id`, descending into elements, in
+    /// document order.
+    ///
+    /// Walked through the sibling and parent links rather than by recursion:
+    /// the recursive form cost a stack frame per level, so reading the content
+    /// of a deep document (the parser allows 5,000 levels, a million under
+    /// `XML_PARSE_HUGE`) overflowed the stack, which aborts the process.
     fn collect_text(&self, id: NodeId, out: &mut String) {
         let mut c = self.first_child(id);
         while let Some(ch) = c {
             match self.kind(ch) {
                 NodeKind::Text | NodeKind::CData => out.push_str(self.content(ch)),
-                NodeKind::Element => self.collect_text(ch, out),
+                NodeKind::Element => {
+                    if let Some(first) = self.first_child(ch) {
+                        c = Some(first);
+                        continue;
+                    }
+                }
                 _ => {}
             }
-            c = self.next_sibling(ch);
+            // The next node in document order: a sibling, or the sibling of
+            // the nearest ancestor below `id` that has one.
+            let mut n = ch;
+            c = loop {
+                if let Some(s) = self.next_sibling(n) {
+                    break Some(s);
+                }
+                match self.parent(n) {
+                    Some(p) if p != id => n = p,
+                    _ => break None,
+                }
+            };
         }
     }
 

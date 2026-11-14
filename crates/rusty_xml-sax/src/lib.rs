@@ -100,6 +100,14 @@ pub trait SaxHandler {
     fn error(&mut self, msg: &str) {
         let _ = msg;
     }
+    /// libxml2's `xmlStopParser` from inside a callback: return `true` once
+    /// the handler has what it needs. The parser polls this after each
+    /// callback; once it is `true`, no event but `end_document` follows and
+    /// the parse fails with `XML_ERR_USER_STOP` (111) unless an error came
+    /// first. The default never stops.
+    fn stop_requested(&self) -> bool {
+        false
+    }
 }
 
 /// A handler that discards every callback, using the trait's default bodies.

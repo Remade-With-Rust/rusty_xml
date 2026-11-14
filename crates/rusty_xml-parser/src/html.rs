@@ -31,6 +31,76 @@ use crate::html_tags::{self as tags, Tag, BODY, HEAD, HTML, P, UNKNOWN};
 pub const HTML_PARSE_NOIMPLIED: i32 = 1 << 13;
 pub const HTML_PARSE_NONET: i32 = 1 << 11;
 
+/// libxml2's HTML nesting cap (`nodePush`): an element that would sit
+/// deeper is refused and the parse stops there (#48).
+pub const HTML_MAX_DEPTH_DEFAULT: u32 = 256;
+/// The cap under `XML_PARSE_HUGE` (libxml2's `HTML_PARSE_HUGE`, the same bit).
+pub const HTML_MAX_DEPTH_HUGE: u32 = 2048;
+
+/// Settings for an HTML parse beyond the option bits.
+///
+/// Pass one to [`html_read_memory_with`]. Build it from [`Default`] (or
+/// [`HtmlParseSettings::new`]) and the `with_*` methods; the struct is
+/// `#[non_exhaustive]` so later settings can be added without a break.
+#[derive(Clone, Copy, Default)]
+#[non_exhaustive]
+pub struct HtmlParseSettings<'a> {
+    /// The nesting cap, counting `html` and `body`.
+    ///
+    /// - `0` (the default): libxml2's, [`HTML_MAX_DEPTH_DEFAULT`] (256), or
+    ///   [`HTML_MAX_DEPTH_HUGE`] (2048) when the options carry
+    ///   `XML_PARSE_HUGE`.
+    /// - A positive value: that cap.
+    /// - A negative value (`-1`): no cap.
+    ///
+    /// An element that would sit deeper than the cap is dropped and the parse
+    /// stops, keeping the tree built so far, as libxml2 does. The error
+    /// (`XML_ERR_RESOURCE_LIMIT`, 114, libxml2's "Excessive depth in
+    /// document" message) is recorded in [`XmlDoc::warnings`].
+    pub max_depth: i32,
+    /// Cooperative cancellation, as [`html_read_memory_interruptible`].
+    pub interrupt: Option<&'a dyn Interrupt>,
+}
+
+impl std::fmt::Debug for HtmlParseSettings<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HtmlParseSettings")
+            .field("max_depth", &self.max_depth)
+            .field("interrupt", &self.interrupt.is_some())
+            .finish()
+    }
+}
+
+impl<'a> HtmlParseSettings<'a> {
+    /// The defaults: libxml2's nesting cap, no interrupt.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the nesting cap: `0` for libxml2's, a positive cap, or `-1` for
+    /// none.
+    pub fn with_max_depth(mut self, max_depth: i32) -> Self {
+        self.max_depth = max_depth;
+        self
+    }
+
+    /// Sets the interrupt the parse polls.
+    pub fn with_interrupt(mut self, interrupt: &'a dyn Interrupt) -> Self {
+        self.interrupt = Some(interrupt);
+        self
+    }
+
+    /// The cap in stack entries for these options.
+    fn depth_cap(&self, options: i32) -> usize {
+        match self.max_depth {
+            0 if (options & crate::parse::XML_PARSE_HUGE) != 0 => HTML_MAX_DEPTH_HUGE as usize,
+            0 => HTML_MAX_DEPTH_DEFAULT as usize,
+            d if d < 0 => usize::MAX,
+            d => d as usize,
+        }
+    }
+}
+
 /// `htmlInsertMode`.
 const INSERT_INITIAL: u8 = 1;
 const INSERT_IN_HEAD: u8 = 3;
@@ -100,7 +170,32 @@ pub fn html_read_memory(
     encoding: Option<&str>,
     options: i32,
 ) -> Result<XmlDoc, XmlError> {
-    html_read(buffer, url, encoding, options, None)
+    html_read(buffer, url, encoding, options, &HtmlParseSettings::default())
+}
+
+/// [`html_read_memory`] with [`HtmlParseSettings`]: the nesting cap and an
+/// optional interrupt.
+///
+/// ```
+/// use rusty_xml_parser::{html_read_memory_with, HtmlParseSettings};
+///
+/// let deep = format!("{}x", "<div>".repeat(300));
+/// // libxml2's cap: 254 divs under html and body, then the parse stops.
+/// let doc = html_read_memory_with(deep.as_bytes(), None, None, 0, &HtmlParseSettings::new()).unwrap();
+/// assert!(doc.warnings[0].contains("Excessive depth in document: 256"));
+/// // No cap.
+/// let all = HtmlParseSettings::new().with_max_depth(-1);
+/// let doc = html_read_memory_with(deep.as_bytes(), None, None, 0, &all).unwrap();
+/// assert!(doc.warnings.is_empty());
+/// ```
+pub fn html_read_memory_with(
+    buffer: &[u8],
+    url: Option<&str>,
+    encoding: Option<&str>,
+    options: i32,
+    settings: &HtmlParseSettings<'_>,
+) -> Result<XmlDoc, XmlError> {
+    html_read(buffer, url, encoding, options, settings)
 }
 
 /// [`html_read_memory`] that polls `interrupt` at token boundaries and fails
@@ -113,7 +208,7 @@ pub fn html_read_memory_interruptible(
     options: i32,
     interrupt: &dyn Interrupt,
 ) -> Result<XmlDoc, XmlError> {
-    html_read(buffer, url, encoding, options, Some(interrupt))
+    html_read(buffer, url, encoding, options, &HtmlParseSettings::new().with_interrupt(interrupt))
 }
 
 fn html_read(
@@ -121,9 +216,10 @@ fn html_read(
     url: Option<&str>,
     encoding: Option<&str>,
     options: i32,
-    interrupt: Option<&dyn Interrupt>,
+    settings: &HtmlParseSettings<'_>,
 ) -> Result<XmlDoc, XmlError> {
     let _ = url;
+    let interrupt = settings.interrupt;
     // Decoding is one linear pass and is not polled; check either side.
     if interrupt.is_some_and(|i| i.is_interrupted()) {
         return Err(interrupted());
@@ -148,7 +244,7 @@ fn html_read(
     } else {
         text
     };
-    html_parse_str(&text, options, has_nul, interrupt)
+    html_parse_str(&text, options, has_nul, interrupt, settings.depth_cap(options))
 }
 
 fn interrupted() -> XmlError {
@@ -248,6 +344,7 @@ fn html_parse_str(
     options: i32,
     has_nul: bool,
     interrupt: Option<&dyn Interrupt>,
+    max_depth: usize,
 ) -> Result<XmlDoc, XmlError> {
     // Sized for the densest markup measured, about one node per 10 input
     // bytes, so the arena never doubles and copies its way up; the slack
@@ -273,6 +370,9 @@ fn html_parse_str(
         limit: if interrupt.is_some() { POLL_BYTES.min(text.len()) } else { text.len() },
         stopped: false,
         deep: None,
+        max_depth,
+        deep_at: DEEP.min(max_depth.saturating_add(1)),
+        halted: false,
     };
     p.document();
     if p.stopped {
@@ -294,9 +394,10 @@ const POLL_BYTES: usize = 16 * 1024;
 /// Stack depth at which the open-element stack gets an index.
 ///
 /// libxml2 caps HTML nesting at 256 (2048 with `XML_PARSE_HUGE`), so its
-/// linear scans of the stack stay cheap. This parser has no cap, and the same
-/// scans made an end tag that matches nothing, or a stray `<body>`, cost the
-/// whole depth: 80,000 unmatched end tags under 80,000 open elements took
+/// linear scans of the stack stay cheap. This parser keeps that cap by
+/// default (#48) but lets a caller raise or remove it, and with no cap the
+/// same scans made an end tag that matches nothing, or a stray `<body>`, cost
+/// the whole depth: 80,000 unmatched end tags under 80,000 open elements took
 /// 3.8 s (#41). Below this depth the scans are faster than any index.
 const DEEP: usize = 256;
 
@@ -398,6 +499,14 @@ struct Parser<'a> {
     stopped: bool,
     /// Present only while the stack is deep; see [`DEEP`].
     deep: Option<Box<DeepIndex>>,
+    /// The nesting cap in stack entries; `usize::MAX` for none (#48).
+    max_depth: usize,
+    /// Stack length at which a push takes the cold path: [`DEEP`] for the
+    /// index, lower for a cap below it, 0 once halted. One compare against a
+    /// field keeps the cap off the common path.
+    deep_at: usize,
+    /// The cap was hit: libxml2's `xmlHaltParser`. Nothing more is added.
+    halted: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -443,6 +552,9 @@ impl<'a> Parser<'a> {
     #[cold]
     #[inline(never)]
     fn poll(&mut self) -> bool {
+        if self.halted {
+            return true;
+        }
         if let Some(i) = self.interrupt {
             if i.is_interrupted() {
                 self.stopped = true;
@@ -523,7 +635,7 @@ impl<'a> Parser<'a> {
                 _ => {
                     self.pos += 1;
                     self.start_char_data();
-                    self.append(Cow::Borrowed("<"), NodeKind::Text);
+                    self.append_unless_halted(Cow::Borrowed("<"));
                 }
             }
         }
@@ -559,9 +671,9 @@ impl<'a> Parser<'a> {
     #[inline]
     fn push_open(&mut self, o: Open) {
         self.stack.push(o);
-        // One compare on the common path: the index exists only at or past
-        // DEEP, so a shallower stack can skip both arms.
-        if self.stack.len() >= DEEP {
+        // One compare on the common path: the index and the cap both start
+        // at or past `deep_at`, so a shallower stack can skip every arm.
+        if self.stack.len() >= self.deep_at {
             self.push_deep(o);
         }
     }
@@ -569,11 +681,46 @@ impl<'a> Parser<'a> {
     #[cold]
     #[inline(never)]
     fn push_deep(&mut self, o: Open) {
+        if self.halted || self.stack.len() > self.max_depth {
+            return self.refuse_open(o);
+        }
+        if self.stack.len() < DEEP {
+            return;
+        }
         if let Some(d) = self.deep.as_mut() {
             d.push(self.stack.len() - 1, o, &self.doc);
         } else {
             self.deep = Some(Box::new(DeepIndex::build(&self.stack, &self.doc)));
         }
+    }
+
+    /// libxml2's `nodePush` past `maxDepth`: the element is unlinked and
+    /// freed, the error is raised once, and the parser halts. The element was
+    /// never indexed, so it leaves the stack directly.
+    #[cold]
+    #[inline(never)]
+    fn refuse_open(&mut self, o: Open) {
+        self.stack.pop();
+        self.doc.xml_unlink_node(o.node);
+        if self.halted {
+            return;
+        }
+        self.halted = true;
+        self.deep_at = 0;
+        self.limit = 0;
+        let before = &self.b[..self.pos];
+        let line = 1 + before.iter().filter(|&&c| c == b'\n').count();
+        let col = self.pos - before.iter().rposition(|&c| c == b'\n').map_or(0, |i| i + 1) + 1;
+        let e = XmlError::new(
+            crate::error::XML_ERR_RESOURCE_LIMIT,
+            format!(
+                "Excessive depth in document: {}, use XML_PARSE_HUGE option",
+                self.stack.len()
+            ),
+            u32::try_from(line).unwrap_or(u32::MAX),
+            u32::try_from(col).unwrap_or(u32::MAX),
+        );
+        self.doc.warnings.push(e.to_string());
     }
 
     #[inline]
@@ -690,6 +837,14 @@ impl<'a> Parser<'a> {
         self.doc.xml_add_child(top.node, n);
     }
 
+    /// Text after `start_char_data`, whose implied element may have hit the
+    /// nesting cap: a halted parser adds nothing (#48).
+    fn append_unless_halted(&mut self, s: Cow<'_, str>) {
+        if !self.halted {
+            self.append(s, NodeKind::Text);
+        }
+    }
+
     /// `htmlCharDataSAXCallback` for ordinary text and RCDATA: leading blanks
     /// directly in html/head stay there; anything else implies a body.
     fn text(&mut self, s: Cow<'_, str>) {
@@ -709,7 +864,7 @@ impl<'a> Parser<'a> {
                 s
             };
             self.start_char_data();
-            self.append(rest, NodeKind::Text);
+            self.append_unless_halted(rest);
             return;
         }
         self.append(s, NodeKind::Text);
@@ -961,7 +1116,7 @@ impl<'a> Parser<'a> {
         self.pos += 2;
         let Some(c) = self.peek(0) else {
             self.start_char_data();
-            self.append(Cow::Borrowed("</"), NodeKind::Text);
+            self.append_unless_halted(Cow::Borrowed("</"));
             return;
         };
         if c == b'>' {

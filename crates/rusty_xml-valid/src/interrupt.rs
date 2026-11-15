@@ -10,7 +10,7 @@
 //! The plain calls run the same code with a poll that compiles to nothing,
 //! so they keep their signatures and their cost.
 
-use rusty_xml_tree::{InterruptPoll, Interrupted};
+use rusty_xml_tree::{Interrupt, InterruptPoll, Interrupted};
 use std::fmt;
 
 /// The error of an interruptible validator or canonicalizer call.
@@ -75,6 +75,44 @@ impl From<Interrupted> for ValidError {
 pub(crate) trait Poll {
     fn tick(&mut self) -> Result<(), Interrupted>;
     fn check(&self) -> Result<(), Interrupted>;
+    /// The caller's interrupt, for work that polls inside itself (an XPath
+    /// evaluation, #58). `None` for the plain calls, which then take the
+    /// plain path.
+    #[inline(always)]
+    fn interrupt(&self) -> Option<&dyn Interrupt> {
+        None
+    }
+}
+
+/// An [`InterruptPoll`] that also hands out its interrupt, for the callers
+/// whose single steps can be long.
+pub(crate) struct PollWith<'a> {
+    pub(crate) poll: InterruptPoll<'a>,
+    pub(crate) interrupt: &'a dyn Interrupt,
+}
+
+impl<'a> PollWith<'a> {
+    pub(crate) fn new(interrupt: &'a dyn Interrupt) -> Self {
+        PollWith {
+            poll: InterruptPoll::new(interrupt),
+            interrupt,
+        }
+    }
+}
+
+impl Poll for PollWith<'_> {
+    #[inline]
+    fn tick(&mut self) -> Result<(), Interrupted> {
+        self.poll.tick()
+    }
+    #[inline]
+    fn check(&self) -> Result<(), Interrupted> {
+        self.poll.check()
+    }
+    #[inline]
+    fn interrupt(&self) -> Option<&dyn Interrupt> {
+        Some(self.interrupt)
+    }
 }
 
 pub(crate) struct NoPoll;

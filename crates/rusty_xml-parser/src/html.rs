@@ -362,7 +362,10 @@ fn html_parse_str(
     // `<a b c>`), so input made of `<` reserves no more than a real tree of
     // its size could fill; capping at the old guess instead cost the dense
     // fragments +5.4%. The slack is released once the tree is built (#22).
-    let mut doc = XmlDoc::with_node_capacity(Some("1.0"), (2 * lt).min(text.len() / 2));
+    // 17/8 rather than 2 (#62): at 2, 428 of 1,017 real pages just overflowed
+    // the reserve and doubled the arena, copying it; at 2.125 274 do, and a
+    // page that just overflowed peaks at 2.4 MiB of commit instead of 5.7.
+    let mut doc = XmlDoc::with_node_capacity(Some("1.0"), (lt * 17 / 8).min(text.len() / 2));
     doc.encoding = Some("HTML".into());
     // Mark it as an HTML document so the serializer can tell: C emits the
     // doctype where XML would emit a declaration.

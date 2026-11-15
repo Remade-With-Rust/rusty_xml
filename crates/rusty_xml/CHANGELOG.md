@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.3](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-v0.9.2...rusty_xml-v0.9.3) - 2026-11-15
+
+### Performance
+
+- SAX with `XML_PARSE_NO_TREE` now streams: no element node is built, so memory stays at the input size (354 MB 3MF model part: peak working set 1,461 MB -> 342 MB, time 7.25-8.58 s -> 1.90-2.02 s). Names are read in place and attribute buffers are pooled, which also makes ordinary tree parsing 15.5% cheaper in instructions on the XML benchmark. Output is unchanged (#52).
+
+### Other
+
+- *(parser)* stream SAX without a tree, read names in place ([#52](https://github.com/Remade-With-Rust/rusty_xml/pull/52))
+
 ## [0.9.2](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-v0.9.1...rusty_xml-v0.9.2) - 2026-11-14
 
 ### Changed

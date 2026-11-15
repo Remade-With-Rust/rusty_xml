@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.9.5](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-valid-v0.9.4...rusty_xml-valid-v0.9.5) - 2026-11-15
 
+### Performance
+
+- *(valid)* index attribute declarations per validation, share identical follow sets, and stop Schematron inside one evaluation when interrupted: TEI-sized DTDs validate 100x faster, 64 large content models use 20 MiB instead of 2 GiB ([#58](https://github.com/Remade-With-Rust/rusty_xml/issues/58))
+
 ### Fixed
 
 - *(valid)* RelaxNG sequences keep order, choices reconsider, siblings linear (#57, #58)

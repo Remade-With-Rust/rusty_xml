@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.4](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-valid-v0.9.3...rusty_xml-valid-v0.9.4) - 2026-11-15
+
+### Fixed
+
+- *(valid)* memoise RelaxNG matching once it backtracks ([#56](https://github.com/Remade-With-Rust/rusty_xml/pull/56))
+
 ## [0.9.1](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-valid-v0.9.0...rusty_xml-valid-v0.9.1) - 2026-11-14
 
 ### Added

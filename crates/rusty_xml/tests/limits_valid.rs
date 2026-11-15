@@ -324,3 +324,57 @@ fn node_content_is_in_document_order() {
     let x = doc.first_child(root).and_then(|t| doc.next_sibling(t)).unwrap();
     assert_eq!(doc.xml_node_get_content(x), "bcde");
 }
+
+/// `n` nested two-way choices whose alternatives are the same definition
+/// (#56): each level is `<element name="c"><choice><ref L+1/><ref L+1/></choice>`.
+fn twin_choice_schema(n: usize) -> String {
+    let mut s = String::from(
+        r#"<grammar xmlns="http://relaxng.org/ns/structure/1.0"><start><ref name="L0"/></start>"#,
+    );
+    for i in 0..n {
+        s.push_str(&format!(
+            r#"<define name="L{i}"><element name="c"><choice><ref name="L{j}"/><ref name="L{j}"/></choice></element></define>"#,
+            j = i + 1
+        ));
+    }
+    s.push_str(&format!(
+        r#"<define name="L{n}"><element name="c"><empty/></element></define></grammar>"#
+    ));
+    s
+}
+
+/// #56: a document that fails at the bottom made every choice retry the
+/// same subtree, 2^n for n levels: depth 22 took 1.4 s and depth 40 never
+/// finished. Each (pattern, element) pair is now matched once. Verdicts and
+/// messages are unchanged.
+#[test]
+fn relaxng_backtracking_over_twin_alternatives_is_not_exponential() {
+    let t = Instant::now();
+    for n in [10, 22, 40, 200] {
+        let rng = twin_choice_schema(n);
+        let failing = parse(&format!("{}<x/>{}", "<c>".repeat(n + 1), "</c>".repeat(n + 1)));
+        assert_eq!(
+            xml_relaxng_validate_doc(rng.as_bytes(), &failing),
+            Err("choice failed".to_string()),
+            "depth {n}"
+        );
+        let matching = parse(&format!("{}{}", "<c>".repeat(n + 1), "</c>".repeat(n + 1)));
+        assert_eq!(xml_relaxng_validate_doc(rng.as_bytes(), &matching), Ok(()), "depth {n}");
+    }
+    assert!(t.elapsed() < Duration::from_secs(5), "took {:?}", t.elapsed());
+
+    // An interrupt still ends a backtracking run, and is never remembered as
+    // an outcome.
+    let rng = twin_choice_schema(30);
+    let failing = parse(&format!("{}<x/>{}", "<c>".repeat(31), "</c>".repeat(31)));
+    let fired = AtomicBool::new(true);
+    assert_eq!(
+        xml_relaxng_validate_doc_interruptible(rng.as_bytes(), &failing, &fired),
+        Err(ValidError::Interrupted)
+    );
+    let never = AtomicBool::new(false);
+    assert_eq!(
+        xml_relaxng_validate_doc_interruptible(rng.as_bytes(), &failing, &never),
+        Err(ValidError::Failed("choice failed".into()))
+    );
+}

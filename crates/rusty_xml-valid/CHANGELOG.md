@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Performance
 
-- *(valid)* index attribute declarations per validation, share identical follow sets, and stop Schematron inside one evaluation when interrupted: TEI-sized DTDs validate 100x faster, 64 large content models use 20 MiB instead of 2 GiB ([#58](https://github.com/Remade-With-Rust/rusty_xml/issues/58))
+- *(valid)* index attribute declarations per validation, share identical follow sets, and stop Schematron inside one evaluation when interrupted: 20,000 elements against 8,000 declared element types validate in 17.6 ms instead of 1,675 ms, and 64 large repeated content models use 20 MiB instead of 2 GiB ([#58](https://github.com/Remade-With-Rust/rusty_xml/issues/58))
 
 ### Fixed
 

@@ -60,6 +60,23 @@ rows and the full method line: [`bench/SIDE-BY-SIDE.md`](bench/SIDE-BY-SIDE.md).
 | `big-1m.xml` — 1.27 MB, real content | **115.7 MB/s** | 74.6 MB/s | **0.64×** | 20/20, z = +4.47 |
 
 **1.6× to 2.2× faster than the C library, on every file, in every pair.**
+That board was measured on an earlier release. 0.9.3 parses the same kind of
+documents with 15.5% fewer instructions (callgrind, 8 real files, identical
+output), so it understates the gap today.
+
+**Streaming SAX** (`xml_sax_parse_memory` with `XML_PARSE_NO_TREE`) builds no
+tree at all, so memory stays at the input size. A generated 3MF model part of
+138 MB with 3M elements, where every element is visited and every vertex's `x`
+attribute is parsed. Windows, release, four alternating rounds:
+
+| parser | time | peak working set |
+|---|---:|---:|
+| quick-xml 0.41 (`read_event_into`) | 0.32–0.33 s | 135 MB |
+| rusty_xml 0.9.2 | 2.04–2.10 s | 434 MB |
+| **rusty_xml 0.9.3** | **0.57–0.60 s** | **136 MB** |
+
+rusty_xml still checks what quick-xml leaves to the caller: name characters,
+namespace bindings, duplicate attributes and attribute-value normalization.
 
 ---
 

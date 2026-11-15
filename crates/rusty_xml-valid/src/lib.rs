@@ -12,7 +12,8 @@ mod schematron;
 use content::ContentModel;
 use interrupt::{NoPoll, Poll};
 use rusty_xml_tree::{
-    AttrDefault, ElementDecl, Interrupt, InterruptPoll, NodeId, NodeKind, XmlDoc, XmlDtd,
+    AttrDecl, AttrDefault, ElementDecl, Interrupt, InterruptPoll, NodeId, NodeKind, XmlDoc,
+    XmlDtd,
 };
 use std::collections::HashMap;
 
@@ -66,10 +67,11 @@ fn validate_dtd<P: Poll>(doc: &XmlDoc, dtd: &XmlDtd, poll: &mut P) -> Result<(),
     // Each element type's content model is compiled once, on first use, and
     // shared by every element of that type.
     let mut models: HashMap<String, Result<ContentModel, String>> = HashMap::new();
+    let attlists = AttLists::build(dtd);
     let mut stack = vec![root];
     while let Some(id) = stack.pop() {
         poll.tick()?;
-        validate_element(doc, id, dtd, &mut ids, &mut idrefs, &mut models)?;
+        validate_element(doc, id, dtd, &attlists, &mut ids, &mut idrefs, &mut models)?;
         let mut c = doc.last_child(id);
         while let Some(x) = c {
             if doc.kind(x) == NodeKind::Element {
@@ -241,10 +243,44 @@ fn is_nmtoken(v: &str) -> bool {
             .all(|c| rusty_xml_parser::chvalid::xml_is_name_char(c as u32, false))
 }
 
+/// The attribute declarations of each element type, gathered in one pass over
+/// the DTD (#58). Every element used to scan the whole `dtd.attributes` map
+/// twice, so validation cost elements x declarations: TEI P5's 17,768
+/// declarations made a 20,000-paragraph document take 2.1 s.
+struct AttLists<'d> {
+    /// Element name to its declared attributes, sorted by attribute name so
+    /// an element with several problems reports the same one every run.
+    by_elem: HashMap<&'d str, Vec<(&'d str, &'d AttrDecl)>>,
+    /// Element name to how many ID attributes it declares.
+    id_count: HashMap<&'d str, usize>,
+}
+
+impl<'d> AttLists<'d> {
+    fn build(dtd: &'d XmlDtd) -> Self {
+        let mut by_elem: HashMap<&'d str, Vec<(&'d str, &'d AttrDecl)>> = HashMap::new();
+        let mut id_count: HashMap<&'d str, usize> = HashMap::new();
+        for ((elem, aname), ad) in &dtd.attributes {
+            by_elem.entry(elem).or_default().push((aname, ad));
+            if ad.att_type == "ID" {
+                *id_count.entry(elem).or_default() += 1;
+            }
+        }
+        for v in by_elem.values_mut() {
+            v.sort_unstable_by_key(|(n, _)| *n);
+        }
+        AttLists { by_elem, id_count }
+    }
+
+    fn of(&self, elem: &str) -> &[(&'d str, &'d AttrDecl)] {
+        self.by_elem.get(elem).map_or(&[], Vec::as_slice)
+    }
+}
+
 fn validate_element(
     doc: &XmlDoc,
     id: NodeId,
     dtd: &XmlDtd,
+    attlists: &AttLists<'_>,
     ids: &mut HashMap<String, ()>,
     idrefs: &mut Vec<String>,
     models: &mut HashMap<String, Result<ContentModel, String>>,
@@ -279,15 +315,16 @@ fn validate_element(
                 }
             }
             ElementDecl::Any => {}
-            ElementDecl::Mixed(_) => {
+            ElementDecl::Mixed(allowed) => {
                 let mut c = doc.first_child(id);
                 while let Some(x) = c {
                     match doc.kind(x) {
-                        NodeKind::Element => {
-                            if let ElementDecl::Mixed(allowed) = decl {
-                                if !allowed.is_empty() && !allowed.iter().any(|n| *n == doc.qname(x)) {
-                                    return Err(format!("element {} not allowed in mixed {name}", doc.qname(x)));
-                                }
+                        NodeKind::Element if !allowed.is_empty() => {
+                            // The child's name once, not once per allowed
+                            // name: `qname` allocates (#58).
+                            let q = doc.qname(x);
+                            if !allowed.contains(&q) {
+                                return Err(format!("element {q} not allowed in mixed {name}"));
                             }
                         }
                         NodeKind::Text | NodeKind::CData | NodeKind::Comment | NodeKind::Pi => {}
@@ -339,10 +376,7 @@ fn validate_element(
             }
         }
     }
-    for ((elem, aname), ad) in &dtd.attributes {
-        if elem != &name {
-            continue;
-        }
+    for &(aname, ad) in attlists.of(&name) {
         // An ATTLIST declares a QName, so `xml:lang` is looked up as
         // `xml:lang`. xml_get_prop is xmlGetProp -- it matches unprefixed
         // attributes only -- so every prefixed declared attribute looked
@@ -500,11 +534,7 @@ fn validate_element(
     }
     // "One ID per Element Type": an element type may carry at most one ID
     // attribute, however the declarations are spread across ATTLISTs.
-    let id_attrs = dtd
-        .attributes
-        .iter()
-        .filter(|((e, _), ad)| e == &name && ad.att_type == "ID")
-        .count();
+    let id_attrs = attlists.id_count.get(name.as_str()).copied().unwrap_or(0);
     if id_attrs > 1 {
         return Err(format!("Element {name} has {id_attrs} ID attributes"));
     }

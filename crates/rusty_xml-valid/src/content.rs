@@ -21,6 +21,7 @@
 //! every walk uses an explicit stack.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// libxml2 `xmlElementContentOccur`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -57,10 +58,17 @@ struct Node {
 /// recurses once per group, which this bounds.
 const MAX_GROUP_DEPTH: usize = 256;
 
-/// The most follow-set entries one model may produce. A sequence of n
-/// optional items has about n²/2 of them, so this admits several thousand
-/// optional items while keeping a hostile DTD from asking for gigabytes.
+/// The most follow-set entries one model may produce: the elements of its
+/// distinct follow sets plus one reference per position that holds one. A
+/// sequence of n optional items has about n²/2 of them, so this admits
+/// several thousand optional items while keeping a hostile DTD from asking
+/// for gigabytes. A repeated choice of n names shares one set among its n
+/// positions, so it costs about 2n.
 const MAX_FOLLOW_ENTRIES: usize = 1 << 22;
+
+/// One follow set, keyed `(name id, position)` and sorted, shared by every
+/// position it follows.
+type FollowSet = Arc<[(u32, u32)]>;
 
 /// The size of the buffer libxml2 prints a model into (`char expr[5000]`).
 const PRINT_SIZE: usize = 5000;
@@ -798,8 +806,12 @@ pub(crate) struct ContentModel {
     ids: HashMap<String, u32>,
     /// The positions that can come first, as (name id, position), sorted.
     start: Vec<(u32, u32)>,
-    /// Per position, the positions that can follow it, sorted the same way.
-    follow: Vec<Vec<(u32, u32)>>,
+    /// Per position, the sets of positions that can follow it, each sorted
+    /// the same way. Most positions share their sets (#58): the first set of
+    /// a repeated group follows every position of the group, and storing a
+    /// copy per position made `(b0|...|b1999)*` cost 4M entries (31 MiB)
+    /// instead of 4,000.
+    follow: Vec<Vec<FollowSet>>,
     /// Per position, whether the children may end after it.
     accept: Vec<bool>,
     /// Whether no children at all match.
@@ -831,15 +843,38 @@ impl ContentModel {
                 }
             }
         }
-        let mut follow: Vec<Vec<u32>> = vec![Vec::new(); pos_name.len()];
+        // Key `v` as `(name id, position)` into `out`, sorted and deduplicated;
+        // true when two positions there carry the same name.
+        let key_into = |out: &mut Vec<(u32, u32)>, v: &[u32]| -> bool {
+            out.clear();
+            out.extend(v.iter().map(|&p| (pos_name[p as usize], p)));
+            out.sort_unstable();
+            out.dedup();
+            out.windows(2).any(|w| w[0].0 == w[1].0)
+        };
+        // Each set is keyed in this one buffer and copied once into its
+        // shared allocation. A fresh Vec per set, freed after the copy,
+        // fragmented the heap: a sequence of 2,000 optional items peaked at
+        // 23 MiB instead of 15.
+        let mut scratch: Vec<(u32, u32)> = Vec::new();
+        let mut follow: Vec<Vec<FollowSet>> = vec![Vec::new(); pos_name.len()];
         let mut entries = 0usize;
-        let mut add = |follow: &mut Vec<Vec<u32>>, from: &[u32], to: &[u32]| -> Result<(), String> {
-            entries += from.len().saturating_mul(to.len());
+        // A set that is ambiguous on its own makes every position holding it
+        // ambiguous; a position holding several sets is checked on their
+        // union below.
+        let mut ambiguous = false;
+        let mut add = |follow: &mut Vec<Vec<FollowSet>>, from: &[u32], to: &[u32]| -> Result<(), String> {
+            if from.is_empty() || to.is_empty() {
+                return Ok(());
+            }
+            entries = entries.saturating_add(from.len()).saturating_add(to.len());
             if entries > MAX_FOLLOW_ENTRIES {
                 return Err(format!("content model {spec} is too large to validate against"));
             }
+            ambiguous |= key_into(&mut scratch, to);
+            let set: FollowSet = Arc::from(scratch.as_slice());
             for &p in from {
-                follow[p as usize].extend_from_slice(to);
+                follow[p as usize].push(Arc::clone(&set));
             }
             Ok(())
         };
@@ -910,22 +945,28 @@ impl ContentModel {
         for &p in &root.last {
             accept[p as usize] = true;
         }
-        let keyed = |v: &[u32]| -> (Vec<(u32, u32)>, bool) {
-            let mut k: Vec<(u32, u32)> = v.iter().map(|&p| (pos_name[p as usize], p)).collect();
-            k.sort_unstable();
-            k.dedup();
-            let ambiguous = k.windows(2).any(|w| w[0].0 == w[1].0);
-            (k, ambiguous)
-        };
-        let (start, mut ambiguous) = keyed(&root.first);
-        let follow: Vec<Vec<(u32, u32)>> = follow
-            .into_iter()
-            .map(|f| {
-                let (k, a) = keyed(&f);
-                ambiguous |= a;
-                k
-            })
-            .collect();
+        let mut start = Vec::new();
+        ambiguous |= key_into(&mut start, &root.first);
+        drop(scratch);
+        // A position with one set was checked when the set was made. One
+        // with several is ambiguous if their union is: the same name at two
+        // different positions, after duplicates are removed. That union is
+        // built one position at a time and dropped.
+        if !ambiguous {
+            let mut union: Vec<(u32, u32)> = Vec::new();
+            for sets in follow.iter().filter(|s| s.len() > 1) {
+                union.clear();
+                for set in sets {
+                    union.extend_from_slice(set);
+                }
+                union.sort_unstable();
+                union.dedup();
+                if union.windows(2).any(|w| w[0].0 == w[1].0) {
+                    ambiguous = true;
+                    break;
+                }
+            }
+        }
         // When the Glushkov sets are unambiguous, libxml2's automaton is
         // deterministic too, so its slower check runs only on an ambiguity.
         let nondeterministic =
@@ -974,7 +1015,9 @@ impl ContentModel {
                 at_start = false;
             } else {
                 for &p in &cur {
-                    take(&self.follow[p as usize]);
+                    for set in &self.follow[p as usize] {
+                        take(set);
+                    }
                 }
             }
             if next.is_empty() {

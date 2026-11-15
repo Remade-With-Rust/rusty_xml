@@ -846,6 +846,7 @@ fn fresh_parser<'a>(
 ) -> Parser<'a> {
     Parser {
         input,
+        src: None,
         pos: 0,
         line: 1,
         col: 1,
@@ -857,7 +858,7 @@ fn fresh_parser<'a>(
         doc: XmlDoc::with_node_capacity(
             Some("1.0"),
             if (options & XML_PARSE_NO_TREE) != 0 {
-                input.len() / 32
+                4
             } else {
                 input.len() / 10
             },
@@ -1054,31 +1055,95 @@ struct PushState {
 
 /// An element whose start tag has been consumed and whose end tag has not.
 struct OpenElem {
-    /// The QName exactly as written, for the end-tag comparison.
+    /// The QName exactly as written, for the end-tag comparison. Owned: a
+    /// push parse carries open elements from one chunk's buffer to the next.
     qname: String,
+    /// Length of the prefix when the QName splits as `prefix:local`.
+    prefix_len: Option<usize>,
     elem: NodeId,
 }
 
-/// One attribute exactly as it was scanned, before namespaces are resolved.
-struct RawAttr {
-    qname: String,
-    value: String,
-    value_off: usize,
-    /// Byte index of the QName's colon, resolved once at scan time.
-    colon: Option<usize>,
+impl OpenElem {
+    fn parts(&self) -> (Option<&str>, &str) {
+        match self.prefix_len {
+            Some(i) => (Some(&self.qname[..i]), &self.qname[i + 1..]),
+            None => (None, &self.qname),
+        }
+    }
 }
 
-impl RawAttr {
-    fn parts(&self) -> (Option<&str>, &str) {
-        match self.colon {
-            None => (None, self.qname.as_str()),
-            Some(i) => (Some(&self.qname[..i]), &self.qname[i + 1..]),
+/// One attribute exactly as it was scanned, before namespaces are resolved.
+struct RawAttr<'a> {
+    qname: QName<'a>,
+    value: String,
+    value_off: usize,
+}
+
+/// A name read in place from the input, with its QName colon found by the
+/// same scan.
+#[derive(Clone, Copy)]
+struct QName<'a> {
+    s: &'a str,
+    /// Byte index of the first colon.
+    colon: Option<usize>,
+    /// Exactly one colon, with text on both sides: `prefix:local`.
+    split: bool,
+}
+
+impl<'a> QName<'a> {
+    /// `(prefix, local)`. A colon that does not form a QName is an ordinary
+    /// name character, and libxml2 treats the whole name as unprefixed.
+    fn parts(&self) -> (Option<&'a str>, &'a str) {
+        match self.prefix_len() {
+            Some(i) => (Some(&self.s[..i]), &self.s[i + 1..]),
+            None => (None, self.s),
         }
+    }
+
+    fn prefix_len(&self) -> Option<usize> {
+        self.colon.filter(|_| self.split)
+    }
+
+    /// A colon that does not form a QName: "Failed to parse QName".
+    fn malformed(&self) -> bool {
+        self.colon.is_some() && !self.split
+    }
+}
+
+/// ASCII name-character classes, bit 0 NameStartChar and bit 1 NameChar.
+/// XML 1.0 5th edition and the older classes (`XML_PARSE_OLD10`) agree on
+/// ASCII. One load replaces `xml_is_name_char`'s chain of range tests, which
+/// was 7% of a SAX parse (#52).
+static ASCII_NAME: [u8; 128] = ascii_name_table();
+
+const fn ascii_name_table() -> [u8; 128] {
+    let mut t = [0u8; 128];
+    let mut c = 0;
+    while c < 128 {
+        let b = c as u8;
+        let start = b.is_ascii_alphabetic() || b == b'_' || b == b':';
+        let name = start || b.is_ascii_digit() || b == b'-' || b == b'.';
+        t[c] = (start as u8) | ((name as u8) << 1);
+        c += 1;
+    }
+    t
+}
+
+/// A namespace lookup that borrows the URI from the scope stack.
+fn ns_lookup<'s>(ns: &'s NsScope, prefix: Option<&str>) -> Option<&'s str> {
+    match prefix {
+        Some("xml") => Some(XML_NS),
+        Some("xmlns") => Some(XMLNS_NS),
+        p => ns.lookup(p),
     }
 }
 
 struct Parser<'a> {
     input: &'a [u8],
+    /// `input` as text when the whole buffer is valid UTF-8, checked once up
+    /// front: names and text runs are then sliced, not validated one by one
+    /// (#52). `None` for push chunks, which fall back to per-slice checks.
+    src: Option<&'a str>,
     pos: usize,
     line: u32,
     col: u32,
@@ -1090,7 +1155,7 @@ struct Parser<'a> {
     doc: XmlDoc,
     stack: Vec<NodeId>,
     char_buf: String,
-    scratch_raw: Vec<RawAttr>,
+    scratch_raw: Vec<RawAttr<'a>>,
     scratch_sax: Vec<SaxAttr>,
     started: bool,
     no_tree: bool,
@@ -1129,19 +1194,6 @@ struct ScanHint {
 }
 
 impl<'a> Parser<'a> {
-    /// A name carrying a colon that does not form a QName is legal XML but a
-    /// namespace error, and C reports it as "Failed to parse QName".
-    fn check_qname(&mut self, name: &str) {
-        let mut it = name.split(':');
-        let a = it.next().unwrap_or("");
-        if let Some(b) = it.next() {
-            if it.next().is_some() || a.is_empty() || b.is_empty() {
-                let msg = format!("Failed to parse QName '{name}'");
-                self.ns_error(&msg);
-            }
-        }
-    }
-
     /// Report a namespace error without failing the parse.
     ///
     /// Namespace violations are not well-formedness errors. C logs them and
@@ -1287,14 +1339,29 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    fn parse_name_span(&mut self) -> Result<(usize, usize), XmlError> {
-        // The first character went through peek_char AND bump_char -- two
-        // decodes -- for what is almost always one ASCII byte.
-        match self.input.get(self.pos) {
-            Some(&b) if b < 0x80 && b != b'\r' => {
-                if !xml_is_name_start_char(b as u32, self.old10) {
+    /// Scan a Name in place: its span, the byte index of its first colon,
+    /// and whether it has more than one. ASCII runs go through one table
+    /// load per byte; anything else takes the decoding path.
+    fn scan_name(&mut self) -> Result<(usize, usize, Option<usize>, bool), XmlError> {
+        let input = self.input;
+        let start = self.pos;
+        let max = if (self.options & XML_PARSE_HUGE) != 0 {
+            usize::MAX
+        } else {
+            MAX_NAME
+        };
+        let mut colon = None;
+        let mut many = false;
+        match input.get(start) {
+            Some(&b) if b < 0x80 => {
+                if ASCII_NAME[b as usize] & 1 == 0 {
                     return Err(self.err(XML_ERR_NAME_REQUIRED, "Name expected"));
                 }
+                if b == b':' {
+                    colon = Some(0);
+                }
+                self.pos += 1;
+                self.col += 1;
             }
             _ => {
                 let c = self
@@ -1303,48 +1370,77 @@ impl<'a> Parser<'a> {
                 if !xml_is_name_start_char(c as u32, self.old10) {
                     return Err(self.err(XML_ERR_NAME_REQUIRED, "Name expected"));
                 }
-            }
-        }
-        // Scan the name in place and copy it out once. Name characters are
-        // overwhelmingly ASCII, and an ASCII byte needs no decode at all -- the
-        // char-at-a-time form decoded every character twice (peek, then bump)
-        // and grew the String one push at a time.
-        let start = self.pos;
-        self.bump_char()?;
-        loop {
-            let Some(b) = self.peek_byte() else { break };
-            if b < 0x80 {
-                if !xml_is_name_char(b as u32, self.old10) {
-                    break;
-                }
-                if self.pos - start >= MAX_NAME && (self.options & XML_PARSE_HUGE) == 0 {
-                    return Err(self.err(XML_ERR_NAME_REQUIRED, "Name too long"));
-                }
-                self.bump_byte();
-            } else {
-                let Some(c) = self.peek_char()? else { break };
-                if !xml_is_name_char(c as u32, self.old10) {
-                    break;
-                }
-                if self.pos - start >= MAX_NAME && (self.options & XML_PARSE_HUGE) == 0 {
-                    return Err(self.err(XML_ERR_NAME_REQUIRED, "Name too long"));
-                }
                 self.bump_char()?;
             }
         }
-        // Every byte in the span was accepted as part of a decoded character,
-        // so this is valid UTF-8; validate anyway rather than reach for unsafe.
-        Ok((start, self.pos))
+        loop {
+            let mut i = self.pos;
+            while let Some(&b) = input.get(i) {
+                if b >= 0x80 || ASCII_NAME[b as usize] & 2 == 0 {
+                    break;
+                }
+                if i - start >= max {
+                    self.col += (i - self.pos) as u32;
+                    self.pos = i;
+                    return Err(self.err(XML_ERR_NAME_REQUIRED, "Name too long"));
+                }
+                if b == b':' {
+                    if colon.is_some() {
+                        many = true;
+                    } else {
+                        colon = Some(i - start);
+                    }
+                }
+                i += 1;
+            }
+            self.col += (i - self.pos) as u32;
+            self.pos = i;
+            match input.get(i) {
+                Some(&b) if b >= 0x80 => {
+                    let Some(c) = self.peek_char()? else { break };
+                    if !xml_is_name_char(c as u32, self.old10) {
+                        break;
+                    }
+                    if self.pos - start >= max {
+                        return Err(self.err(XML_ERR_NAME_REQUIRED, "Name too long"));
+                    }
+                    self.bump_char()?;
+                }
+                _ => break,
+            }
+        }
+        Ok((start, self.pos, colon, many))
     }
 
-    /// The owning form. Prefer [`Parser::parse_name_span`] where the name is
-    /// only compared -- an end tag allocated a String purely to discard it.
-    fn parse_name(&mut self) -> Result<String, XmlError> {
-        let (a, b) = self.parse_name_span()?;
-        match std::str::from_utf8(&self.input[a..b]) {
-            Ok(name) => Ok(name.to_string()),
-            Err(_) => Err(self.err(XML_ERR_INVALID_CHAR, "Invalid UTF-8")),
+    fn parse_name_span(&mut self) -> Result<(usize, usize), XmlError> {
+        let (a, b, _, _) = self.scan_name()?;
+        Ok((a, b))
+    }
+
+    /// The text of `input[a..b]`: sliced from the validated buffer when there
+    /// is one, else validated here.
+    fn slice_str(&self, a: usize, b: usize) -> Option<&'a str> {
+        let input: &'a [u8] = self.input;
+        match self.src {
+            Some(src) => src.get(a..b),
+            None => std::str::from_utf8(&input[a..b]).ok(),
         }
+    }
+
+    /// A Name read in place, with its QName split already known.
+    fn parse_qname(&mut self) -> Result<QName<'a>, XmlError> {
+        let (a, b, colon, many) = self.scan_name()?;
+        let s = self
+            .slice_str(a, b)
+            .ok_or_else(|| self.err(XML_ERR_INVALID_CHAR, "Invalid UTF-8"))?;
+        let split = matches!(colon, Some(i) if !many && i > 0 && i + 1 < s.len());
+        Ok(QName { s, colon, split })
+    }
+
+    /// The owning form, for names that are kept (DTD declarations, PI
+    /// targets).
+    fn parse_name(&mut self) -> Result<String, XmlError> {
+        Ok(self.parse_qname()?.s.to_string())
     }
 
     fn split_qname(name: &str) -> Result<(Option<&str>, &str), XmlError> {
@@ -1376,7 +1472,7 @@ impl<'a> Parser<'a> {
         if prefix == Some("xmlns") {
             return Some(XMLNS_NS.into());
         }
-        self.ns_stack.lookup(prefix).map(str::to_string)
+        ns_lookup(&self.ns_stack, prefix).map(str::to_string)
     }
 
     fn uri_has_scheme(uri: &str) -> bool {
@@ -1941,6 +2037,7 @@ impl<'a> Parser<'a> {
         let mut null = rusty_xml_sax::NullSax;
         let mut sub = Parser {
             input: wrapped.as_bytes(),
+            src: Some(wrapped.as_str()),
             pos: 0,
             line: self.line,
             col: self.col,
@@ -2069,7 +2166,9 @@ impl<'a> Parser<'a> {
         Ok(out)
     }
 
-    fn parse_att_value(&mut self) -> Result<(String, usize), XmlError> {
+    /// Parse an attribute value into `val` (cleared first), returning the
+    /// offset of its first character. The caller lends a pooled buffer.
+    fn parse_att_value_into(&mut self, val: &mut String) -> Result<usize, XmlError> {
         let q = self.peek_byte().ok_or_else(|| {
             self.err(XML_ERR_ATTRIBUTE_WITHOUT_VALUE, "Attribute value expected")
         })?;
@@ -2078,7 +2177,7 @@ impl<'a> Parser<'a> {
         }
         self.bump_byte();
         let start = self.pos;
-        let mut val = String::new();
+        val.clear();
         loop {
             // Same run trick as character data: most attribute values are plain
             // ASCII with no reference and no whitespace needing normalisation.
@@ -2093,7 +2192,7 @@ impl<'a> Parser<'a> {
                     i += 1;
                 }
                 if i > rs {
-                    if let Ok(run) = std::str::from_utf8(&self.input[rs..i]) {
+                    if let Some(run) = self.slice_str(rs, i) {
                         // Almost every value is a single run, so this is the
                         // exact size and the String never grows.
                         if val.is_empty() {
@@ -2166,7 +2265,7 @@ impl<'a> Parser<'a> {
                 val.push(c);
             }
         }
-        Ok((val, start))
+        Ok(start)
     }
 
     fn skip_doctype(&mut self) -> Result<(), XmlError> {
@@ -2314,22 +2413,25 @@ impl<'a> Parser<'a> {
             return Err(self.err(XML_ERR_INTERNAL_ERROR, "Excessive element nesting"));
         }
         self.expect_byte(b'<', XML_ERR_LT_REQUIRED, "'<' required")?;
-        let qname = self.parse_name()?;
-        self.check_qname(&qname);
+        // Read in place: the name borrows the input and its colon was found
+        // by the scan itself (#52). Copying every name into a String and then
+        // splitting and checking it with two more scans cost ~410 Ir a name.
+        let qn = self.parse_qname()?;
+        if qn.malformed() {
+            let msg = format!("Failed to parse QName '{}'", qn.s);
+            self.ns_error(&msg);
+        }
         // `<xmlns:foo/>`: xmlns is reserved and is not an element prefix.
-        if qname.starts_with("xmlns:") {
+        if qn.s.starts_with("xmlns:") {
             self.ns_error("Elements must not have the prefix xmlns");
         }
-        let (prefix, local) = Self::split_qname(&qname).map_err(|mut e| {
-            e.line = self.line;
-            e.col = self.col;
-            e
-        })?;
+        let (prefix, local) = qn.parts();
 
-        // Reused across elements: a fresh Vec per element allocated once and
-        // then grew 1-2-4-8 as the attributes were pushed.
-        let mut raw_attrs: Vec<RawAttr> = std::mem::take(&mut self.scratch_raw);
-        raw_attrs.clear();
+        // A pool reused across elements, entries past `n_raw` included: each
+        // keeps its value buffer, so a value is parsed into capacity an
+        // earlier attribute left behind instead of a fresh String (#52).
+        let mut raw_attrs: Vec<RawAttr<'a>> = std::mem::take(&mut self.scratch_raw);
+        let mut n_raw = 0usize;
         loop {
             let before_ws = self.pos;
             self.skip_s()?;
@@ -2346,26 +2448,25 @@ impl<'a> Parser<'a> {
                     "attributes construct error",
                 ));
             }
-            let an = self.parse_name()?;
+            let an = self.parse_qname()?;
             self.skip_s()?;
             self.expect_byte(b'=', XML_ERR_EQUAL_REQUIRED, "'=' required")?;
             self.skip_s()?;
-            let (value, value_off) = self.parse_att_value()?;
-            self.check_qname(&an);
-            let colon = match Self::split_qname(&an).map_err(|mut e| {
-                e.line = self.line;
-                e.col = self.col;
-                e
-            })? {
-                (None, _) => None,
-                (Some(pfx), _) => Some(pfx.len()),
-            };
-            raw_attrs.push(RawAttr {
-                qname: an,
-                value,
-                value_off,
-                colon,
-            });
+            if n_raw == raw_attrs.len() {
+                raw_attrs.push(RawAttr {
+                    qname: an,
+                    value: String::new(),
+                    value_off: 0,
+                });
+            }
+            let value_off = self.parse_att_value_into(&mut raw_attrs[n_raw].value)?;
+            if an.malformed() {
+                let msg = format!("Failed to parse QName '{}'", an.s);
+                self.ns_error(&msg);
+            }
+            raw_attrs[n_raw].qname = an;
+            raw_attrs[n_raw].value_off = value_off;
+            n_raw += 1;
         }
         let empty = if self.starts_with(b"/>") {
             self.pos += 2;
@@ -2383,10 +2484,11 @@ impl<'a> Parser<'a> {
         // the post-parse normalization pass could not see them -- and two
         // prefixes could bind to URIs that are equal only after normalization
         // without ever being noticed as equal.
+        let elem_qname = qn.s;
         let normalize_ns = |p: &Parser, name: &str, value: &str| -> String {
             let tokenized = p.doc.dtd.as_ref().is_some_and(|d| {
                 d.attributes
-                    .get(&(qname.to_string(), name.to_string()))
+                    .get(&(elem_qname.to_string(), name.to_string()))
                     .is_some_and(|a| a.att_type != "CDATA")
             });
             if tokenized {
@@ -2395,8 +2497,8 @@ impl<'a> Parser<'a> {
                 value.to_string()
             }
         };
-        for a in &raw_attrs {
-            let (ap, al) = a.parts();
+        for a in &raw_attrs[..n_raw] {
+            let (ap, al) = a.qname.parts();
             if ap.is_none() && al == "xmlns" {
                 if !a.value.is_empty() && !Self::uri_has_scheme(&a.value) {
                     let msg = format!("xmlns: URI {} is not absolute\n", a.value);
@@ -2409,7 +2511,7 @@ impl<'a> Parser<'a> {
                 } else if a.value == XMLNS_NS {
                     self.ns_error("xmlns namespace URI cannot be the default namespace");
                 }
-                ns_frame.push((None, normalize_ns(self, &a.qname, &a.value)));
+                ns_frame.push((None, normalize_ns(self, a.qname.s, &a.value)));
             } else if ap == Some("xmlns") {
                 if !a.value.is_empty()
                     && !Self::uri_has_scheme(&a.value)
@@ -2443,15 +2545,14 @@ impl<'a> Parser<'a> {
                 if a.value.is_empty() {
                     self.ns_error("Empty XML namespace is not allowed");
                 }
-                ns_frame.push((Some(al.to_string()), normalize_ns(self, &a.qname, &a.value)));
+                ns_frame.push((Some(al.to_string()), normalize_ns(self, a.qname.s, &a.value)));
             }
         }
         // The frame is pushed, not copied; the stack owns it and both later
         // readers borrow it back from there.
         self.ns_stack.push(ns_frame);
 
-        let elem_uri = self.lookup_ns(prefix);
-        if prefix.is_some() && elem_uri.is_none() {
+        if prefix.is_some() && ns_lookup(&self.ns_stack, prefix).is_none() {
             // Scraped markup is full of prefixes nobody declared, and an
             // undeclared prefix is a namespace error, not a well-formedness
             // one. libxml2 reports it and carries on -- exits zero -- so
@@ -2468,45 +2569,30 @@ impl<'a> Parser<'a> {
         // so far, and keyed hashes of their QNames.
         let mut seen_keys: Option<std::collections::HashSet<(Option<String>, String)>> = None;
         let mut seen_qnames: Option<std::collections::HashSet<u64>> = None;
+        // Pooled like `raw_attrs`: the handler sees `sax_attrs[..n_sax]`, and
+        // the entries keep their buffers for the next element (#52).
         let mut sax_attrs: Vec<SaxAttr> = std::mem::take(&mut self.scratch_sax);
-        sax_attrs.clear();
-        for idx in 0..raw_attrs.len() {
-            // Own the parts first; SaxAttr needs them owned anyway, so this
-            // costs nothing extra and releases the borrow on raw_attrs.
-            let (ap_owned, al_owned, is_ns, value_off) = {
-                let a = &mut raw_attrs[idx];
-                let voff = a.value_off;
-                match a.colon {
-                    // Unprefixed: the local name IS the whole QName, so move it
-                    // instead of allocating a second copy of the same bytes.
-                    None => {
-                        let is_ns = a.qname == "xmlns";
-                        (None, std::mem::take(&mut a.qname), is_ns, voff)
-                    }
-                    Some(i) => {
-                        let is_ns = &a.qname[..i] == "xmlns";
-                        (
-                            Some(a.qname[..i].to_string()),
-                            a.qname[i + 1..].to_string(),
-                            is_ns,
-                            voff,
-                        )
-                    }
-                }
+        let mut n_sax = 0usize;
+        for raw in &mut raw_attrs[..n_raw] {
+            let (ap, al) = raw.qname.parts();
+            let is_ns = match ap {
+                None => al == "xmlns",
+                Some(p) => p == "xmlns",
             };
             if is_ns {
                 continue;
             }
-            let uri = if ap_owned.is_some() {
-                let u = self.lookup_ns(ap_owned.as_deref());
+            let value_off = raw.value_off;
+            let uri = if ap.is_some() {
+                let u = self.lookup_ns(ap);
                 if u.is_none() {
                     // Non-fatal, like the element case and like C: an unbound
                     // prefix is a namespace error, and rejecting refused
                     // documents libxml2 reads.
                     let msg = format!(
                         "Namespace prefix {} for {} on ... is not defined",
-                        ap_owned.clone().unwrap_or_default(),
-                        al_owned
+                        ap.unwrap_or_default(),
+                        al
                     );
                     self.ns_error(&msg);
                 }
@@ -2514,6 +2600,7 @@ impl<'a> Parser<'a> {
             } else {
                 None
             };
+            let accepted = &sax_attrs[..n_sax];
             // The attributes already accepted ARE the "seen" set -- a separate
             // vector of copies was allocated per element to hold the same thing.
             // Linear over the accepted attributes is fine for the handful a real
@@ -2525,99 +2612,125 @@ impl<'a> Parser<'a> {
             // name, only collide after namespace expansion -- that is a
             // namespace error, which C reports and carries on from. Treating
             // both as fatal refused documents libxml2 reads.
-            if sax_attrs.len() < ATTR_SCAN_MAX {
-                if sax_attrs
+            if n_sax < ATTR_SCAN_MAX {
+                if accepted
                     .iter()
-                    .any(|s| s.prefix == ap_owned && s.local == al_owned)
+                    .any(|s| s.prefix.as_deref() == ap && s.local == al)
                 {
                     return Err(self.err(XML_ERR_ATTRIBUTE_REDEFINED, "Attribute redefined"));
                 }
                 if uri.is_some()
-                    && sax_attrs
+                    && accepted
                         .iter()
-                        .any(|s| s.uri.as_deref() == uri.as_deref() && s.local == al_owned)
+                        .any(|s| s.uri.as_deref() == uri.as_deref() && s.local == al)
                 {
                     self.ns_error("Attribute redefined after namespace expansion");
                 }
             } else {
                 use std::hash::BuildHasher;
                 let seen = seen_qnames.get_or_insert_with(|| {
-                    let mut set = std::collections::HashSet::with_capacity(raw_attrs.len());
-                    for a in sax_attrs.iter() {
-                        let key = set.hasher().hash_one((&a.prefix, &a.local));
+                    let mut set = std::collections::HashSet::with_capacity(n_raw);
+                    for a in accepted {
+                        let key = set.hasher().hash_one((a.prefix.as_deref(), a.local.as_str()));
                         set.insert(key);
                     }
                     set
                 });
-                let key = seen.hasher().hash_one((&ap_owned, &al_owned));
+                let key = seen.hasher().hash_one((ap, al));
                 // The set holds hashes, not names, so a hit is confirmed by a
                 // scan. A real duplicate is fatal, so that scan runs once.
                 if !seen.insert(key)
-                    && sax_attrs
+                    && accepted
                         .iter()
-                        .any(|s| s.prefix == ap_owned && s.local == al_owned)
+                        .any(|s| s.prefix.as_deref() == ap && s.local == al)
                 {
                     return Err(self.err(XML_ERR_ATTRIBUTE_REDEFINED, "Attribute redefined"));
                 }
                 let seen_keys = seen_keys.get_or_insert_with(|| {
-                    sax_attrs
+                    accepted
                         .iter()
                         .map(|a| (a.uri.clone(), a.local.clone()))
                         .collect()
                 });
-                if !seen_keys.insert((uri.clone(), al_owned.clone())) && uri.is_some() {
+                if !seen_keys.insert((uri.clone(), al.to_string())) && uri.is_some() {
                     self.ns_error("Attribute redefined after namespace expansion");
                 }
             }
-            sax_attrs.push(SaxAttr {
-                local: al_owned,
-                prefix: ap_owned,
-                uri,
-                // Moved out of raw_attrs rather than copied: one String clone
-                // per attribute in the document.
-                value: std::mem::take(&mut raw_attrs[idx].value),
-                value_input_off: Some(value_off),
-            });
+            if n_sax == sax_attrs.len() {
+                sax_attrs.push(SaxAttr {
+                    local: String::new(),
+                    prefix: None,
+                    uri: None,
+                    value: String::new(),
+                    value_input_off: None,
+                });
+            }
+            let s = &mut sax_attrs[n_sax];
+            s.local.clear();
+            s.local.push_str(al);
+            match ap {
+                Some(p) => {
+                    let b = s.prefix.get_or_insert_with(String::new);
+                    b.clear();
+                    b.push_str(p);
+                }
+                None => s.prefix = None,
+            }
+            s.uri = uri;
+            // Swapped, not copied: the value moves to the SAX attribute and
+            // the raw entry inherits that attribute's old buffer.
+            std::mem::swap(&mut s.value, &mut raw.value);
+            s.value_input_off = Some(value_off);
+            n_sax += 1;
         }
 
         let frame: &[(Option<String>, String)] =
             self.ns_stack.last().map(Vec::as_slice).unwrap_or(&[]);
-        self.sax.start_element_ns(
-            local,
-            prefix,
-            elem_uri.as_deref(),
-            frame,
-            &sax_attrs,
-            0,
-        );
+        // Borrowed from the scope stack: an owned copy of the URI was one
+        // allocation per element (#52).
+        let elem_uri = ns_lookup(&self.ns_stack, prefix);
+        self.sax
+            .start_element_ns(local, prefix, elem_uri, frame, &sax_attrs[..n_sax], 0);
 
-        let elem = self.doc.alloc(NodeKind::Element, local);
-        self.doc.set_prefix(elem, prefix);
-        self.doc.set_ns_uri(elem, elem_uri.as_deref());
-        for i in 0..self.ns_stack.last().map_or(0, Vec::len) {
-            let (p, u) = {
-                let f = self.ns_stack.last().unwrap();
-                (f[i].0.clone(), f[i].1.clone())
-            };
-            self.doc.push_ns_def(elem, p, u);
-        }
-        if self.no_tree {
-            sax_attrs.clear();
+        // With XML_PARSE_NO_TREE there is no element node at all: a SAX parse
+        // of N elements allocated, linked and kept N of them (#52). Content
+        // that would attach to it is dropped by the same flag, so the parent
+        // stands in for the id.
+        let elem = if self.no_tree {
+            parent
         } else {
-            for a in sax_attrs.drain(..) {
-                let aid = self.doc.add_attr_owned(elem, a.local, a.prefix, a.value);
+            let elem = self.doc.alloc(NodeKind::Element, local);
+            self.doc.set_prefix(elem, prefix);
+            self.doc.set_ns_uri(elem, ns_lookup(&self.ns_stack, prefix));
+            for i in 0..self.ns_stack.last().map_or(0, Vec::len) {
+                let (p, u) = {
+                    let f = self.ns_stack.last().unwrap();
+                    (f[i].0.clone(), f[i].1.clone())
+                };
+                self.doc.push_ns_def(elem, p, u);
+            }
+            for a in &mut sax_attrs[..n_sax] {
+                let aid = self.doc.add_attr_owned(
+                    elem,
+                    std::mem::take(&mut a.local),
+                    a.prefix.take(),
+                    std::mem::take(&mut a.value),
+                );
                 self.doc.set_ns_uri(aid, a.uri.as_deref());
             }
-        }
-        self.doc.xml_add_child(parent, elem);
+            self.doc.xml_add_child(parent, elem);
+            elem
+        };
 
-        raw_attrs.clear();
-        sax_attrs.clear();
         self.scratch_raw = raw_attrs;
         self.scratch_sax = sax_attrs;
 
         if empty {
-            let uri = self.doc.ns_uri(elem);
+            let uri = if self.no_tree {
+                ns_lookup(&self.ns_stack, prefix)
+            } else {
+                self.doc.ns_uri(elem)
+            };
             self.sax.end_element_ns(local, prefix, uri);
             self.ns_stack.pop();
             self.depth -= 1;
@@ -2625,7 +2738,11 @@ impl<'a> Parser<'a> {
         }
 
         self.stack.push(elem);
-        Ok(Some(OpenElem { qname, elem }))
+        Ok(Some(OpenElem {
+            qname: qn.s.to_string(),
+            prefix_len: qn.prefix_len(),
+            elem,
+        }))
     }
 
     /// Consume the end tag of an open element and emit its SAX end event.
@@ -2634,11 +2751,7 @@ impl<'a> Parser<'a> {
     /// carried across the call: `split_qname` borrows, so this allocates
     /// nothing.
     fn close_element(&mut self, open: &OpenElem) -> Result<(), XmlError> {
-        let (prefix, local) = Self::split_qname(&open.qname).map_err(|mut e| {
-            e.line = self.line;
-            e.col = self.col;
-            e
-        })?;
+        let (prefix, local) = open.parts();
         if !self.starts_with(b"</") {
             return Err(self.err(
                 XML_ERR_TAG_NOT_FINISHED,
@@ -2658,7 +2771,11 @@ impl<'a> Parser<'a> {
                 format!("Opening and ending tag mismatch: {qname} and {end_name}"),
             ));
         }
-        let uri = self.doc.ns_uri(open.elem);
+        let uri = if self.no_tree {
+            ns_lookup(&self.ns_stack, prefix)
+        } else {
+            self.doc.ns_uri(open.elem)
+        };
         self.sax.end_element_ns(local, prefix, uri);
         self.ns_stack.pop();
         self.stack.pop();
@@ -2712,6 +2829,7 @@ impl<'a> Parser<'a> {
         let _ = st.root_closed;
         Parser {
             input,
+            src: None,
             pos: 0,
             line: st.line,
             col: st.col,
@@ -3032,14 +3150,11 @@ impl<'a> Parser<'a> {
                 }
                 if i > start {
                     // Every byte in the run is ASCII and a legal XML character.
-                    match std::str::from_utf8(&self.input[start..i]) {
-                        Ok(run) => {
-                            self.char_buf.push_str(run);
-                            self.col += (i - start) as u32;
-                            self.pos = i;
-                            continue;
-                        }
-                        Err(_) => {}
+                    if let Some(run) = self.slice_str(start, i) {
+                        self.char_buf.push_str(run);
+                        self.col += (i - start) as u32;
+                        self.pos = i;
+                        continue;
                     }
                 }
             }
@@ -3168,6 +3283,7 @@ fn parse_utf8(
     let options = options | XML_PARSE_NONET | XML_PARSE_NO_XXE;
     let mut p = Parser {
         input: buffer,
+        src: std::str::from_utf8(buffer).ok(),
         pos: 0,
         line: 1,
         col: 1,
@@ -3181,10 +3297,10 @@ fn parse_utf8(
         doc: XmlDoc::with_node_capacity(
             Some("1.0"),
             if (options & XML_PARSE_NO_TREE) != 0 {
-                // Only element nodes are created in this mode, which measure
-                // about one per 36 input bytes. Reserving for a full tree
-                // wasted the arena; reserving nothing made it double instead.
-                buffer.len() / 32
+                // No element node is created in this mode (#52), so there is
+                // nothing to reserve for: `len / 32` committed up to 32 MiB for
+                // a document that would never use it.
+                4
             } else {
                 buffer.len() / 10
             },
@@ -3494,4 +3610,29 @@ fn encodings_agree(declared: &str, detected: &str) -> bool {
     }
     let (d, a) = (family(declared), family(detected));
     d == a || d == "other" || a == "other"
+}
+
+#[cfg(test)]
+mod name_table_tests {
+    use super::{ascii_name_table, ASCII_NAME};
+    use crate::chvalid::{xml_is_name_char, xml_is_name_start_char};
+
+    #[test]
+    fn ascii_table_matches_the_character_classes_in_both_editions() {
+        assert_eq!(ASCII_NAME, ascii_name_table());
+        for c in 0u32..128 {
+            for old10 in [false, true] {
+                assert_eq!(
+                    ASCII_NAME[c as usize] & 1 != 0,
+                    xml_is_name_start_char(c, old10),
+                    "start {c:#x} old10 {old10}"
+                );
+                assert_eq!(
+                    ASCII_NAME[c as usize] & 2 != 0,
+                    xml_is_name_char(c, old10),
+                    "name {c:#x} old10 {old10}"
+                );
+            }
+        }
+    }
 }

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.5](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-v0.9.4...rusty_xml-v0.9.5) - 2026-11-15
+
+### Other
+
+- *(readme)* RelaxNG sibling runs and DTD scaling bounds (#57, #58)
+
 ## [0.9.4](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-v0.9.3...rusty_xml-v0.9.4) - 2026-11-15
 
 ### Fixed

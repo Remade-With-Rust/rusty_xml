@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.5](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-parser-v0.9.4...rusty_xml-parser-v0.9.5) - 2026-11-15
+
+### Fixed
+
+- *(dtd)* conditional sections, PE values expanded once, first PE binds ([#58](https://github.com/Remade-With-Rust/rusty_xml/pull/58))
+
+### Other
+
+- Merge branch 'batch/58-dtd' into release/0.9.5
+
 ## [0.9.3](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-parser-v0.9.2...rusty_xml-parser-v0.9.3) - 2026-11-15
 
 ### Performance

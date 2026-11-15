@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.5](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-valid-v0.9.4...rusty_xml-valid-v0.9.5) - 2026-11-15
+
+### Performance
+
+- *(valid)* index attribute declarations per validation, share identical follow sets, and stop Schematron inside one evaluation when interrupted: 20,000 elements against 8,000 declared element types validate in 17.6 ms instead of 1,675 ms, and 64 large repeated content models use 20 MiB instead of 2 GiB ([#58](https://github.com/Remade-With-Rust/rusty_xml/issues/58))
+
+### Fixed
+
+- *(valid)* RelaxNG sequences keep order, choices reconsider, siblings linear (#57, #58)
+
+### Other
+
+- Merge branch 'batch/57-rng' into release/0.9.5
+
 ## [0.9.4](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-valid-v0.9.3...rusty_xml-valid-v0.9.4) - 2026-11-15
 
 ### Fixed

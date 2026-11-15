@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.5](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-v0.9.4...rusty_xml-v0.9.5) - 2026-11-15
+
+### Fixed
+
+- RelaxNG: sequences keep element order, a choice reconsiders an alternative that took too much, and sibling runs are linear; 11 of libxml2's test verdicts now agree with xmllint ([#57](https://github.com/Remade-With-Rust/rusty_xml/issues/57))
+- DTD loading: INCLUDE/IGNORE sections, parameter entities expanded and charged once (TEI P5 loads), first declaration binds (DocBook 4.5 loads) ([#58](https://github.com/Remade-With-Rust/rusty_xml/issues/58))
+
+### Performance
+
+- DTD validation indexes attribute declarations and shares follow sets; Schematron can be interrupted inside one test ([#58](https://github.com/Remade-With-Rust/rusty_xml/issues/58))
+- HTML arena reserve of 17/8 nodes per `<`: parse instructions -3.0% to -5.9% ([#62](https://github.com/Remade-With-Rust/rusty_xml/issues/62))
+
+### Other
+
+- *(readme)* RelaxNG sibling runs and DTD scaling bounds (#57, #58)
+
 ## [0.9.4](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-v0.9.3...rusty_xml-v0.9.4) - 2026-11-15
 
 ### Fixed

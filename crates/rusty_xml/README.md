@@ -126,7 +126,11 @@ What we *do* gate hard, and what those numbers cost nothing:
     `XmlXPathContext::set_op_limit` caps the work, as libxml2's `opLimit` does.
   - **RelaxNG** remembers what each pattern did on each element once it has
     had to backtrack, so a failing document cannot make alternatives that
-    reach the same definition retry the same subtree exponentially.
+    reach the same definition retry the same subtree exponentially, and a
+    run of siblings is matched in linear time.
+  - **DTD validation** looks attribute declarations up through an index
+    and shares identical follow sets, so a large DTD (TEI, DocBook) does
+    not multiply the cost of every element.
   - **HTML nesting** stops at libxml2's cap, 256 levels (2048 under
     `XML_PARSE_HUGE`), so code that walks the tree recursively is safe on any
     page. `HtmlParseSettings::max_depth` raises or removes it.

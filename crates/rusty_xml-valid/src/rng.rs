@@ -25,6 +25,10 @@ const MAX_SCHEMA_DEPTH: usize = 512;
 /// 1 MB stack.
 const MAX_MATCH_DEPTH: usize = 1280;
 
+/// Entries the backtracking memo may hold (#56). Past it, matching goes on
+/// uncached rather than growing without bound.
+const MEMO_MAX: usize = 1 << 20;
+
 #[derive(Clone, Debug)]
 enum Pat {
     Empty,
@@ -80,6 +84,8 @@ fn relaxng_validate<P: Poll>(rng_xml: &[u8], doc: &XmlDoc, poll: &mut P) -> Resu
         poll,
         depth: 0,
         aborted: false,
+        memo: HashMap::new(),
+        backtracked: false,
     };
     cx.match_element(&schema.start, root)
 }
@@ -322,6 +328,18 @@ struct Cx<'a, P: Poll> {
     /// final: an `<optional>` or a `<choice>` must not take it for a
     /// mismatch and carry on to report some other error.
     aborted: bool,
+    /// Outcomes of [`Cx::match_content`] by pattern, element and depth (#56).
+    /// A choice whose alternatives reach the same definition matched the same
+    /// subtree once per alternative, so n nested two-way choices over a
+    /// failing document cost 2^n: depth 22 took 1.4 s and depth 40 did not
+    /// finish. The outcome depends only on those three (the schema and the
+    /// document never change during a validation; the depth decides whether
+    /// the nesting bound is reached), so it is computed once.
+    memo: HashMap<(usize, u32, usize), Step>,
+    /// A choice, option or repetition has failed and been undone. Until then
+    /// nothing is memoised, so a document that never backtracks pays nothing:
+    /// an eager table cost +10% to +45% on 32,000 siblings.
+    backtracked: bool,
 }
 
 /// The result of one matching step. An interrupt is never an ordinary
@@ -468,7 +486,7 @@ impl<'a, P: Poll> Cx<'a, P> {
                 let mut r = Err(ValidError::Failed("choice failed".into()));
                 for a in alts {
                     match self.match_element(a, id) {
-                        Err(e) if !self.fatal(&e) => {}
+                        Err(e) if !self.fatal(&e) => self.backtracked = true,
                         other => {
                             r = other;
                             break;
@@ -484,6 +502,27 @@ impl<'a, P: Poll> Cx<'a, P> {
     }
 
     fn match_content(&mut self, pat: &'a Pat, id: NodeId) -> Step {
+        if !self.backtracked {
+            return self.match_content_once(pat, id);
+        }
+        let key = (pat as *const Pat as usize, id.0, self.depth);
+        if let Some(r) = self.memo.get(&key) {
+            return r.clone();
+        }
+        let r = self.match_content_once(pat, id);
+        // An interrupt or the depth bound ends the whole validation; neither
+        // is an outcome of this pair.
+        let final_ = match &r {
+            Err(e) => self.fatal(e),
+            Ok(()) => self.aborted,
+        };
+        if !final_ && self.memo.len() < MEMO_MAX {
+            self.memo.insert(key, r.clone());
+        }
+        r
+    }
+
+    fn match_content_once(&mut self, pat: &'a Pat, id: NodeId) -> Step {
         self.poll.tick()?;
         self.depth += 1;
         if self.depth > MAX_MATCH_DEPTH {
@@ -575,7 +614,7 @@ impl<'a, P: Poll> Cx<'a, P> {
     ) -> Step {
         for p in ps {
             match self.attempt(p, kids, attrs) {
-                Err(e) if !self.fatal(&e) => {}
+                Err(e) if !self.fatal(&e) => self.backtracked = true,
                 other => return other,
             }
         }
@@ -591,7 +630,11 @@ impl<'a, P: Poll> Cx<'a, P> {
     ) -> Step {
         match self.attempt(p, kids, attrs) {
             Err(e) if self.fatal(&e) => Err(e),
-            _ => Ok(()),
+            Err(_) => {
+                self.backtracked = true;
+                Ok(())
+            }
+            Ok(()) => Ok(()),
         }
     }
 
@@ -639,7 +682,10 @@ impl<'a, P: Poll> Cx<'a, P> {
                 }
                 Ok(()) => return Ok(()),
                 Err(e) if self.fatal(&e) => return Err(e),
-                Err(_) => return Ok(()),
+                Err(_) => {
+                    self.backtracked = true;
+                    return Ok(());
+                }
             }
         }
     }

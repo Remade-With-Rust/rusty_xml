@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.3](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-v0.9.2...rusty_xml-v0.9.3) - 2026-11-15
+
+### Other
+
+- *(parser)* stream SAX without a tree, read names in place ([#52](https://github.com/Remade-With-Rust/rusty_xml/pull/52))
+
 ## [0.9.2](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-v0.9.1...rusty_xml-v0.9.2) - 2026-11-14
 
 ### Changed

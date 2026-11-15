@@ -84,7 +84,7 @@ where
                 if parse == "text" {
                     let text = String::from_utf8_lossy(&bytes).into_owned();
                     let n = doc.alloc(NodeKind::Text, "#text");
-                    doc.node_mut(n).content = text;
+                    doc.node_mut(n).content = text.into();
                     doc.xml_add_prev_sibling(id, n);
                     doc.xml_unlink_node(id);
                     return Ok(true);
@@ -179,7 +179,7 @@ fn copy_one(dst: &mut XmlDoc, src: &XmlDoc, id: NodeId) -> NodeId {
     // Prefixes and URIs are interned per document: re-intern through `dst`.
     dst.set_prefix(n, src.prefix(id));
     dst.set_ns_uri(n, src.ns_uri(id));
-    dst.node_mut(n).content = src.content(id).to_string();
+    dst.node_mut(n).content = rusty_xml_tree::CompactString::from(src.content(id));
     for (p, u) in src.ns_defs(id) {
         dst.push_ns_def(n, p.clone(), u.clone());
     }

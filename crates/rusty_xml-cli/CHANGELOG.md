@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-cli-v0.9.5...rusty_xml-cli-v0.10.0) - 2026-11-15
+
+### Other
+
+- release v0.10.0
+
 ## [0.9.2](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-cli-v0.9.1...rusty_xml-cli-v0.9.2) - 2026-11-14
 
 ### Added

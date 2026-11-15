@@ -43,7 +43,20 @@ fn parse_subset(
     old10: bool,
     max_ampl: u32,
 ) -> Result<XmlDtd, XmlError> {
-    let expanded = expand_pe(src, internal, max_ampl)?;
+    // Conditional sections are resolved before parameter entities are
+    // substituted, as libxml2 reads them: an IGNORE section is dropped whole,
+    // so its text is never substituted and its declarations never bind, and an
+    // INCLUDE section's declarations are kept (#58). They were all skipped.
+    let resolved = if !internal && has_cond_markers(src) {
+        std::borrow::Cow::Owned(resolve_conditional(src)?)
+    } else {
+        std::borrow::Cow::Borrowed(src)
+    };
+    let mut expanded = expand_pe(&resolved, src.len(), internal, max_ampl)?;
+    // A parameter entity can carry a section of its own.
+    if !internal && has_cond_markers(&expanded) {
+        expanded = resolve_conditional(&expanded)?;
+    }
     let mut dtd = XmlDtd::default();
     dtd.int_subset = Some(src.to_string());
     let mut p = DtdParser {
@@ -57,7 +70,7 @@ fn parse_subset(
     // A parameter entity reference in the subset means the declarations may be
     // incomplete, which changes "Entity Declared" from a well-formedness
     // constraint into a validity one.
-    dtd.has_parameter_entity_refs = expanded != src
+    dtd.has_parameter_entity_refs = expanded != *resolved
         || src.chars().zip(src.chars().skip(1)).any(|(a, b)| {
             a == '%' && crate::chvalid::xml_is_name_start_char(b as u32, false)
         });
@@ -92,7 +105,12 @@ impl PeAmpl {
     }
 }
 
-fn expand_pe(src: &str, internal: bool, max_ampl: u32) -> Result<String, XmlError> {
+fn expand_pe(
+    src: &str,
+    consumed: usize,
+    internal: bool,
+    max_ampl: u32,
+) -> Result<String, XmlError> {
     // Multi-pass PE expansion so `%percent;` can invent new PE names.
     //
     // Every pass expands one more level, so ten references per entity grow
@@ -101,14 +119,14 @@ fn expand_pe(src: &str, internal: bool, max_ampl: u32) -> Result<String, XmlErro
     // as libxml2 charges it; xmllint refuses the five-level form.
     let mut ampl = PeAmpl {
         expanded: 0,
-        consumed: src.len() as u64,
+        consumed: consumed as u64,
         max_ampl: u64::from(max_ampl.max(1)),
     };
     let mut cur = src.to_string();
     for _ in 0..16 {
         let mut pes: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-        harvest_pe(&cur, &mut pes);
-        let next = subst_pe(&cur, &pes, internal, &mut ampl)?;
+        let charged = harvest_pe(&cur, &mut pes, &mut ampl)?;
+        let next = subst_pe(&cur, &pes, &charged, internal, &mut ampl)?;
         if next == cur {
             return Ok(cur);
         }
@@ -117,10 +135,47 @@ fn expand_pe(src: &str, internal: bool, max_ampl: u32) -> Result<String, XmlErro
     Ok(cur)
 }
 
-fn harvest_pe(src: &str, pes: &mut std::collections::HashMap<String, String>) {
+/// Read every `<!ENTITY % name "value">` outside comments and PIs into
+/// `pes`, the first declaration of a name binding (XML 1.0 section 4.2, and
+/// libxml2; #58).
+///
+/// A reference in a value to an entity declared before it is expanded here,
+/// once, and charged once, as libxml2 expands an entity value when it parses
+/// the declaration (`xmlExpandPEsInEntityValue`). A use is then replaced by
+/// text with no references left to charge again. Storing the raw value made
+/// every copy of it carry its references into the next pass, where each copy
+/// was substituted and charged anew: TEI P5 `tei_all.dtd` reached the
+/// amplification limit on 1.9 MB of charges for text that grows to 1.2 MB.
+///
+/// Returns the byte offsets of the references charged here, so the
+/// substitution pass does not charge them a second time.
+fn harvest_pe(
+    src: &str,
+    pes: &mut std::collections::HashMap<String, String>,
+    ampl: &mut PeAmpl,
+) -> Result<std::collections::HashSet<usize>, XmlError> {
     let bytes = src.as_bytes();
+    let mut charged = std::collections::HashSet::new();
     let mut i = 0;
     while i + 8 < bytes.len() {
+        if bytes[i] == b'<' && bytes[i..].starts_with(b"<!--") {
+            match src[i + 4..].find("-->") {
+                Some(e) => {
+                    i += 4 + e + 3;
+                    continue;
+                }
+                None => break,
+            }
+        }
+        if bytes[i] == b'<' && bytes[i..].starts_with(b"<?") {
+            match src[i + 2..].find("?>") {
+                Some(e) => {
+                    i += 2 + e + 2;
+                    continue;
+                }
+                None => break,
+            }
+        }
         if bytes[i] == b'<' && bytes.get(i..i + 9) == Some(b"<!ENTITY ") {
             i += 9;
             while i < bytes.len() && bytes[i].is_ascii_whitespace() {
@@ -146,28 +201,285 @@ fn harvest_pe(src: &str, pes: &mut std::collections::HashMap<String, String>) {
                     while i < bytes.len() && bytes[i] != q {
                         i += 1;
                     }
+                    let ve = i;
                     // The harvest pass is a pre-scan; a malformed value is
                     // reported later, by the declaration parser proper.
-                    let Ok(val) = decode_charrefs(&src[vs..i]) else {
-                        continue;
-                    };
-                    pes.insert(name, val);
+                    if let Some(val) = expand_entity_value(src, vs, ve, pes, ampl, &mut charged)? {
+                        pes.entry(name).or_insert(val);
+                    }
                 }
             }
         } else {
             i += 1;
         }
     }
+    Ok(charged)
+}
+
+/// The value of a parameter entity declared at `src[vs..ve]`: references to
+/// entities already in `pes` expanded (and charged, their offsets recorded in
+/// `charged`), others kept as written, and character references in the
+/// literal text decoded. `None` if the literal text is malformed.
+fn expand_entity_value(
+    src: &str,
+    vs: usize,
+    ve: usize,
+    pes: &std::collections::HashMap<String, String>,
+    ampl: &mut PeAmpl,
+    charged: &mut std::collections::HashSet<usize>,
+) -> Result<Option<String>, XmlError> {
+    let raw = &src[vs..ve];
+    if !raw.contains('%') {
+        return Ok(decode_charrefs(raw).ok());
+    }
+    let mut val = String::with_capacity(raw.len());
+    let mut seg = 0;
+    let mut k = 0;
+    while let Some(off) = raw[k..].find('%') {
+        let at = k + off;
+        let Some((name, end)) = pe_ref_at(raw, at) else {
+            k = at + 1;
+            continue;
+        };
+        let Some(v) = pes.get(name) else {
+            k = end;
+            continue;
+        };
+        let Ok(lit) = decode_charrefs(&raw[seg..at]) else {
+            return Ok(None);
+        };
+        val.push_str(&lit);
+        ampl.charge(v.len())?;
+        charged.insert(vs + at);
+        val.push_str(v);
+        seg = end;
+        k = end;
+    }
+    let Ok(lit) = decode_charrefs(&raw[seg..]) else {
+        return Ok(None);
+    };
+    val.push_str(&lit);
+    Ok(Some(val))
+}
+
+/// A well-formed `%name;` starting at byte `at` of `s`: the name and the
+/// offset just past the `;`.
+fn pe_ref_at(s: &str, at: usize) -> Option<(&str, usize)> {
+    let rest = &s[at + 1..];
+    let mut end = None;
+    for (i, c) in rest.char_indices() {
+        let ok = if i == 0 {
+            crate::chvalid::xml_is_name_start_char(c as u32, false)
+        } else {
+            crate::chvalid::xml_is_name_char(c as u32, false)
+        };
+        if c == ';' && i > 0 {
+            end = Some(i);
+            break;
+        }
+        if !ok {
+            return None;
+        }
+    }
+    let e = end?;
+    Some((&rest[..e], at + 1 + e + 1))
+}
+
+fn has_cond_markers(s: &str) -> bool {
+    s.contains("<![") || s.contains("]]>")
+}
+
+/// 1-based line and column of byte `at` in `s`, for errors in a pre-pass.
+fn pos_of(s: &str, at: usize) -> (u32, u32) {
+    let before = &s[..at.min(s.len())];
+    let line = before.bytes().filter(|&b| b == b'\n').count() + 1;
+    let col = at - before.rfind('\n').map_or(0, |n| n + 1) + 1;
+    (line as u32, col as u32)
+}
+
+/// Resolve the conditional sections of an external subset (#58).
+///
+/// One left-to-right pass. Comments, processing instructions and markup
+/// declarations are copied as units (quotes respected), so a `<![` or `]]>`
+/// inside one is text. An INCLUDE section is replaced by its contents, which
+/// are resolved in turn; an IGNORE section is dropped whole, nested sections
+/// counted, as libxml2's `xmlParseConditionalSections` does. A keyword may be
+/// a parameter entity reference, read from the declarations passed so far, the
+/// first declaration of a name binding. Errors are libxml2's: an unknown
+/// keyword (95), a missing `[` (83), an IGNORE section never closed (59), and
+/// an INCLUDE section never closed or a `]]>` with no section open (60).
+fn resolve_conditional(src: &str) -> Result<String, XmlError> {
+    use crate::error::{
+        XML_ERR_CONDSEC_INVALID, XML_ERR_CONDSEC_INVALID_KEYWORD, XML_ERR_CONDSEC_NOT_FINISHED,
+        XML_ERR_EXT_SUBSET_NOT_FINISHED,
+    };
+    let err = |code: i32, msg: &str, at: usize| {
+        let (l, c) = pos_of(src, at);
+        XmlError::new(code, msg, l, c)
+    };
+    let b = src.as_bytes();
+    let mut out = String::with_capacity(src.len());
+    // Raw (character references decoded) values of the parameter entities
+    // declared so far; a keyword's value is expanded only when it is read.
+    let mut pes: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut open: Vec<usize> = Vec::new();
+    let mut i = 0;
+    let mut copied = 0;
+    while i < b.len() {
+        let rest = &b[i..];
+        if rest.starts_with(b"<!--") {
+            i = src[i + 4..].find("-->").map_or(b.len(), |e| i + 4 + e + 3);
+            continue;
+        }
+        if rest.starts_with(b"<?") {
+            i = src[i + 2..].find("?>").map_or(b.len(), |e| i + 2 + e + 2);
+            continue;
+        }
+        if rest.starts_with(b"<![") {
+            out.push_str(&src[copied..i]);
+            let at = i;
+            let mut j = i + 3;
+            while j < b.len() && b[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            let keyword: String = if b.get(j) == Some(&b'%') {
+                match pe_ref_at(src, j) {
+                    Some((name, end)) => {
+                        j = end;
+                        keyword_value(name, &pes)
+                    }
+                    None => String::new(),
+                }
+            } else if src[j..].starts_with("INCLUDE") {
+                j += 7;
+                "INCLUDE".into()
+            } else if src[j..].starts_with("IGNORE") {
+                j += 6;
+                "IGNORE".into()
+            } else {
+                String::new()
+            };
+            if keyword != "INCLUDE" && keyword != "IGNORE" {
+                return Err(err(
+                    XML_ERR_CONDSEC_INVALID_KEYWORD,
+                    "conditional section INCLUDE or IGNORE keyword expected",
+                    at,
+                ));
+            }
+            while j < b.len() && b[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if b.get(j) != Some(&b'[') {
+                return Err(err(XML_ERR_CONDSEC_INVALID, "XML conditional section '[' expected", at));
+            }
+            j += 1;
+            if keyword == "INCLUDE" {
+                open.push(at);
+                i = j;
+            } else {
+                let mut depth = 0usize;
+                loop {
+                    if j >= b.len() {
+                        return Err(err(XML_ERR_CONDSEC_NOT_FINISHED, "XML conditional section not closed", at));
+                    }
+                    if b[j..].starts_with(b"<![") {
+                        depth += 1;
+                        j += 3;
+                    } else if b[j..].starts_with(b"]]>") {
+                        j += 3;
+                        if depth == 0 {
+                            break;
+                        }
+                        depth -= 1;
+                    } else {
+                        j += 1;
+                    }
+                }
+                i = j;
+            }
+            copied = i;
+            continue;
+        }
+        if rest.starts_with(b"]]>") {
+            if open.pop().is_none() {
+                return Err(err(XML_ERR_EXT_SUBSET_NOT_FINISHED, "Content error in the external subset", i));
+            }
+            out.push_str(&src[copied..i]);
+            i += 3;
+            copied = i;
+            continue;
+        }
+        if rest.starts_with(b"<!") {
+            let start = i;
+            let mut j = i + 2;
+            let mut quote: Option<u8> = None;
+            while j < b.len() {
+                match (quote, b[j]) {
+                    (Some(q), c) if c == q => quote = None,
+                    (None, b'"' | b'\'') => quote = Some(b[j]),
+                    (None, b'>') => break,
+                    _ => {}
+                }
+                j += 1;
+            }
+            let end = (j + 1).min(b.len());
+            record_pe_decl(&src[start..end], &mut pes);
+            i = end;
+            continue;
+        }
+        i += 1;
+    }
+    if let Some(&at) = open.last() {
+        return Err(err(XML_ERR_EXT_SUBSET_NOT_FINISHED, "Content error in the external subset", at));
+    }
+    out.push_str(&src[copied..]);
+    Ok(out)
+}
+
+/// Record `<!ENTITY % name "value">` for keyword lookups, first one binding.
+fn record_pe_decl(decl: &str, pes: &mut std::collections::HashMap<String, String>) {
+    let Some(rest) = decl.strip_prefix("<!ENTITY") else { return };
+    let rest = rest.trim_start();
+    let Some(rest) = rest.strip_prefix('%') else { return };
+    let rest = rest.trim_start();
+    let name_end = rest
+        .find(|c: char| c.is_ascii_whitespace() || c == '"' || c == '\'')
+        .unwrap_or(rest.len());
+    let (name, rest) = rest.split_at(name_end);
+    let rest = rest.trim_start();
+    let Some(q) = rest.chars().next().filter(|&c| c == '"' || c == '\'') else { return };
+    let Some(close) = rest[1..].find(q) else { return };
+    if let Ok(v) = decode_charrefs(&rest[1..1 + close]) {
+        pes.entry(name.to_string()).or_insert(v);
+    }
+}
+
+/// A keyword read through a parameter entity: its value with references to
+/// other recorded entities expanded (a few levels, a short result: a keyword
+/// is one word), then trimmed.
+fn keyword_value(name: &str, pes: &std::collections::HashMap<String, String>) -> String {
+    let Some(mut v) = pes.get(name).cloned() else { return String::new() };
+    for _ in 0..8 {
+        let Some(at) = v.find('%') else { break };
+        let Some((n, end)) = pe_ref_at(&v, at) else { break };
+        let Some(sub) = pes.get(n) else { break };
+        if v.len() + sub.len() > 256 {
+            break;
+        }
+        v = format!("{}{}{}", &v[..at], sub, &v[end..]);
+    }
+    v.trim().to_string()
 }
 
 fn subst_pe(
     src: &str,
     pes: &std::collections::HashMap<String, String>,
+    charged: &std::collections::HashSet<usize>,
     internal: bool,
     ampl: &mut PeAmpl,
 ) -> Result<String, XmlError> {
     let mut out = String::new();
-    let mut chars = src.chars().peekable();
+    let mut chars = Cur::new(src);
     let mut in_comment = false;
     // In the internal subset a parameter entity reference may only occur where
     // a markup declaration can occur -- never inside one. `<!ELEMENT %pe;` and
@@ -241,6 +553,9 @@ fn subst_pe(
             continue;
         }
         if c == '%' {
+            // Where this reference starts, to know whether the harvest pass
+            // already charged it.
+            let at = chars.pos - 1;
             // `%` followed by anything that cannot start a Name is the PE
             // marker of an `<!ENTITY % name ...>` declaration, not a reference.
             let is_ref = chars
@@ -297,7 +612,9 @@ fn subst_pe(
                 ));
             }
             if let Some(v) = pes.get(&name) {
-                ampl.charge(v.len())?;
+                if !charged.contains(&at) {
+                    ampl.charge(v.len())?;
+                }
                 out.push_str(v);
             } else {
                 out.push('%');
@@ -309,6 +626,36 @@ fn subst_pe(
         out.push(c);
     }
     Ok(out)
+}
+
+/// A character cursor that knows its byte offset, for [`subst_pe`].
+#[derive(Clone)]
+struct Cur<'s> {
+    s: &'s str,
+    /// Byte offset of the next character.
+    pos: usize,
+    next: Option<char>,
+}
+
+impl<'s> Cur<'s> {
+    fn new(s: &'s str) -> Self {
+        Cur { s, pos: 0, next: s.chars().next() }
+    }
+
+    fn peek(&self) -> Option<&char> {
+        self.next.as_ref()
+    }
+}
+
+impl Iterator for Cur<'_> {
+    type Item = char;
+
+    fn next(&mut self) -> Option<char> {
+        let c = self.next?;
+        self.pos += c.len_utf8();
+        self.next = self.s[self.pos..].chars().next();
+        Some(c)
+    }
 }
 
 /// Decode character references in an entity value or attribute default.

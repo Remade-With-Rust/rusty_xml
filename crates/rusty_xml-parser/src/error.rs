@@ -24,6 +24,11 @@ pub const XML_ERR_LITERAL_NOT_FINISHED: i32 = 44;
 pub const XML_ERR_COMMENT_NOT_FINISHED: i32 = 45;
 pub const XML_ERR_PI_NOT_FINISHED: i32 = 47;
 pub const XML_ERR_XMLDECL_NOT_FINISHED: i32 = 57;
+/// An IGNORE section is not closed.
+pub const XML_ERR_CONDSEC_NOT_FINISHED: i32 = 59;
+/// The external subset has content that is not a declaration, or an
+/// INCLUDE section that is not closed.
+pub const XML_ERR_EXT_SUBSET_NOT_FINISHED: i32 = 60;
 pub const XML_ERR_MISPLACED_CDATA_END: i32 = 62;
 pub const XML_ERR_CDATA_NOT_FINISHED: i32 = 63;
 pub const XML_ERR_RESERVED_XML_NAME: i32 = 64;
@@ -36,8 +41,12 @@ pub const XML_ERR_TAG_NAME_MISMATCH: i32 = 76;
 pub const XML_ERR_TAG_NOT_FINISHED: i32 = 77;
 pub const XML_ERR_ENCODING_NAME: i32 = 79;
 pub const XML_ERR_HYPHEN_IN_COMMENT: i32 = 80;
+/// A conditional section keyword is not followed by `[`.
+pub const XML_ERR_CONDSEC_INVALID: i32 = 83;
 pub const XML_ERR_EXTRA_CONTENT: i32 = 86;
 pub const XML_ERR_ENTITY_LOOP: i32 = 89;
+/// A conditional section keyword is neither INCLUDE nor IGNORE.
+pub const XML_ERR_CONDSEC_INVALID_KEYWORD: i32 = 95;
 /// A SAX handler, [`crate::xml_stop_parser`] or an [`rusty_xml_tree::Interrupt`] stopped the parse.
 pub const XML_ERR_USER_STOP: i32 = 111;
 /// A resource limit was exceeded, such as the entity amplification factor.

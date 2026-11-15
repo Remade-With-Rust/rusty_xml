@@ -1129,6 +1129,20 @@ const fn ascii_name_table() -> [u8; 128] {
     t
 }
 
+/// Move the text gathered in `buf` into a node's content. Short text is
+/// copied into the inline representation and `buf` keeps its capacity for the
+/// next run; long text hands its heap buffer over, as before (#62).
+fn take_text(buf: &mut String) -> rusty_xml_tree::CompactString {
+    const INLINE: usize = std::mem::size_of::<String>();
+    if buf.len() <= INLINE {
+        let c = rusty_xml_tree::CompactString::from(buf.as_str());
+        buf.clear();
+        c
+    } else {
+        rusty_xml_tree::CompactString::from(std::mem::take(buf))
+    }
+}
+
 /// A namespace lookup that borrows the URI from the scope stack.
 fn ns_lookup<'s>(ns: &'s NsScope, prefix: Option<&str>) -> Option<&'s str> {
     match prefix {
@@ -1513,7 +1527,7 @@ impl<'a> Parser<'a> {
                 let t = self.doc.alloc_unnamed(NodeKind::Text);
                 // Moved, not copied: the buffer is cleared immediately after,
                 // so the clone was a pure allocation plus memcpy per text node.
-                self.doc.node_mut(t).content = std::mem::take(&mut self.char_buf);
+                self.doc.node_mut(t).content = take_text(&mut self.char_buf);
                 self.doc.xml_add_child(p, t);
                 if self.char_buf_from_reference {
                     self.doc.reference_text.insert(t);
@@ -1549,7 +1563,7 @@ impl<'a> Parser<'a> {
         self.sax.comment(&body);
         if let Some(p) = parent.filter(|_| !self.no_tree) {
             let n = self.doc.alloc_unnamed(NodeKind::Comment);
-            self.doc.node_mut(n).content = body;
+            self.doc.node_mut(n).content = body.into();
             self.doc.xml_add_child(p, n);
         }
         Ok(())
@@ -1604,7 +1618,7 @@ impl<'a> Parser<'a> {
         self.sax.processing_instruction(&target, data.as_deref());
         if let Some(p) = parent.filter(|_| !self.no_tree) {
             let n = self.doc.alloc(NodeKind::Pi, target);
-            self.doc.node_mut(n).content = data.unwrap_or_default();
+            self.doc.node_mut(n).content = data.unwrap_or_default().into();
             self.doc.xml_add_child(p, n);
         }
         Ok(false)
@@ -1731,14 +1745,14 @@ impl<'a> Parser<'a> {
             self.sax.characters(&body);
             if let Some(p) = parent.filter(|_| !self.no_tree) {
                 let t = self.doc.alloc_unnamed(NodeKind::Text);
-                self.doc.node_mut(t).content = body;
+                self.doc.node_mut(t).content = body.into();
                 self.doc.xml_add_child(p, t);
             }
         } else {
             self.sax.cdata_block(&body);
             if let Some(p) = parent.filter(|_| !self.no_tree) {
                 let t = self.doc.alloc_unnamed(NodeKind::CData);
-                self.doc.node_mut(t).content = body;
+                self.doc.node_mut(t).content = body.into();
                 self.doc.xml_add_child(p, t);
             }
         }
@@ -3587,7 +3601,7 @@ fn normalize_tokenized_attrs(doc: &mut XmlDoc) {
         }
     }
     for (at, v) in edits {
-        doc.node_mut(at).content = v;
+        doc.node_mut(at).content = v.into();
     }
 }
 

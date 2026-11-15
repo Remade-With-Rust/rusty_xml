@@ -11,5 +11,9 @@ description = "Arena DOM for rusty_xml (libxml2 tree.h semantics)"
 keywords.workspace = true
 categories.workspace = true
 
+[dependencies]
+# Pinned exactly: a reviewed bump only (#62 security review).
+compact_str = "=0.10.0"
+
 [lints]
 workspace = true

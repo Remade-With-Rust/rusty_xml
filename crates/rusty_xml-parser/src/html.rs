@@ -849,7 +849,7 @@ impl<'a> Parser<'a> {
             }
         }
         let n = self.doc.alloc(kind, String::new());
-        self.doc.node_mut(n).content = s.into_owned();
+        self.doc.node_mut(n).content = rusty_xml_tree::CompactString::from(s);
         self.doc.xml_add_child(top.node, n);
     }
 
@@ -1237,7 +1237,7 @@ impl<'a> Parser<'a> {
             }
         };
         let n = self.doc.alloc(NodeKind::Comment, String::new());
-        self.doc.node_mut(n).content = decode_none(body, self.has_nul).into_owned();
+        self.doc.node_mut(n).content = rusty_xml_tree::CompactString::from(decode_none(body, self.has_nul));
         let parent = self.top().map_or(NodeId::DOCUMENT, |o| o.node);
         self.doc.xml_add_child(parent, n);
     }

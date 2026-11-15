@@ -9,6 +9,11 @@ use std::num::NonZeroU32;
 mod interrupt;
 pub use interrupt::{Interrupt, InterruptPoll, Interrupted, NeverInterrupt, INTERRUPT_POLL_EVERY};
 
+/// The string type of [`Node::name`] and [`Node::content`]: up to 24 bytes
+/// inline, on the heap beyond, so the many short names and text runs of a
+/// tree cost no allocation of their own (#62).
+pub use compact_str::CompactString;
+
 /// libxml2 `xmlElementType` discriminants.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u32)]
@@ -181,12 +186,14 @@ const ATOM_SCAN_MAX: usize = 16;
 #[derive(Clone, Debug)]
 pub struct Node {
     pub kind: NodeKind,
-    pub name: String,
+    /// Inline up to 24 bytes, on the heap beyond (#62).
+    pub name: CompactString,
     /// Interned in the owning document; read it with [`XmlDoc::prefix`].
     pub prefix: Option<Atom>,
     /// Interned in the owning document; read it with [`XmlDoc::ns_uri`].
     pub ns_uri: Option<Atom>,
-    pub content: String,
+    /// Inline up to 24 bytes, on the heap beyond (#62).
+    pub content: CompactString,
     pub parent: Link,
     pub first_child: Link,
     pub last_child: Link,
@@ -197,13 +204,13 @@ pub struct Node {
 }
 
 impl Node {
-    fn new(kind: NodeKind, name: String) -> Self {
+    fn new(kind: NodeKind, name: CompactString) -> Self {
         Self {
             kind,
             name,
             prefix: None,
             ns_uri: None,
-            content: String::new(),
+            content: CompactString::default(),
             parent: Link::NONE,
             first_child: Link::NONE,
             last_child: Link::NONE,
@@ -297,7 +304,7 @@ impl XmlDoc {
         // A floor of 4 keeps a small document from reallocating its way up
         // from a single slot, which is what Vec::new()+push used to give it.
         let mut nodes = Vec::with_capacity(cap.clamp(4, ceiling));
-        nodes.push(Node::new(NodeKind::Document, String::new()));
+        nodes.push(Node::new(NodeKind::Document, CompactString::default()));
         Self {
             nodes,
             version: version.unwrap_or("1.0").to_string(),
@@ -471,11 +478,11 @@ impl XmlDoc {
     /// [`XmlDoc::name`] reports the canonical name for these.
     pub fn alloc_unnamed(&mut self, kind: NodeKind) -> NodeId {
         let id = NodeId(self.nodes.len() as u32);
-        self.nodes.push(Node::new(kind, String::new()));
+        self.nodes.push(Node::new(kind, CompactString::default()));
         id
     }
 
-    pub fn alloc(&mut self, kind: NodeKind, name: impl Into<String>) -> NodeId {
+    pub fn alloc(&mut self, kind: NodeKind, name: impl Into<CompactString>) -> NodeId {
         let id = NodeId(self.nodes.len() as u32);
         self.nodes.push(Node::new(kind, name.into()));
         id
@@ -529,7 +536,7 @@ impl XmlDoc {
         if let Some(c) = content {
             if !c.is_empty() {
                 let t = self.alloc(NodeKind::Text, "#text");
-                self.node_mut(t).content = c.to_string();
+                self.node_mut(t).content = CompactString::from(c);
                 self.xml_add_child(id, t);
             }
         }
@@ -661,7 +668,7 @@ impl XmlDoc {
         let id = self.alloc(NodeKind::Attribute, name);
         let prefix = prefix.map(|p| self.intern(&p));
         self.node_mut(id).prefix = prefix;
-        self.node_mut(id).content = value;
+        self.node_mut(id).content = CompactString::from(value);
         self.node_mut(id).parent = Link::from(Some(elem));
         let last = self.node(elem).last_attr.get();
         if let Some(l) = last {
@@ -677,7 +684,7 @@ impl XmlDoc {
     pub fn add_attr(&mut self, elem: NodeId, name: &str, prefix: Option<&str>, value: &str) -> NodeId {
         let id = self.alloc(NodeKind::Attribute, name);
         self.set_prefix(id, prefix);
-        self.node_mut(id).content = value.to_string();
+        self.node_mut(id).content = CompactString::from(value);
         self.node_mut(id).parent = Link::from(Some(elem));
         let last = self.node(elem).last_attr.get();
         if let Some(l) = last {
@@ -711,7 +718,7 @@ impl XmlDoc {
         let mut a = self.first_attr(node);
         while let Some(id) = a {
             if self.node(id).prefix.is_none() && self.node(id).name == name {
-                self.node_mut(id).content = value.to_string();
+                self.node_mut(id).content = CompactString::from(value);
                 return id;
             }
             a = self.next_sibling(id);
@@ -725,7 +732,7 @@ impl XmlDoc {
         let mut a = self.first_attr(node);
         while let Some(id) = a {
             if self.node(id).prefix.is_none() && self.node(id).name == name {
-                return Some(self.node(id).content.clone());
+                return Some(self.node(id).content.to_string());
             }
             a = self.next_sibling(id);
         }
@@ -823,7 +830,7 @@ impl XmlDoc {
     pub fn xml_node_set_content(&mut self, id: NodeId, content: &str) {
         match self.kind(id) {
             NodeKind::Text | NodeKind::CData | NodeKind::Comment | NodeKind::Pi | NodeKind::Attribute => {
-                self.node_mut(id).content = content.to_string();
+                self.node_mut(id).content = CompactString::from(content);
             }
             _ => {
                 let mut c = self.first_child(id);
@@ -834,7 +841,7 @@ impl XmlDoc {
                 }
                 if !content.is_empty() {
                     let t = self.alloc(NodeKind::Text, "#text");
-                    self.node_mut(t).content = content.to_string();
+                    self.node_mut(t).content = CompactString::from(content);
                     self.xml_add_child(id, t);
                 }
             }

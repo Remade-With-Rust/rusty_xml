@@ -40,7 +40,7 @@ C historically got wrong:
 | | libxml2 (C) | **rusty_xml (Rust)** |
 |---|---|---|
 | C/C++ in the dependency tree | all of it | **none** — no `libxml2-sys`, no iconv, no zlib-sys |
-| `unsafe` in the published crates | extensive | **0** — `#![forbid(unsafe_code)]` |
+| `unsafe` in the published crates | extensive | **0** — `#![forbid(unsafe_code)]` (one pinned dependency, [`compact_str`](https://crates.io/crates/compact_str), has audited internal `unsafe`) |
 | License | MIT | **MIT OR Apache-2.0** |
 | Defaults on untrusted input | libxml2 README: *not recommended* | **`NONET \| NO_XXE`**, always |
 | CLI name | `xmllint` | **`rxmlint`** (does not shadow C) |
@@ -109,7 +109,10 @@ What we *do* gate hard, and what those numbers cost nothing:
   corpora x {plain, `--format`, `--c14n`, `--exc-c14n`}. The two exceptions are
   one deliberate divergence: we serialize the internal DTD subset verbatim
   where C re-serializes and reorders it.
-- **0 `unsafe`** in all twelve crates.
+- **0 `unsafe`** in all twelve crates. Node names and text use
+  `compact_str` (pinned to an exact version), which keeps short strings inline
+  and has internal `unsafe` covered by its fuzzing, Miri and Kani proofs. It
+  passed `cargo audit`, `cargo deny` and a checksum scan before adoption.
 - Nothing on the parse, save, format, XPath, stream, canonicalize, XInclude,
   DTD, XSD or Schematron path recurses per level of nesting, so document depth
   cannot exhaust the stack. RelaxNG matching backtracks, so it does recurse,

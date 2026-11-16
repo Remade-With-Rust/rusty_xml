@@ -700,7 +700,7 @@ fn decode_charrefs(s: &str) -> Result<String, &'static str> {
                 });
             }
             let radix = if hex { 16 } else { 10 };
-            let v = u32::from_str_radix(&digits, radix)
+            let v = crate::charref::value(digits.as_bytes(), radix)
                 .map_err(|_| "CharRef: value out of range")?;
             match char::from_u32(v).filter(|ch| crate::chvalid::xml_is_char(*ch as u32)) {
                 Some(ch) => out.push(ch),

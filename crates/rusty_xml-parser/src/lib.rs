@@ -14,6 +14,7 @@ mod parse;
 mod catalog;
 mod html_entities;
 mod html_tags;
+mod charref;
 mod html;
 mod html_encoding;
 mod xinclude;

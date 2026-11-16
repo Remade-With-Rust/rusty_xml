@@ -139,8 +139,10 @@ What we *do* gate hard, and what those numbers cost nothing:
     page. `HtmlParseSettings::max_depth` raises or removes it.
 - **Long-running calls can be cancelled.** Parsing, XPath, the validators,
   C14N and save have `*_interruptible` variants that take an `Interrupt`: an
-  `AtomicBool`, a closure or `NeverInterrupt`. A SAX handler can end a parse
-  with `stop_requested`.
+  `AtomicBool`, a closure or `NeverInterrupt`. DTD loading, XInclude and the
+  reader take one through `ParseSettings` (`*_with`), which also carries the
+  depth cap and amplification limit for both parsers. A SAX handler can end
+  a parse with `stop_requested`.
 - A seeded fuzzer (`--bin fuzz`) holds four invariants: no panics, chunked
   parsing equals whole parsing at every chunk size, the XML round trip is a
   fixed point, and the HTML round trip reaches one after a second pass, as

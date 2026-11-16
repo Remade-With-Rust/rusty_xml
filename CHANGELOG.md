@@ -4,6 +4,175 @@ All notable changes to this project are documented here. The format is loosely
 based on [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/).
 
+Releases after 0.8.0 are summarized below. The full notes for each crate,
+including 0.8.1 through 0.8.5, are in `crates/<crate>/CHANGELOG.md`.
+
+## [0.10.1]
+
+SAX steady state and the XML arena got cheaper, and undeclared invalid
+encodings are now refused.
+
+### Performance
+
+- **A SAX parse allocates nothing per end tag or prefixed attribute in
+  steady state.** 6% to 8% fewer instructions per element, and 20% to 29%
+  faster on Windows (#69).
+- **The XML arena is reserved from the markup** (3/2 nodes per `<` or `=`),
+  and a push parse shrinks its result the way a one-shot parse already did.
+  A 3.5 MB sparse document peaked at 5.8 MiB of commit instead of 32.8 MiB;
+  a 4.8 MB document pushed held 50.7 MiB instead of 71.2 MiB (#70).
+- **Instruction counts on the measured workloads are 0.1% to 0.4% lower**
+  (#69, #70).
+- **Copying XInclude attributes is linear** and keeps each attribute's
+  prefix. The same copy of 50,000 attributes took 3.7 s when it was
+  quadratic (#70).
+
+### Changed
+
+- **`xml_parse_dtd` honours a text declaration's encoding** and refuses
+  invalid UTF-8 when nothing declares another encoding. XInclude
+  `parse="text"` honours its `encoding` attribute the same way. A character
+  reference to a non-`Char` inside an entity is refused in attribute values
+  and in no-tree content, as it already was in content (#70).
+
+### Added
+
+- **One `ParseSettings`** carries the interrupt, the depth cap and the
+  amplification limit into DTD loading, XInclude and the reader. The old
+  `XmlParseSettings` and `HtmlParseSettings` names still compile (#70, #71).
+
+## [0.10.0]
+
+### Breaking
+
+- **`Node::name` and `Node::content` are `CompactString`**, re-exported as
+  `rusty_xml::CompactString`, instead of `String`. `XmlDoc::alloc` takes
+  `impl Into<CompactString>`. Reading is unchanged: the fields deref to
+  `&str` and compare with `str` and `String`, and `XmlDoc::name()` /
+  `content()` still return `&str`. Assign with `.into()`
+  (`node.content = s.into()`) and call `.to_string()` where an owned
+  `String` is needed. Short names and text stay inline. On 197 real pages,
+  parsing is about 20% faster, dropping a tree about 45% faster, and the
+  trees hold 18% less memory (#62).
+
+## [0.9.5]
+
+### Fixed
+
+- **RelaxNG keeps element order in a sequence**, reconsiders a choice that
+  took too much, and matches a run of siblings in linear time. 11 of
+  libxml2's test verdicts now agree with xmllint (#57).
+- **External DTDs load the way libxml2 loads them.** INCLUDE/IGNORE
+  sections are honoured, a parameter entity is expanded and charged once
+  (TEI P5 loads), and the first declaration binds (DocBook 4.5 loads)
+  (#58).
+
+### Performance
+
+- **DTD validation indexes attribute declarations and shares follow sets**,
+  and Schematron can be interrupted inside one test. 20,000 elements
+  against 8,000 declared element types validate in 17.6 ms instead of
+  1,675 ms, and 64 large repeated content models use 20 MiB instead of
+  2 GiB (#58).
+- **The HTML arena reserves 17/8 nodes per `<`.** Parse instructions fell
+  5.9% on dense fragments and 3.0% on real pages (#62).
+
+## [0.9.4]
+
+### Fixed
+
+- **RelaxNG remembers what a pattern did on an element once it has had to
+  backtrack**, so a failing document cannot retry the same subtree for
+  every alternative (#56).
+
+## [0.9.3]
+
+### Performance
+
+- **SAX with `XML_PARSE_NO_TREE` builds no element node**, so memory stays
+  at the input size. On the 138 MB 3MF model part (3M elements) measured
+  in [#53](https://github.com/Remade-With-Rust/rusty_xml/pull/53), peak
+  working set went from 434 MB to 136 MB and time from 2.04-2.10 s to
+  0.57-0.60 s. Names are read in place and attribute buffers are pooled,
+  which also makes ordinary tree parsing 15.5% cheaper in instructions on
+  the XML benchmark. Output is unchanged (#52).
+
+## [0.9.2]
+
+### Changed
+
+- **HTML parsing stops at libxml2's nesting cap.** An element deeper than
+  256 (2048 under `XML_PARSE_HUGE`) is dropped, the parse halts with the
+  tree built so far, and `XmlDoc::warnings` records
+  `XML_ERR_RESOURCE_LIMIT`. Output changes only for documents nested past
+  256. `html_read_memory_with` with `HtmlParseSettings::with_max_depth(-1)`
+  restores the uncapped parse (#48).
+- **The HTML node arena is sized from the markup**, not from the byte
+  length (#49).
+
+## [0.9.1]
+
+### Changed
+
+- **`xml_xpath_cmp_nodes` returns libxml2's signs:** 1 when the first node
+  precedes the second, -1 when it follows, 0 for the same node, and -2
+  when the nodes cannot be compared. 0.9.0 returned the opposite sign.
+  Callers that sort with it, or test `== 1` for "before", should check
+  their order (#38).
+
+### Added
+
+- **Long-running calls can be cancelled.** `Interrupt` (an `AtomicBool`, a
+  closure or `NeverInterrupt`) is polled by the `*_interruptible` parse,
+  XPath, validator, C14N and save entry points (#39).
+
+### Fixed
+
+- **Entity expansion is bounded as libxml2 bounds it.** Once expansion
+  passes 1,000,000 bytes, the parse fails when the total divided by the
+  amplification factor (default 5) exceeds the input consumed. A push
+  parse keeps a fatal error instead of starting a new document on the
+  leftover bytes, and a SAX handler can stop the parse (#32, #35, #39,
+  #40).
+- **DTD content models match in one pass**, and a non-deterministic model
+  is reported with libxml2's message (#36).
+- **XPath work is bounded** on deep and large documents: walks follow
+  links instead of recursing, node-sets sort through a document-order
+  index, and `XmlXPathContext::set_op_limit` caps one evaluation (#34,
+  #37, #38, #39, #40).
+- **XInclude, XSD, Schematron, C14N and node-content reads walk an explicit
+  stack.** RelaxNG keeps small recursive frames and stops past a bounded
+  pattern depth (#34, #39, #41).
+
+## [0.9.0]
+
+### Breaking
+
+- **`Node` is 88 bytes instead of 184, and its public field types
+  changed.** The seven links are `Link` (a 4-byte `NodeId` niche) instead
+  of `Option<NodeId>`. `prefix` and `ns_uri` are `Option<Atom>`, interned
+  per document. `ns_defs` lives in a per-document side table. The
+  accessors (`XmlDoc::parent`, `first_child`, `prefix`, `ns_uri`,
+  `ns_defs`, `push_ns_def`) keep their signatures (#23).
+
+### Fixed
+
+- **HTML decides its encoding as libxml2 does**, including
+  `<meta charset>` (#27).
+- **HTML output writes CR, TAB and LF raw**, as libxml2 does.
+
+### Performance
+
+- **The HTML arena is reserved from the input length and shrunk after the
+  parse**, and the XML arena shrinks too (#22).
+- **Duplicate-attribute sets are built only past 32 attributes** on a tag
+  (#21).
+
+## [0.8.1] through [0.8.5]
+
+Recorded in the per-crate changelogs (`crates/<crate>/CHANGELOG.md`) and
+not repeated here.
+
 ## [0.8.0]
 
 **2034 of 2036 on the W3C XML Conformance Test Suite, against pinned libxml2's

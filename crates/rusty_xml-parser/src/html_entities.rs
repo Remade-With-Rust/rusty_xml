@@ -2309,6 +2309,31 @@ enum Repl {
     Char(char),
 }
 
+/// The numeric branch of [`expand`] for `r` = `#...`: the replacement and the
+/// bytes it consumes after the `&`. Out of line, so the named-entity path,
+/// which every `&` takes, keeps the small frame it had (#71: inlining the
+/// shared scan into `expand` cost every call about 4 Ir).
+#[inline(never)]
+fn numeric(r: &[u8]) -> Option<(Repl, usize)> {
+    let (radix, mut j) = match r.get(1) {
+        Some(b'x' | b'X') => (16u32, 2usize),
+        _ => (10u32, 1usize),
+    };
+    // The digit scan shared with the XML side (#71). Past a u32 is past
+    // U+10FFFF, and both become U+FFFD, as C's clamped sum does; a long run
+    // of digits is never an overflow that keeps the text.
+    let (n, v) = crate::charref::scan(r.get(j..).unwrap_or(&[]), radix);
+    if n == 0 {
+        return None;
+    }
+    j += n;
+    let cp = v.unwrap_or(u32::MAX);
+    if r.get(j) == Some(&b';') {
+        j += 1;
+    }
+    Some((Repl::Char(code_point(cp)), 1 + j))
+}
+
 /// libxml2 `htmlFindEntityPrefix` plus the numeric branch of
 /// `htmlParseCharData` / `htmlParseData`, for the `&` at `at`. Returns the
 /// replacement and the number of input bytes it consumes, or `None` to keep the
@@ -2317,23 +2342,7 @@ enum Repl {
 fn expand(s: &str, at: usize, attr: bool) -> Option<(Repl, usize)> {
     let r = &s.as_bytes()[at + 1..];
     if r.first() == Some(&b'#') {
-        let (radix, mut j) = match r.get(1) {
-            Some(b'x' | b'X') => (16u32, 2usize),
-            _ => (10u32, 1usize),
-        };
-        let digit = |c: u8| (c as char).to_digit(radix);
-        r.get(j).copied().and_then(digit)?;
-        // Clamped like C, so a long run of digits is U+FFFD rather than an
-        // overflow -- the old decoder returned None and kept the text.
-        let mut cp = 0u32;
-        while let Some(d) = r.get(j).copied().and_then(digit) {
-            cp = (cp * radix + d).min(0x11_0000);
-            j += 1;
-        }
-        if r.get(j) == Some(&b';') {
-            j += 1;
-        }
-        return Some((Repl::Char(code_point(cp)), 1 + j));
+        return numeric(r);
     }
     if r.len() < 2 || !r[0].is_ascii_alphabetic() {
         return None;

@@ -1904,56 +1904,57 @@ impl<'a> Parser<'a> {
         Ok(size)
     }
 
-    fn parse_reference(&mut self) -> Result<String, XmlError> {
+    /// A character reference at `&#`: its character, checked against XML's
+    /// `Char` production. The digits are read in place and valued by the
+    /// shared [`crate::charref::value`] (#70, #71); content and attribute
+    /// values push the char directly, so a reference costs no allocation.
+    fn parse_char_ref(&mut self) -> Result<char, XmlError> {
         self.expect_byte(b'&', XML_ERR_ENTITYREF_NO_NAME, "& expected")?;
-        if self.peek_byte() == Some(b'#') {
+        self.bump_byte(); // '#'
+        // CharRef ::= '&#' [0-9]+ ';' | '&#x' [0-9a-fA-F]+ ';'
+        // The marker is lowercase only; `&#X58;` is not a character
+        // reference, and we were accepting it.
+        let hex = self.peek_byte() == Some(b'x');
+        if hex {
             self.bump_byte();
-            // CharRef ::= '&#' [0-9]+ ';' | '&#x' [0-9a-fA-F]+ ';'
-            // The marker is lowercase only; `&#X58;` is not a character
-            // reference, and we were accepting it.
-            let hex = self.peek_byte() == Some(b'x');
-            if hex {
-                self.bump_byte();
-            } else if self.peek_byte() == Some(b'X') {
-                return Err(self.err(
-                    XML_ERR_INVALID_DEC_CHARREF,
-                    "CharRef: invalid decimal value",
-                ));
-            }
-            let mut digits = String::new();
-            while let Some(b) = self.peek_byte() {
-                let ok = if hex {
-                    b.is_ascii_hexdigit()
-                } else {
-                    b.is_ascii_digit()
-                };
-                if !ok {
-                    break;
-                }
-                digits.push(b as char);
-                self.bump_byte();
-            }
-            if digits.is_empty() {
-                return Err(self.err(
-                    if hex { XML_ERR_INVALID_HEX_CHARREF } else { XML_ERR_INVALID_DEC_CHARREF },
-                    "Invalid character reference",
-                ));
-            }
-            self.expect_byte(b';', XML_ERR_ENTITYREF_SEMICOL_MISSING, "';' required")?;
-            let val = if hex {
-                u32::from_str_radix(&digits, 16).map_err(|_| {
-                    self.err(XML_ERR_INVALID_HEX_CHARREF, "Invalid hex charref")
-                })?
-            } else {
-                digits.parse::<u32>().map_err(|_| {
-                    self.err(XML_ERR_INVALID_DEC_CHARREF, "Invalid decimal charref")
-                })?
-            };
-            if !xml_is_char(val) {
-                return Err(self.err(XML_ERR_INVALID_CHARREF, "Invalid character reference"));
-            }
-            return Ok(char::from_u32(val).unwrap().to_string());
+        } else if self.peek_byte() == Some(b'X') {
+            return Err(self.err(
+                XML_ERR_INVALID_DEC_CHARREF,
+                "CharRef: invalid decimal value",
+            ));
         }
+        // One pass over the digits, which hold no newline: the shared scan
+        // (#71) values them and says where they end.
+        let input: &'a [u8] = self.input;
+        let (n, val) = crate::charref::scan(&input[self.pos..], if hex { 16 } else { 10 });
+        if n == 0 {
+            return Err(self.err(
+                if hex { XML_ERR_INVALID_HEX_CHARREF } else { XML_ERR_INVALID_DEC_CHARREF },
+                "Invalid character reference",
+            ));
+        }
+        self.pos += n;
+        self.col += n as u32;
+        self.expect_byte(b';', XML_ERR_ENTITYREF_SEMICOL_MISSING, "';' required")?;
+        let val = val.map_err(|_| {
+            if hex {
+                self.err(XML_ERR_INVALID_HEX_CHARREF, "Invalid hex charref")
+            } else {
+                self.err(XML_ERR_INVALID_DEC_CHARREF, "Invalid decimal charref")
+            }
+        })?;
+        // `xml_is_char` excludes the surrogates, so the value is a char.
+        match char::from_u32(val).filter(|_| xml_is_char(val)) {
+            Some(c) => Ok(c),
+            None => Err(self.err(XML_ERR_INVALID_CHARREF, "Invalid character reference")),
+        }
+    }
+
+    fn parse_reference(&mut self) -> Result<String, XmlError> {
+        if self.input.get(self.pos + 1) == Some(&b'#') {
+            return self.parse_char_ref().map(String::from);
+        }
+        self.expect_byte(b'&', XML_ERR_ENTITYREF_NO_NAME, "& expected")?;
         let name = self.parse_name()?;
         self.expect_byte(b';', XML_ERR_ENTITYREF_SEMICOL_MISSING, "';' required")?;
         match name.as_str() {
@@ -2126,13 +2127,23 @@ impl<'a> Parser<'a> {
                 i += 1;
                 continue;
             };
-            let inner = raw[i + 1..semi].to_string();
+            let inner: &str = &raw[i + 1..semi];
             if let Some(rest) = inner.strip_prefix('#') {
-                let (radix, digits) = match rest.strip_prefix(['x', 'X']) {
+                let (radix, digits) = match rest.strip_prefix('x') {
                     Some(h) => (16u32, h),
                     None => (10u32, rest),
                 };
-                match u32::from_str_radix(digits, radix).ok().and_then(char::from_u32) {
+                // The `Char` check the reference would get written in the
+                // document: without it `<!ENTITY e "&#38;#0;">` put U+0000
+                // into attribute values and no-tree content (#70). The
+                // shared value parse also refuses a sign or an uppercase
+                // `X`, which `from_str_radix` and the old marker test let
+                // through; libxml2 refuses both.
+                match crate::charref::value(digits.as_bytes(), radix)
+                    .ok()
+                    .filter(|&v| xml_is_char(v))
+                    .and_then(char::from_u32)
+                {
                     Some(c) => out.push(c),
                     None => {
                         return Err(self.err(
@@ -2144,7 +2155,7 @@ impl<'a> Parser<'a> {
                 i = semi + 1;
                 continue;
             }
-            let replacement: Option<String> = match inner.as_str() {
+            let replacement: Option<String> = match inner {
                 "lt" => Some("<".into()),
                 "gt" => Some(">".into()),
                 "amp" => Some("&".into()),
@@ -2230,6 +2241,13 @@ impl<'a> Parser<'a> {
                 return Err(self.err(XML_ERR_LT_IN_ATTRIBUTE, "'<' in attribute value"));
             }
             if self.peek_byte() == Some(b'&') {
+                // A character reference is never an entity: none of the
+                // entity checks below apply, and the char goes straight in.
+                if self.input.get(self.pos + 1) == Some(&b'#') {
+                    let c = self.parse_char_ref()?;
+                    val.push(c);
+                    continue;
+                }
                 let raw = self.reference_raw_value();
                 let repl = self.parse_reference()?;
                 // "No < in Attribute Values": the constraint is about the
@@ -3088,8 +3106,8 @@ impl<'a> Parser<'a> {
                 // contain markup and is not ours to inline here.
                 let is_charref = self.input.get(self.pos + 1) == Some(&b'#');
                 if is_charref {
-                    let repl = self.parse_reference()?;
-                    self.char_buf.push_str(&repl);
+                    let c = self.parse_char_ref()?;
+                    self.char_buf.push(c);
                     self.char_buf_from_reference = true;
                 } else {
                     self.flush_chars(Some(parent))?;

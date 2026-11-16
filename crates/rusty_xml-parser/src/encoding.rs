@@ -2,7 +2,21 @@
 //! 8-bit tables are byte-identical to v2.15.3 `codegen/charset.inc`.
 
 use crate::encoding_tables::*;
-use crate::error::{XmlError, XML_ERR_UNSUPPORTED_ENCODING};
+use crate::error::{XmlError, XML_ERR_INVALID_ENCODING, XML_ERR_UNSUPPORTED_ENCODING};
+use rusty_xml_tree::Interrupt;
+
+/// Input bytes converted between two polls of the caller's interrupt (#70):
+/// a large transcoded input can be stopped part way through.
+const CONVERT_BLOCK: usize = 64 * 1024;
+
+/// Fail with the "interrupted" error if the interrupt has fired.
+#[inline]
+fn poll(interrupt: Option<&dyn Interrupt>) -> Result<(), XmlError> {
+    if interrupt.is_some_and(|i| i.is_interrupted()) {
+        return Err(crate::error::interrupted_error());
+    }
+    Ok(())
+}
 
 /// libxml2 `xmlCharEncoding` discriminants.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -333,28 +347,42 @@ pub fn xml_detect_char_encoding(input: &[u8]) -> XmlCharEncoding {
     XmlCharEncoding::None
 }
 
-fn eightbit_to_utf8(input: &[u8], table: &[u16; 128]) -> Vec<u8> {
+fn eightbit_to_utf8(
+    input: &[u8],
+    table: &[u16; 128],
+    interrupt: Option<&dyn Interrupt>,
+) -> Result<Vec<u8>, XmlError> {
     let mut out = Vec::with_capacity(input.len() * 2);
-    for &b in input {
-        let cp = if b < 0x80 {
-            b as u32
-        } else {
-            table[(b - 0x80) as usize] as u32
-        };
-        if let Some(c) = char::from_u32(cp) {
-            let mut buf = [0u8; 4];
-            out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+    for block in input.chunks(CONVERT_BLOCK) {
+        poll(interrupt)?;
+        for &b in block {
+            let cp = if b < 0x80 {
+                b as u32
+            } else {
+                table[(b - 0x80) as usize] as u32
+            };
+            if let Some(c) = char::from_u32(cp) {
+                let mut buf = [0u8; 4];
+                out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            }
         }
     }
-    out
+    Ok(out)
 }
 
 /// Decode with an ASCII-compatible single-byte encoding: ISO-8859-1 or one of
 /// the 8-bit tables. `None` for every other encoding.
-pub(crate) fn single_byte_to_utf8(input: &[u8], enc: XmlCharEncoding) -> Option<Vec<u8>> {
+pub(crate) fn single_byte_to_utf8(
+    input: &[u8],
+    enc: XmlCharEncoding,
+    interrupt: Option<&dyn Interrupt>,
+) -> Result<Option<Vec<u8>>, XmlError> {
     match enc {
-        XmlCharEncoding::Iso8859_1 => Some(latin1_to_utf8(input)),
-        other => table_for(other).map(|t| eightbit_to_utf8(input, t)),
+        XmlCharEncoding::Iso8859_1 => latin1_to_utf8(input, interrupt).map(Some),
+        other => match table_for(other) {
+            Some(t) => eightbit_to_utf8(input, t, interrupt).map(Some),
+            None => Ok(None),
+        },
     }
 }
 
@@ -363,17 +391,24 @@ pub(crate) fn is_single_byte(enc: XmlCharEncoding) -> bool {
     enc == XmlCharEncoding::Iso8859_1 || table_for(enc).is_some()
 }
 
-fn latin1_to_utf8(input: &[u8]) -> Vec<u8> {
+fn latin1_to_utf8(input: &[u8], interrupt: Option<&dyn Interrupt>) -> Result<Vec<u8>, XmlError> {
     let mut out = Vec::with_capacity(input.len() * 2);
-    for &b in input {
-        let c = b as char;
-        let mut buf = [0u8; 4];
-        out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+    for block in input.chunks(CONVERT_BLOCK) {
+        poll(interrupt)?;
+        for &b in block {
+            let c = b as char;
+            let mut buf = [0u8; 4];
+            out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+        }
     }
-    out
+    Ok(out)
 }
 
-fn utf16_to_utf8(input: &[u8], be: bool) -> Result<Vec<u8>, XmlError> {
+fn utf16_to_utf8(
+    input: &[u8],
+    be: bool,
+    interrupt: Option<&dyn Interrupt>,
+) -> Result<Vec<u8>, XmlError> {
     let mut i = 0;
     if input.len() >= 2 {
         let bom = if be {
@@ -387,6 +422,9 @@ fn utf16_to_utf8(input: &[u8], be: bool) -> Result<Vec<u8>, XmlError> {
     }
     let mut units = Vec::new();
     while i + 1 < input.len() {
+        if i % CONVERT_BLOCK < 2 {
+            poll(interrupt)?;
+        }
         let u = if be {
             u16::from_be_bytes([input[i], input[i + 1]])
         } else {
@@ -401,7 +439,11 @@ fn utf16_to_utf8(input: &[u8], be: bool) -> Result<Vec<u8>, XmlError> {
     Ok(s.into_bytes())
 }
 
-fn ucs4_to_utf8(input: &[u8], order: [usize; 4]) -> Result<Vec<u8>, XmlError> {
+fn ucs4_to_utf8(
+    input: &[u8],
+    order: [usize; 4],
+    interrupt: Option<&dyn Interrupt>,
+) -> Result<Vec<u8>, XmlError> {
     let mut i = 0;
     if input.len() >= 4 {
         let w = u32::from_be_bytes([input[0], input[1], input[2], input[3]]);
@@ -411,6 +453,9 @@ fn ucs4_to_utf8(input: &[u8], order: [usize; 4]) -> Result<Vec<u8>, XmlError> {
     }
     let mut out = String::new();
     while i + 3 < input.len() {
+        if i % CONVERT_BLOCK < 4 {
+            poll(interrupt)?;
+        }
         let b = [input[i], input[i + 1], input[i + 2], input[i + 3]];
         let cp = u32::from_be_bytes([b[order[0]], b[order[1]], b[order[2]], b[order[3]]]);
         match char::from_u32(cp) {
@@ -540,6 +585,21 @@ pub(crate) fn xml_convert_to_utf8_cow<'a>(
     input: &'a [u8],
     hint: Option<&str>,
 ) -> Result<(std::borrow::Cow<'a, [u8]>, Option<&'static str>), XmlError> {
+    decode_input(input, hint, true, None)
+}
+
+/// Bytes to UTF-8: the one entry every byte input goes through, documents,
+/// both parsers' declared encodings, external DTDs and XInclude text (#71).
+/// A BOM decides, then `hint` (the caller's `encoding` argument, or a text
+/// declaration's), then, when `sniff_decl`, an `encoding` pseudo-attribute
+/// in the first kilobyte. UTF-8 input is borrowed, not checked; conversion
+/// polls `interrupt` every [`CONVERT_BLOCK`] bytes.
+pub(crate) fn decode_input<'a>(
+    input: &'a [u8],
+    hint: Option<&str>,
+    sniff_decl: bool,
+    interrupt: Option<&dyn Interrupt>,
+) -> Result<(std::borrow::Cow<'a, [u8]>, Option<&'static str>), XmlError> {
     if input.len() >= 2 && input[0] == 0x1f && input[1] == 0x8b {
         return Err(XmlError::new(
             XML_ERR_UNSUPPORTED_ENCODING,
@@ -551,7 +611,7 @@ pub(crate) fn xml_convert_to_utf8_cow<'a>(
     let mut enc = hint
         .and_then(|h| xml_parse_char_encoding(h).into_option())
         .unwrap_or_else(|| xml_detect_char_encoding(input));
-    if enc == XmlCharEncoding::None || enc == XmlCharEncoding::Utf8 {
+    if sniff_decl && (enc == XmlCharEncoding::None || enc == XmlCharEncoding::Utf8) {
         if let Some(d) = sniff_encoding_decl(input) {
             if d != XmlCharEncoding::Utf8 && d != XmlCharEncoding::Ascii {
                 enc = d;
@@ -565,26 +625,29 @@ pub(crate) fn xml_convert_to_utf8_cow<'a>(
         return Ok((std::borrow::Cow::Borrowed(body), xml_get_char_encoding_name(enc)));
     }
     let converted = match enc {
-        XmlCharEncoding::Iso8859_1 => latin1_to_utf8(input),
-        XmlCharEncoding::Utf16Le | XmlCharEncoding::Utf16 => utf16_to_utf8(input, false)?,
-        XmlCharEncoding::Utf16Be => utf16_to_utf8(input, true)?,
-        XmlCharEncoding::Ucs4Be => ucs4_to_utf8(input, [0, 1, 2, 3])?,
-        XmlCharEncoding::Ucs4Le => ucs4_to_utf8(input, [3, 2, 1, 0])?,
-        XmlCharEncoding::Ucs4_2143 => ucs4_to_utf8(input, [1, 0, 3, 2])?,
-        XmlCharEncoding::Ucs4_3412 => ucs4_to_utf8(input, [2, 3, 0, 1])?,
-        XmlCharEncoding::Ucs2 => utf16_to_utf8(input, true)?,
+        XmlCharEncoding::Iso8859_1 => latin1_to_utf8(input, interrupt)?,
+        XmlCharEncoding::Utf16Le | XmlCharEncoding::Utf16 => utf16_to_utf8(input, false, interrupt)?,
+        XmlCharEncoding::Utf16Be => utf16_to_utf8(input, true, interrupt)?,
+        XmlCharEncoding::Ucs4Be => ucs4_to_utf8(input, [0, 1, 2, 3], interrupt)?,
+        XmlCharEncoding::Ucs4Le => ucs4_to_utf8(input, [3, 2, 1, 0], interrupt)?,
+        XmlCharEncoding::Ucs4_2143 => ucs4_to_utf8(input, [1, 0, 3, 2], interrupt)?,
+        XmlCharEncoding::Ucs4_3412 => ucs4_to_utf8(input, [2, 3, 0, 1], interrupt)?,
+        XmlCharEncoding::Ucs2 => utf16_to_utf8(input, true, interrupt)?,
         XmlCharEncoding::Ebcdic => {
             let mut out = Vec::new();
-            for &b in input {
-                let c = char::from_u32(CP037[b as usize] as u32).unwrap_or('\u{fffd}');
-                let mut buf = [0u8; 4];
-                out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            for block in input.chunks(CONVERT_BLOCK) {
+                poll(interrupt)?;
+                for &b in block {
+                    let c = char::from_u32(CP037[b as usize] as u32).unwrap_or('\u{fffd}');
+                    let mut buf = [0u8; 4];
+                    out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+                }
             }
             out
         }
         other => {
             if let Some(t) = table_for(other) {
-                eightbit_to_utf8(input, t)
+                eightbit_to_utf8(input, t, interrupt)?
             } else {
                 return Err(XmlError::new(
                     XML_ERR_UNSUPPORTED_ENCODING,
@@ -602,6 +665,57 @@ pub(crate) fn xml_convert_to_utf8_cow<'a>(
         std::borrow::Cow::Owned(converted),
         xml_get_char_encoding_name(enc),
     ))
+}
+
+/// [`decode_input`] for text that must end up valid: an external DTD or
+/// XInclude text. No `encoding` sniffing (a text declaration is read by its
+/// caller and passed as `hint`). Bytes that are not UTF-8 when nothing
+/// declared another encoding are refused, as libxml2 refuses them ("Invalid
+/// bytes in character encoding", `XML_ERR_INVALID_ENCODING`), instead of
+/// becoming U+FFFD (#70).
+pub(crate) fn decode_text<'a>(
+    input: &'a [u8],
+    hint: Option<&str>,
+    interrupt: Option<&dyn Interrupt>,
+) -> Result<std::borrow::Cow<'a, str>, XmlError> {
+    if let Some(h) = hint {
+        if xml_parse_char_encoding(h).into_option().is_none() {
+            return Err(XmlError::new(
+                XML_ERR_UNSUPPORTED_ENCODING,
+                format!("Unsupported encoding: {h}"),
+                0,
+                0,
+            ));
+        }
+    }
+    let (bytes, _) = decode_input(input, hint, false, interrupt)?;
+    match bytes {
+        std::borrow::Cow::Borrowed(b) => match std::str::from_utf8(b) {
+            Ok(s) => Ok(std::borrow::Cow::Borrowed(s)),
+            Err(e) => Err(invalid_bytes(b, e.valid_up_to())),
+        },
+        std::borrow::Cow::Owned(v) => match String::from_utf8(v) {
+            Ok(s) => Ok(std::borrow::Cow::Owned(s)),
+            Err(e) => {
+                let at = e.utf8_error().valid_up_to();
+                Err(invalid_bytes(e.as_bytes(), at))
+            }
+        },
+    }
+}
+
+fn invalid_bytes(b: &[u8], at: usize) -> XmlError {
+    let line = 1 + b[..at].iter().filter(|&&c| c == b'\n').count();
+    let shown: Vec<String> = b[at..b.len().min(at + 4)]
+        .iter()
+        .map(|c| format!("0x{c:02X}"))
+        .collect();
+    XmlError::new(
+        XML_ERR_INVALID_ENCODING,
+        format!("Invalid bytes in character encoding, Bytes: {}", shown.join(" ")),
+        u32::try_from(line).unwrap_or(u32::MAX),
+        0,
+    )
 }
 
 #[cfg(test)]

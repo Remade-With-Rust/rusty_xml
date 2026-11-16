@@ -41,10 +41,14 @@ pub const XML_ERR_TAG_NAME_MISMATCH: i32 = 76;
 pub const XML_ERR_TAG_NOT_FINISHED: i32 = 77;
 pub const XML_ERR_ENCODING_NAME: i32 = 79;
 pub const XML_ERR_HYPHEN_IN_COMMENT: i32 = 80;
+/// Bytes not valid in the encoding in force (#70).
+pub const XML_ERR_INVALID_ENCODING: i32 = 81;
 /// A conditional section keyword is not followed by `[`.
 pub const XML_ERR_CONDSEC_INVALID: i32 = 83;
 pub const XML_ERR_EXTRA_CONTENT: i32 = 86;
 pub const XML_ERR_ENTITY_LOOP: i32 = 89;
+/// A text declaration without its required `encoding` (#70).
+pub const XML_ERR_MISSING_ENCODING: i32 = 101;
 /// A conditional section keyword is neither INCLUDE nor IGNORE.
 pub const XML_ERR_CONDSEC_INVALID_KEYWORD: i32 = 95;
 /// A SAX handler, [`crate::xml_stop_parser`] or an [`rusty_xml_tree::Interrupt`] stopped the parse.
@@ -87,4 +91,16 @@ impl XmlError {
             col,
         }
     }
+}
+
+/// The error every interruptible entry reports once its interrupt fired:
+/// libxml2's `XML_ERR_USER_STOP` (#71: one constructor, not one per entry).
+pub(crate) fn interrupted_error() -> XmlError {
+    XmlError::new(XML_ERR_USER_STOP, "Parser interrupted", 0, 0)
+}
+
+/// Record a fatal error on a tree a parse hands back anyway (recover mode,
+/// the HTML depth cap): one line, shared by both parsers (#71).
+pub(crate) fn record_fatal(doc: &mut rusty_xml_tree::XmlDoc, e: &XmlError) {
+    doc.warnings.push(e.to_string());
 }

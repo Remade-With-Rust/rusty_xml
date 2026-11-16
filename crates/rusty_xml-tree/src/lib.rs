@@ -9,6 +9,9 @@ use std::num::NonZeroU32;
 mod interrupt;
 pub use interrupt::{Interrupt, InterruptPoll, Interrupted, NeverInterrupt, INTERRUPT_POLL_EVERY};
 
+mod settings;
+pub use settings::{ParseSettings, PARSE_MAX_AMPLIFICATION_DEFAULT};
+
 /// The string type of [`Node::name`] and [`Node::content`]: up to 24 bytes
 /// inline, on the heap beyond, so the many short names and text runs of a
 /// tree cost no allocation of their own (#62).
@@ -222,6 +225,17 @@ impl Node {
     }
 }
 
+/// What an [`XmlDoc::walk`] visitor asks for next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Walk {
+    /// Visit this node's children.
+    Descend,
+    /// Pass over this node's children.
+    Skip,
+    /// End the walk.
+    Stop,
+}
+
 /// libxml2 `xmlDoc`.
 #[derive(Clone, Debug)]
 pub struct XmlDoc {
@@ -389,8 +403,8 @@ impl XmlDoc {
         // Measured node density is ~1 per 10-12 input bytes. The previous cap
         // of 65_536 was below a 700 KB document's node count, so the arena
         // still doubled-and-copied its way up -- about 22 MB of memcpy on a
-        // 627 KB file. Shrinking Node itself would need an API break for a
-        // sub-1% effect; reserving correctly removes the same traffic for free.
+        // 627 KB file. Node itself was shrunk to 88 bytes in #29 (a breaking
+        // change); reserving correctly removes the rest of that traffic.
         // Cap by memory, not node count: 1<<20 nodes is ~190 MB of arena, which
         // a large document would commit up front before parsing a byte.
         const MAX_ARENA_BYTES: usize = 32 << 20;
@@ -798,27 +812,61 @@ impl XmlDoc {
     /// of a deep document (the parser allows 5,000 levels, a million under
     /// `XML_PARSE_HUGE`) overflowed the stack, which aborts the process.
     fn collect_text(&self, id: NodeId, out: &mut String) {
-        let mut c = self.first_child(id);
-        while let Some(ch) = c {
-            match self.kind(ch) {
-                NodeKind::Text | NodeKind::CData => out.push_str(self.content(ch)),
-                NodeKind::Element => {
-                    if let Some(first) = self.first_child(ch) {
+        self.walk(
+            id,
+            |n| match self.kind(n) {
+                NodeKind::Text | NodeKind::CData => {
+                    out.push_str(self.content(n));
+                    Walk::Skip
+                }
+                NodeKind::Element => Walk::Descend,
+                _ => Walk::Skip,
+            },
+            |_| {},
+        );
+    }
+
+    /// Visit every node below `root` (not `root` itself) in document order,
+    /// through the child, sibling and parent links, never by recursion, so a
+    /// document of any depth costs no stack (#71: one walk where the tree,
+    /// XInclude and others each kept a copy of this loop).
+    ///
+    /// `enter` sees a node on the way down and says whether to visit its
+    /// children ([`Walk::Descend`]), pass over them ([`Walk::Skip`]) or end the
+    /// walk ([`Walk::Stop`]). `leave` sees a node once its children, if
+    /// visited, are done.
+    pub fn walk(
+        &self,
+        root: NodeId,
+        mut enter: impl FnMut(NodeId) -> Walk,
+        mut leave: impl FnMut(NodeId),
+    ) {
+        let mut c = self.first_child(root);
+        while let Some(n) = c {
+            match enter(n) {
+                Walk::Stop => return,
+                Walk::Descend => {
+                    if let Some(first) = self.first_child(n) {
                         c = Some(first);
                         continue;
                     }
                 }
-                _ => {}
+                Walk::Skip => {}
             }
+            leave(n);
             // The next node in document order: a sibling, or the sibling of
-            // the nearest ancestor below `id` that has one.
-            let mut n = ch;
+            // the nearest ancestor below `root` that has one, leaving each
+            // ancestor on the way up.
+            let mut m = n;
             c = loop {
-                if let Some(s) = self.next_sibling(n) {
+                if let Some(s) = self.next_sibling(m) {
                     break Some(s);
                 }
-                match self.parent(n) {
-                    Some(p) if p != id => n = p,
+                match self.parent(m) {
+                    Some(p) if p != root => {
+                        leave(p);
+                        m = p;
+                    }
                     _ => break None,
                 }
             };

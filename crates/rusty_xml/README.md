@@ -210,25 +210,26 @@ or in `Cargo.toml`:
 
 ```toml
 [dependencies]
-rusty_xml = "0.8"
+rusty_xml = "0.10"
 ```
 
 MSRV is **1.85**. The library never sets `#[global_allocator]`.
 
-The published crates (all `0.1`, MIT OR Apache-2.0):
+The published crates (MIT OR Apache-2.0). Each version is the workspace
+`version` that crate's `Cargo.toml` inherits (`version.workspace = true`):
 
-| Crate | Role | Docs |
-|---|---|---|
-| [`rusty_xml`](https://crates.io/crates/rusty_xml) | **the facade — depend on this** | [docs.rs](https://docs.rs/rusty_xml) |
-| [`rusty_xml-parser`](https://crates.io/crates/rusty_xml-parser) | well-formed parse, encodings, push, catalogs, HTML | [docs.rs](https://docs.rs/rusty_xml-parser) |
-| [`rusty_xml-tree`](https://crates.io/crates/rusty_xml-tree) | arena DOM | [docs.rs](https://docs.rs/rusty_xml-tree) |
-| [`rusty_xml-sax`](https://crates.io/crates/rusty_xml-sax) | SAX2 recorder + xmllint-debug dump | [docs.rs](https://docs.rs/rusty_xml-sax) |
-| [`rusty_xml-reader`](https://crates.io/crates/rusty_xml-reader) | `xmlTextReader` | [docs.rs](https://docs.rs/rusty_xml-reader) |
-| [`rusty_xml-writer`](https://crates.io/crates/rusty_xml-writer) | `xmlsave` + `xmlTextWriter` | [docs.rs](https://docs.rs/rusty_xml-writer) |
-| [`rusty_xml-xpath`](https://crates.io/crates/rusty_xml-xpath) | XPath 1.0 | [docs.rs](https://docs.rs/rusty_xml-xpath) |
-| [`rusty_xml-valid`](https://crates.io/crates/rusty_xml-valid) | DTD, C14N, RelaxNG, XSD, Schematron | [docs.rs](https://docs.rs/rusty_xml-valid) |
-| [`rusty_xml-cli`](https://crates.io/crates/rusty_xml-cli) | `rxmlint` binary | — |
-| [`rusty_xml-alloc`](https://crates.io/crates/rusty_xml-alloc) | allocator seam **for binaries only** — the library never uses it | — |
+| Crate | Version | Role | Docs |
+|---|---|---|---|
+| [`rusty_xml`](https://crates.io/crates/rusty_xml) | 0.10.1 | **the facade — depend on this** | [docs.rs](https://docs.rs/rusty_xml) |
+| [`rusty_xml-parser`](https://crates.io/crates/rusty_xml-parser) | 0.10.1 | well-formed parse, encodings, push, catalogs, HTML | [docs.rs](https://docs.rs/rusty_xml-parser) |
+| [`rusty_xml-tree`](https://crates.io/crates/rusty_xml-tree) | 0.10.1 | arena DOM | [docs.rs](https://docs.rs/rusty_xml-tree) |
+| [`rusty_xml-sax`](https://crates.io/crates/rusty_xml-sax) | 0.10.1 | SAX2 recorder + xmllint-debug dump | [docs.rs](https://docs.rs/rusty_xml-sax) |
+| [`rusty_xml-reader`](https://crates.io/crates/rusty_xml-reader) | 0.10.1 | `xmlTextReader` | [docs.rs](https://docs.rs/rusty_xml-reader) |
+| [`rusty_xml-writer`](https://crates.io/crates/rusty_xml-writer) | 0.10.1 | `xmlsave` + `xmlTextWriter` | [docs.rs](https://docs.rs/rusty_xml-writer) |
+| [`rusty_xml-xpath`](https://crates.io/crates/rusty_xml-xpath) | 0.10.1 | XPath 1.0 | [docs.rs](https://docs.rs/rusty_xml-xpath) |
+| [`rusty_xml-valid`](https://crates.io/crates/rusty_xml-valid) | 0.10.1 | DTD, C14N, RelaxNG, XSD, Schematron | [docs.rs](https://docs.rs/rusty_xml-valid) |
+| [`rusty_xml-cli`](https://crates.io/crates/rusty_xml-cli) | 0.10.1 | `rxmlint` binary | — |
+| [`rusty_xml-alloc`](https://crates.io/crates/rusty_xml-alloc) | 0.10.1 | allocator seam **for binaries only** — the library never uses it | — |
 
 Not published: `rusty_xml-bench` (oracle harness), `rusty_xml-c-abi` (M8 stub).
 

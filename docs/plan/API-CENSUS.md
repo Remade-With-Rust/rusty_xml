@@ -1122,7 +1122,7 @@ Rust names are the mechanical snake_case of the C `XMLPUBFUN` identifier.
 | `parser.h` | `xmlParseMemory` | `xml_parse_memory` (not in facade) |
 | `parser.h` | `xmlSubstituteEntitiesDefault` | `xml_substitute_entities_default` (not in facade) |
 | `parser.h` | `xmlKeepBlanksDefault` | `xml_keep_blanks_default` (not in facade) |
-| `parser.h` | `xmlStopParser` | `xml_stop_parser` (not in facade) |
+| `parser.h` | `xmlStopParser` | `xml_stop_parser` (0.9.1; the facade re-exports the parser crate) |
 | `parser.h` | `xmlPedanticParserDefault` | `xml_pedantic_parser_default` (not in facade) |
 | `parser.h` | `xmlLineNumbersDefault` | `xml_line_numbers_default` (not in facade) |
 | `parser.h` | `xmlThrDefSubstituteEntitiesDefaultValue` | `xml_thr_def_substitute_entities_default_value` (not in facade) |

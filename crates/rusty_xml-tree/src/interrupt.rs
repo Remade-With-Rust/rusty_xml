@@ -132,6 +132,11 @@ impl<'a> InterruptPoll<'a> {
         Ok(())
     }
 
+    /// The interrupt this polls, to hand to a nested call.
+    pub fn interrupt(&self) -> &'a dyn Interrupt {
+        self.interrupt
+    }
+
     /// Polls the interrupt now, whatever the count.
     #[inline]
     pub fn check(&self) -> Result<(), Interrupted> {

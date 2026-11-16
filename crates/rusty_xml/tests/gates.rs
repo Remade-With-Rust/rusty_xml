@@ -1407,9 +1407,11 @@ fn deep_tree_never_aborts_on_any_path() {
     assert!(!rusty_xml::xml_c14n_doc_dump_memory(&doc, true, true).unwrap().is_empty());
     drop(doc); // recursive Drop would land here
 
-    // HTML has no depth limit of its own; saving it must still be safe.
+    // HTML stops at libxml2's 256 levels by default (#48); with the cap
+    // lifted, a 50,000-deep tree must still save safely.
     let h = format!("<html><body>{}x{}</body></html>", "<div>".repeat(50_000), "</div>".repeat(50_000));
-    let hdoc = rusty_xml::html_read_memory(h.as_bytes(), None, None, 0).expect("parses");
+    let uncapped = rusty_xml::HtmlParseSettings::new().with_max_depth(-1);
+    let hdoc = rusty_xml::html_read_memory_with(h.as_bytes(), None, None, 0, &uncapped).expect("parses");
     assert!(!xml_save_doc(&hdoc, 0).is_empty());
 }
 

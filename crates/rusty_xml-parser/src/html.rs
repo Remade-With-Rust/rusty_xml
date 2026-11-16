@@ -19,10 +19,10 @@
 //! `docs/html-ir-campaign.md`; the losing arms are recorded beside each choice.
 
 use std::borrow::Cow;
-use std::collections::HashSet;
 
-use rusty_xml_tree::{Interrupt, NodeId, NodeKind, XmlDoc};
+use rusty_xml_tree::{Interrupt, InterruptPoll, NodeId, NodeKind, XmlDoc};
 
+use crate::attr_dup::{WideSeen, ATTR_SCAN_MAX};
 use crate::error::XmlError;
 use crate::html_entities::{decode_html, Nul};
 use crate::html_tags::{self as tags, Tag, BODY, HEAD, HTML, P, UNKNOWN};
@@ -92,12 +92,20 @@ impl<'a> HtmlParseSettings<'a> {
 
     /// The cap in stack entries for these options.
     fn depth_cap(&self, options: i32) -> usize {
-        match self.max_depth {
-            0 if (options & crate::parse::XML_PARSE_HUGE) != 0 => HTML_MAX_DEPTH_HUGE as usize,
-            0 => HTML_MAX_DEPTH_DEFAULT as usize,
-            d if d < 0 => usize::MAX,
-            d => d as usize,
-        }
+        rusty_xml_tree::ParseSettings::from(*self).depth_cap(
+            HTML_MAX_DEPTH_DEFAULT as usize,
+            HTML_MAX_DEPTH_HUGE as usize,
+            (options & crate::parse::XML_PARSE_HUGE) != 0,
+        )
+    }
+}
+
+/// The HTML entries run on the one settings type too (#71).
+impl<'a> From<HtmlParseSettings<'a>> for rusty_xml_tree::ParseSettings<'a> {
+    fn from(s: HtmlParseSettings<'a>) -> Self {
+        let mut p = rusty_xml_tree::ParseSettings::new().with_max_depth(s.max_depth);
+        p.interrupt = s.interrupt;
+        p
     }
 }
 
@@ -112,9 +120,6 @@ const DATA_SCRIPT_ESC2: u8 = 6;
 
 /// libxml2 truncates names to `HTML_PARSER_BUFFER_SIZE` bytes.
 const MAX_NAME: usize = 100;
-/// A start tag with more attributes than this deduplicates them through a
-/// hash set. The pairwise scan is cheaper on ordinary tags, but quadratic.
-const ATTR_SCAN_MAX: usize = 32;
 
 /// A name holding an uppercase letter or a NUL: ASCII lowercased, NUL to
 /// U+FFFD. Out of line on purpose. Inlined, it made every call of
@@ -220,7 +225,6 @@ fn html_read(
 ) -> Result<XmlDoc, XmlError> {
     let _ = url;
     let interrupt = settings.interrupt;
-    // Decoding is one linear pass and is not polled; check either side.
     if interrupt.is_some_and(|i| i.is_interrupted()) {
         return Err(interrupted());
     }
@@ -233,9 +237,10 @@ fn html_read(
     // Borrowed and validated once. Copying the input and re-validating it
     // lossily cost +6.5% / +21.9% parse Ir (fragments / pages).
     let text = if undeclared {
-        crate::html_encoding::decode(buffer)
+        crate::html_encoding::decode(buffer, interrupt)?
     } else {
-        let (bytes, _) = crate::encoding::xml_convert_to_utf8_cow(buffer, encoding)?;
+        // The shared byte entry (#71), polling a transcoding pass in blocks.
+        let (bytes, _) = crate::encoding::decode_input(buffer, encoding, true, interrupt)?;
         utf8_cow(bytes)
     };
     let (has_cr, has_nul, lt) = scan_cr_nul(text.as_bytes());
@@ -248,7 +253,7 @@ fn html_read(
 }
 
 fn interrupted() -> XmlError {
-    XmlError::new(crate::error::XML_ERR_USER_STOP, "Parser interrupted", 0, 0)
+    crate::error::interrupted_error()
 }
 
 /// Does the input contain a CR, a NUL, and how many `<`? Fixed 64-byte blocks
@@ -365,7 +370,7 @@ fn html_parse_str(
     // 17/8 rather than 2 (#62): at 2, 428 of 1,017 real pages just overflowed
     // the reserve and doubled the arena, copying it; at 2.125 274 do, and a
     // page that just overflowed peaks at 2.4 MiB of commit instead of 5.7.
-    let mut doc = XmlDoc::with_node_capacity(Some("1.0"), (lt * 17 / 8).min(text.len() / 2));
+    let mut doc = XmlDoc::with_node_capacity(Some("1.0"), crate::arena::reserve(text.len(), lt, 17, 8));
     doc.encoding = Some("HTML".into());
     // Mark it as an HTML document so the serializer can tell: C emits the
     // doctype where XML would emit a declaration.
@@ -382,7 +387,7 @@ fn html_parse_str(
         noimplied: (options & HTML_PARSE_NOIMPLIED) != 0,
         attrs: Vec::new(),
         has_nul,
-        interrupt,
+        interrupt: interrupt.map(InterruptPoll::new),
         limit: if interrupt.is_some() { POLL_BYTES.min(text.len()) } else { text.len() },
         stopped: false,
         deep: None,
@@ -394,7 +399,7 @@ fn html_parse_str(
     if p.stopped {
         return Err(interrupted());
     }
-    p.doc.shrink_nodes();
+    crate::arena::finish(&mut p.doc);
     Ok(p.doc)
 }
 
@@ -506,7 +511,10 @@ struct Parser<'a> {
     attrs: Vec<(Cow<'a, str>, Option<Cow<'a, str>>)>,
     /// The input has a NUL somewhere; without one, no run needs scanning.
     has_nul: bool,
-    interrupt: Option<&'a dyn Interrupt>,
+    /// Polled through the same [`InterruptPoll`] as the XML parser (#71), but
+    /// on a cadence of input bytes, not ticks: a tick counter on every token
+    /// cost +3% parse Ir (#47), where a position bound costs nothing.
+    interrupt: Option<InterruptPoll<'a>>,
     /// Where the content loop stops to poll the interrupt: the end of the
     /// input without one, so the plain parse pays nothing per token and the
     /// loop is compiled once for both paths.
@@ -571,8 +579,8 @@ impl<'a> Parser<'a> {
         if self.halted {
             return true;
         }
-        if let Some(i) = self.interrupt {
-            if i.is_interrupted() {
+        if let Some(p) = &self.interrupt {
+            if p.check().is_err() {
                 self.stopped = true;
                 return true;
             }
@@ -736,7 +744,7 @@ impl<'a> Parser<'a> {
             u32::try_from(line).unwrap_or(u32::MAX),
             u32::try_from(col).unwrap_or(u32::MAX),
         );
-        self.doc.warnings.push(e.to_string());
+        crate::error::record_fatal(&mut self.doc, &e);
     }
 
     #[inline]
@@ -1099,13 +1107,14 @@ impl<'a> Parser<'a> {
     #[inline(never)]
     fn add_attributes_wide(&mut self, el: NodeId) {
         let attrs = std::mem::take(&mut self.attrs);
-        let mut seen: HashSet<&str> = HashSet::with_capacity(attrs.len());
-        for (n, v) in &attrs {
-            if seen.insert(n) {
+        let mut seen = WideSeen::with_capacity(attrs.len());
+        for (i, (n, v)) in attrs.iter().enumerate() {
+            // A hash hit is only a maybe; the scan confirms it, and runs for
+            // real repeats and the rare collision only.
+            if seen.insert(n.as_ref()) || !attrs[..i].iter().any(|(m, _)| m == n) {
                 self.add_attribute(el, n, v);
             }
         }
-        drop(seen);
         self.attrs = attrs;
         self.attrs.clear();
     }

@@ -95,7 +95,8 @@ encodings are now refused.
   working set went from 434 MB to 136 MB and time from 2.04-2.10 s to
   0.57-0.60 s. Names are read in place and attribute buffers are pooled,
   which also makes ordinary tree parsing 15.5% cheaper in instructions on
-  the XML benchmark. Output is unchanged (#52).
+  the XML benchmark. Output is unchanged
+  ([#53](https://github.com/Remade-With-Rust/rusty_xml/pull/53)).
 
 ## [0.9.2]
 

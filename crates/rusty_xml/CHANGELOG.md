@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-v0.10.0...rusty_xml-v0.10.1) - 2026-11-16
+
+### Performance
+
+- SAX allocates nothing per end tag or prefixed attribute in steady state: 6% to 8% fewer instructions per element, 20% to 29% faster on Windows; the XML arena is sized from the markup and push results are shrunk; every workload measured is 0.1% to 0.4% cheaper in instructions ([#69](https://github.com/Remade-With-Rust/rusty_xml/issues/69), [#70](https://github.com/Remade-With-Rust/rusty_xml/issues/70))
+
+### Changed
+
+- `xml_parse_dtd` honours text declarations and refuses undeclared invalid UTF-8; XInclude text honours `encoding`; character references to non-`Char` values inside entities are refused everywhere ([#70](https://github.com/Remade-With-Rust/rusty_xml/issues/70))
+
+### Added
+
+- one settings type, interruptible and encoding-aware DTD/XInclude/reader entries (#70, #71)
+
+### Other
+
+- *(readme)* DTD, XInclude and reader cancellation through ParseSettings (#70, #71)
+- Merge branch 'b/70-entries' into release/0.10.1
+
 ## [0.10.0](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-v0.9.5...rusty_xml-v0.10.0) - 2026-11-15
 
 ### Changed

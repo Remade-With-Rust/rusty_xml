@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-parser-v0.10.0...rusty_xml-parser-v0.10.1) - 2026-11-16
+
+### Performance
+
+- *(parser)* SAX: the end-tag QName is a `CompactString` with a pool of reused heap buffers, and a prefixed attribute's URI is copied into the pooled slot's buffer instead of a fresh `String`: per element, `<e></e>` 1,344 -> 1,261 instructions and 3 prefixed attributes 4,590 -> 4,217; on Windows 96.8 -> 68.6 ns and 314 -> 234 ns ([#69](https://github.com/Remade-With-Rust/rusty_xml/issues/69))
+- *(parser)* XML reserves its node arena at 3/2 nodes per `<` or `=` instead of one per 10 bytes (a 3.5 MB sparse document peaked at 32.8 MiB of commit, now 5.8 MiB), and the push result is shrunk like the one-shot one (a 4.8 MB document pushed held 71.2 MiB, now 50.7 MiB) ([#70](https://github.com/Remade-With-Rust/rusty_xml/issues/70))
+- *(parser)* one arena policy, one duplicate-attribute check and one character-reference parse shared by the HTML and XML parsers ([#71](https://github.com/Remade-With-Rust/rusty_xml/issues/71))
+
+### Fixed
+
+- *(parser)* a character reference to a non-`Char` inside an entity is refused in attribute values and in no-tree content (error 9), as it already was in content and as libxml2 does ([#70](https://github.com/Remade-With-Rust/rusty_xml/issues/70))
+- *(xinclude)* copied attributes keep their prefix and namespace, and copying is linear (50,000 attributes took 3.7 s)
+
+### Changed
+
+- `xml_parse_dtd` reads a text declaration and honours its `encoding` (it used to fail with error 65), and refuses invalid UTF-8 when nothing declares another encoding (error 81) instead of substituting U+FFFD, as libxml2 does
+- XInclude `parse="text"` honours its `encoding` attribute and refuses invalid UTF-8 without one
+
+### Added
+
+- one settings type, interruptible and encoding-aware DTD/XInclude/reader entries (#70, #71)
+
+### Other
+
+- Merge branch 'b/70-entries' into release/0.10.1
+
 ## [0.10.0](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-parser-v0.9.5...rusty_xml-parser-v0.10.0) - 2026-11-15
 
 ### Added

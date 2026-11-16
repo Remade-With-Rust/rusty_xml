@@ -1,7 +1,9 @@
 //! UTF-8 well-formed document parser. No DTD / HTML / XInclude / recovery (M1).
 
 use rusty_xml_sax::{SaxAttr, SaxHandler};
-use rusty_xml_tree::{Interrupt, InterruptPoll, NodeId, NodeKind, XmlDoc};
+use rusty_xml_tree::{CompactString, Interrupt, InterruptPoll, NodeId, NodeKind, XmlDoc};
+
+use crate::attr_dup::{WideSeen, ATTR_SCAN_MAX};
 
 use crate::chvalid::{xml_is_char, xml_is_name_char, xml_is_name_start_char};
 use crate::error::*;
@@ -75,9 +77,6 @@ const MAX_DEPTH_HUGE: u32 = 1_000_000;
 
 const MAX_NAME: usize = 50_000;
 const MAX_TEXT: usize = 10_000_000;
-/// A start tag with more attributes than this checks for duplicates through
-/// hash sets. The pairwise scan is cheaper on ordinary tags, but quadratic.
-const ATTR_SCAN_MAX: usize = 32;
 
 /// libxml2's `XML_MAX_AMPLIFICATION_DEFAULT`: by default, entity expansion
 /// may produce at most five times the input consumed so far, once it has
@@ -831,6 +830,9 @@ fn parse_chunk(
         return push_fail(ctxt, e, None, true);
     }
     normalize_tokenized_attrs(&mut doc);
+    // As the one-shot parse does: the push result kept whatever capacity
+    // its doubling reached, up to 2.5x its nodes (#70).
+    crate::arena::finish(&mut doc);
     ctxt.buf = Vec::new();
     ctxt.buf.shrink_to_fit();
     ctxt.last_error = None;
@@ -860,7 +862,7 @@ fn fresh_parser<'a>(
             if (options & XML_PARSE_NO_TREE) != 0 {
                 4
             } else {
-                input.len() / 10
+                crate::arena::xml_reserve(input)
             },
         ),
         stack: Vec::new(),
@@ -876,6 +878,7 @@ fn fresh_parser<'a>(
         scan_hint: None,
         scratch_raw: Vec::new(),
         scratch_sax: Vec::new(),
+        qname_pool: Vec::new(),
         started: false,
     }
 }
@@ -1057,7 +1060,9 @@ struct PushState {
 struct OpenElem {
     /// The QName exactly as written, for the end-tag comparison. Owned: a
     /// push parse carries open elements from one chunk's buffer to the next.
-    qname: String,
+    /// Up to 24 bytes it is inline and costs no allocation (#69); a longer
+    /// one reuses a buffer from [`Parser::qname_pool`].
+    qname: CompactString,
     /// Length of the prefix when the QName splits as `prefix:local`.
     prefix_len: Option<usize>,
     elem: NodeId,
@@ -1171,6 +1176,9 @@ struct Parser<'a> {
     char_buf: String,
     scratch_raw: Vec<RawAttr<'a>>,
     scratch_sax: Vec<SaxAttr>,
+    /// Heap buffers of closed elements' long QNames, reused by the next
+    /// element that opens with one (#69). At most one per nesting level.
+    qname_pool: Vec<CompactString>,
     started: bool,
     no_tree: bool,
     recover: bool,
@@ -1477,16 +1485,6 @@ impl<'a> Parser<'a> {
                 Ok((Some(a), b))
             }
         }
-    }
-
-    fn lookup_ns(&self, prefix: Option<&str>) -> Option<String> {
-        if prefix == Some("xml") {
-            return Some(XML_NS.into());
-        }
-        if prefix == Some("xmlns") {
-            return Some(XMLNS_NS.into());
-        }
-        ns_lookup(&self.ns_stack, prefix).map(str::to_string)
     }
 
     fn uri_has_scheme(uri: &str) -> bool {
@@ -2066,6 +2064,7 @@ impl<'a> Parser<'a> {
         char_buf_from_reference: false,
             scratch_raw: Vec::new(),
             scratch_sax: Vec::new(),
+            qname_pool: Vec::new(),
             started: false,
             no_tree: false,
             recover: self.recover,
@@ -2579,10 +2578,11 @@ impl<'a> Parser<'a> {
         }
 
         // Both sets are built at the first attribute past `ATTR_SCAN_MAX`, so
-        // an ordinary element never seeds a hasher: the expanded names accepted
-        // so far, and keyed hashes of their QNames.
-        let mut seen_keys: Option<std::collections::HashSet<(Option<String>, String)>> = None;
-        let mut seen_qnames: Option<std::collections::HashSet<u64>> = None;
+        // an ordinary element never seeds a hasher: keyed hashes of the QNames
+        // and of the expanded names accepted so far (#71: one `WideSeen` for
+        // both parsers).
+        let mut seen_keys: Option<WideSeen> = None;
+        let mut seen_qnames: Option<WideSeen> = None;
         // Pooled like `raw_attrs`: the handler sees `sax_attrs[..n_sax]`, and
         // the entries keep their buffers for the next element (#52).
         let mut sax_attrs: Vec<SaxAttr> = std::mem::take(&mut self.scratch_sax);
@@ -2597,20 +2597,33 @@ impl<'a> Parser<'a> {
                 continue;
             }
             let value_off = raw.value_off;
+            // Borrowed from the scope stack and copied into the URI buffer
+            // the pooled slot already has: an owned lookup allocated a copy
+            // per prefixed attribute (#69).
             let uri = if ap.is_some() {
-                let u = self.lookup_ns(ap);
-                if u.is_none() {
-                    // Non-fatal, like the element case and like C: an unbound
-                    // prefix is a namespace error, and rejecting refused
-                    // documents libxml2 reads.
-                    let msg = format!(
-                        "Namespace prefix {} for {} on ... is not defined",
-                        ap.unwrap_or_default(),
-                        al
-                    );
-                    self.ns_error(&msg);
+                match ns_lookup(&self.ns_stack, ap) {
+                    Some(u) => {
+                        let mut b = sax_attrs
+                            .get_mut(n_sax)
+                            .and_then(|s| s.uri.take())
+                            .unwrap_or_default();
+                        b.clear();
+                        b.push_str(u);
+                        Some(b)
+                    }
+                    None => {
+                        // Non-fatal, like the element case and like C: an
+                        // unbound prefix is a namespace error, and rejecting
+                        // refused documents libxml2 reads.
+                        let msg = format!(
+                            "Namespace prefix {} for {} on ... is not defined",
+                            ap.unwrap_or_default(),
+                            al
+                        );
+                        self.ns_error(&msg);
+                        None
+                    }
                 }
-                u
             } else {
                 None
             };
@@ -2641,19 +2654,16 @@ impl<'a> Parser<'a> {
                     self.ns_error("Attribute redefined after namespace expansion");
                 }
             } else {
-                use std::hash::BuildHasher;
                 let seen = seen_qnames.get_or_insert_with(|| {
-                    let mut set = std::collections::HashSet::with_capacity(n_raw);
+                    let mut set = WideSeen::with_capacity(n_raw);
                     for a in accepted {
-                        let key = set.hasher().hash_one((a.prefix.as_deref(), a.local.as_str()));
-                        set.insert(key);
+                        set.insert((a.prefix.as_deref(), a.local.as_str()));
                     }
                     set
                 });
-                let key = seen.hasher().hash_one((ap, al));
                 // The set holds hashes, not names, so a hit is confirmed by a
                 // scan. A real duplicate is fatal, so that scan runs once.
-                if !seen.insert(key)
+                if !seen.insert((ap, al))
                     && accepted
                         .iter()
                         .any(|s| s.prefix.as_deref() == ap && s.local == al)
@@ -2661,12 +2671,20 @@ impl<'a> Parser<'a> {
                     return Err(self.err(XML_ERR_ATTRIBUTE_REDEFINED, "Attribute redefined"));
                 }
                 let seen_keys = seen_keys.get_or_insert_with(|| {
-                    accepted
-                        .iter()
-                        .map(|a| (a.uri.clone(), a.local.clone()))
-                        .collect()
+                    let mut set = WideSeen::with_capacity(n_raw);
+                    for a in accepted {
+                        set.insert((a.uri.as_deref(), a.local.as_str()));
+                    }
+                    set
                 });
-                if !seen_keys.insert((uri.clone(), al.to_string())) && uri.is_some() {
+                // Hashes again, confirmed the same way. The owned set this
+                // replaces cloned a URI and a name per attribute.
+                if !seen_keys.insert((uri.as_deref(), al))
+                    && uri.is_some()
+                    && accepted
+                        .iter()
+                        .any(|s| s.uri.as_deref() == uri.as_deref() && s.local == al)
+                {
                     self.ns_error("Attribute redefined after namespace expansion");
                 }
             }
@@ -2752,11 +2770,33 @@ impl<'a> Parser<'a> {
         }
 
         self.stack.push(elem);
+        let qname = self.pooled_qname(qn.s);
         Ok(Some(OpenElem {
-            qname: qn.s.to_string(),
+            qname,
             prefix_len: qn.prefix_len(),
             elem,
         }))
+    }
+
+    /// An owned copy of an open element's QName: inline when it fits, else
+    /// in a recycled heap buffer, so a parse allocates at most one buffer
+    /// per nesting level for long names (#69).
+    fn pooled_qname(&mut self, s: &str) -> CompactString {
+        if s.len() > std::mem::size_of::<String>() {
+            if let Some(mut b) = self.qname_pool.pop() {
+                b.clear();
+                b.push_str(s);
+                return b;
+            }
+        }
+        CompactString::from(s)
+    }
+
+    /// Return a closed element's QName buffer to the pool if it is on the heap.
+    fn recycle_qname(&mut self, o: OpenElem) {
+        if o.qname.is_heap_allocated() {
+            self.qname_pool.push(o.qname);
+        }
     }
 
     /// Consume the end tag of an open element and emit its SAX end event.
@@ -2804,7 +2844,9 @@ impl<'a> Parser<'a> {
             return Ok(());
         };
         self.parse_content(open.elem)?;
-        self.close_element(&open)
+        let r = self.close_element(&open);
+        self.recycle_qname(open);
+        r
     }
 
     /// Parse the content of `parent` and of every element nested inside it.
@@ -2866,6 +2908,7 @@ impl<'a> Parser<'a> {
             scan_hint: st.scan_hint,
             scratch_raw: Vec::new(),
             scratch_sax: Vec::new(),
+            qname_pool: Vec::new(),
             started: true,
         }
     }
@@ -3030,7 +3073,9 @@ impl<'a> Parser<'a> {
                 // nothing is open it belongs to the caller.
                 match open.pop() {
                     Some(o) => {
-                        self.close_element(&o)?;
+                        let r = self.close_element(&o);
+                        self.recycle_qname(o);
+                        r?;
                         // Streaming starts with the root already open, so an
                         // empty stack means the root just closed and the
                         // epilogue is the driver's job.
@@ -3316,7 +3361,7 @@ fn parse_utf8(
                 // a document that would never use it.
                 4
             } else {
-                buffer.len() / 10
+                crate::arena::xml_reserve(buffer)
             },
         ),
         stack: Vec::new(),
@@ -3332,6 +3377,7 @@ fn parse_utf8(
         scan_hint: None,
         scratch_raw: Vec::new(),
         scratch_sax: Vec::new(),
+        qname_pool: Vec::new(),
         started: false,
     };
     match p.parse_document() {
@@ -3361,9 +3407,8 @@ fn parse_utf8(
                 }
                 _ => {}
             }
-            // The arena was reserved at one node per 10 input bytes; most
-            // documents use fewer, and the tree keeps whatever is left.
-            p.doc.shrink_nodes();
+            // The arena was reserved from the markup; give back what it overshot.
+            crate::arena::finish(&mut p.doc);
             Ok(p.doc)
         }
         Err(e) => {

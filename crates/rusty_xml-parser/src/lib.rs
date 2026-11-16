@@ -8,6 +8,8 @@ mod error;
 mod encoding_tables;
 mod encoding_tables_more;
 mod encoding;
+mod arena;
+mod attr_dup;
 mod parse;
 mod catalog;
 mod html_entities;

@@ -19,10 +19,10 @@
 //! `docs/html-ir-campaign.md`; the losing arms are recorded beside each choice.
 
 use std::borrow::Cow;
-use std::collections::HashSet;
 
 use rusty_xml_tree::{Interrupt, NodeId, NodeKind, XmlDoc};
 
+use crate::attr_dup::{WideSeen, ATTR_SCAN_MAX};
 use crate::error::XmlError;
 use crate::html_entities::{decode_html, Nul};
 use crate::html_tags::{self as tags, Tag, BODY, HEAD, HTML, P, UNKNOWN};
@@ -112,9 +112,6 @@ const DATA_SCRIPT_ESC2: u8 = 6;
 
 /// libxml2 truncates names to `HTML_PARSER_BUFFER_SIZE` bytes.
 const MAX_NAME: usize = 100;
-/// A start tag with more attributes than this deduplicates them through a
-/// hash set. The pairwise scan is cheaper on ordinary tags, but quadratic.
-const ATTR_SCAN_MAX: usize = 32;
 
 /// A name holding an uppercase letter or a NUL: ASCII lowercased, NUL to
 /// U+FFFD. Out of line on purpose. Inlined, it made every call of
@@ -365,7 +362,7 @@ fn html_parse_str(
     // 17/8 rather than 2 (#62): at 2, 428 of 1,017 real pages just overflowed
     // the reserve and doubled the arena, copying it; at 2.125 274 do, and a
     // page that just overflowed peaks at 2.4 MiB of commit instead of 5.7.
-    let mut doc = XmlDoc::with_node_capacity(Some("1.0"), (lt * 17 / 8).min(text.len() / 2));
+    let mut doc = XmlDoc::with_node_capacity(Some("1.0"), crate::arena::reserve(text.len(), lt, 17, 8));
     doc.encoding = Some("HTML".into());
     // Mark it as an HTML document so the serializer can tell: C emits the
     // doctype where XML would emit a declaration.
@@ -394,7 +391,7 @@ fn html_parse_str(
     if p.stopped {
         return Err(interrupted());
     }
-    p.doc.shrink_nodes();
+    crate::arena::finish(&mut p.doc);
     Ok(p.doc)
 }
 
@@ -1099,13 +1096,14 @@ impl<'a> Parser<'a> {
     #[inline(never)]
     fn add_attributes_wide(&mut self, el: NodeId) {
         let attrs = std::mem::take(&mut self.attrs);
-        let mut seen: HashSet<&str> = HashSet::with_capacity(attrs.len());
-        for (n, v) in &attrs {
-            if seen.insert(n) {
+        let mut seen = WideSeen::with_capacity(attrs.len());
+        for (i, (n, v)) in attrs.iter().enumerate() {
+            // A hash hit is only a maybe; the scan confirms it, and runs for
+            // real repeats and the rare collision only.
+            if seen.insert(n.as_ref()) || !attrs[..i].iter().any(|(m, _)| m == n) {
                 self.add_attribute(el, n, v);
             }
         }
-        drop(seen);
         self.attrs = attrs;
         self.attrs.clear();
     }

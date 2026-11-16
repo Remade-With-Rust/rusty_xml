@@ -20,7 +20,7 @@
 
 use std::borrow::Cow;
 
-use rusty_xml_tree::{Interrupt, NodeId, NodeKind, XmlDoc};
+use rusty_xml_tree::{Interrupt, InterruptPoll, NodeId, NodeKind, XmlDoc};
 
 use crate::attr_dup::{WideSeen, ATTR_SCAN_MAX};
 use crate::error::XmlError;
@@ -92,12 +92,20 @@ impl<'a> HtmlParseSettings<'a> {
 
     /// The cap in stack entries for these options.
     fn depth_cap(&self, options: i32) -> usize {
-        match self.max_depth {
-            0 if (options & crate::parse::XML_PARSE_HUGE) != 0 => HTML_MAX_DEPTH_HUGE as usize,
-            0 => HTML_MAX_DEPTH_DEFAULT as usize,
-            d if d < 0 => usize::MAX,
-            d => d as usize,
-        }
+        rusty_xml_tree::ParseSettings::from(*self).depth_cap(
+            HTML_MAX_DEPTH_DEFAULT as usize,
+            HTML_MAX_DEPTH_HUGE as usize,
+            (options & crate::parse::XML_PARSE_HUGE) != 0,
+        )
+    }
+}
+
+/// The HTML entries run on the one settings type too (#71).
+impl<'a> From<HtmlParseSettings<'a>> for rusty_xml_tree::ParseSettings<'a> {
+    fn from(s: HtmlParseSettings<'a>) -> Self {
+        let mut p = rusty_xml_tree::ParseSettings::new().with_max_depth(s.max_depth);
+        p.interrupt = s.interrupt;
+        p
     }
 }
 
@@ -217,7 +225,6 @@ fn html_read(
 ) -> Result<XmlDoc, XmlError> {
     let _ = url;
     let interrupt = settings.interrupt;
-    // Decoding is one linear pass and is not polled; check either side.
     if interrupt.is_some_and(|i| i.is_interrupted()) {
         return Err(interrupted());
     }
@@ -230,9 +237,10 @@ fn html_read(
     // Borrowed and validated once. Copying the input and re-validating it
     // lossily cost +6.5% / +21.9% parse Ir (fragments / pages).
     let text = if undeclared {
-        crate::html_encoding::decode(buffer)
+        crate::html_encoding::decode(buffer, interrupt)?
     } else {
-        let (bytes, _) = crate::encoding::xml_convert_to_utf8_cow(buffer, encoding)?;
+        // The shared byte entry (#71), polling a transcoding pass in blocks.
+        let (bytes, _) = crate::encoding::decode_input(buffer, encoding, true, interrupt)?;
         utf8_cow(bytes)
     };
     let (has_cr, has_nul, lt) = scan_cr_nul(text.as_bytes());
@@ -245,7 +253,7 @@ fn html_read(
 }
 
 fn interrupted() -> XmlError {
-    XmlError::new(crate::error::XML_ERR_USER_STOP, "Parser interrupted", 0, 0)
+    crate::error::interrupted_error()
 }
 
 /// Does the input contain a CR, a NUL, and how many `<`? Fixed 64-byte blocks
@@ -379,7 +387,7 @@ fn html_parse_str(
         noimplied: (options & HTML_PARSE_NOIMPLIED) != 0,
         attrs: Vec::new(),
         has_nul,
-        interrupt,
+        interrupt: interrupt.map(InterruptPoll::new),
         limit: if interrupt.is_some() { POLL_BYTES.min(text.len()) } else { text.len() },
         stopped: false,
         deep: None,
@@ -503,7 +511,10 @@ struct Parser<'a> {
     attrs: Vec<(Cow<'a, str>, Option<Cow<'a, str>>)>,
     /// The input has a NUL somewhere; without one, no run needs scanning.
     has_nul: bool,
-    interrupt: Option<&'a dyn Interrupt>,
+    /// Polled through the same [`InterruptPoll`] as the XML parser (#71), but
+    /// on a cadence of input bytes, not ticks: a tick counter on every token
+    /// cost +3% parse Ir (#47), where a position bound costs nothing.
+    interrupt: Option<InterruptPoll<'a>>,
     /// Where the content loop stops to poll the interrupt: the end of the
     /// input without one, so the plain parse pays nothing per token and the
     /// loop is compiled once for both paths.
@@ -568,8 +579,8 @@ impl<'a> Parser<'a> {
         if self.halted {
             return true;
         }
-        if let Some(i) = self.interrupt {
-            if i.is_interrupted() {
+        if let Some(p) = &self.interrupt {
+            if p.check().is_err() {
                 self.stopped = true;
                 return true;
             }
@@ -733,7 +744,7 @@ impl<'a> Parser<'a> {
             u32::try_from(line).unwrap_or(u32::MAX),
             u32::try_from(col).unwrap_or(u32::MAX),
         );
-        self.doc.warnings.push(e.to_string());
+        crate::error::record_fatal(&mut self.doc, &e);
     }
 
     #[inline]

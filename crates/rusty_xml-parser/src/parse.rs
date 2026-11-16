@@ -2,6 +2,7 @@
 
 use rusty_xml_sax::{SaxAttr, SaxHandler};
 use rusty_xml_tree::{CompactString, Interrupt, InterruptPoll, NodeId, NodeKind, XmlDoc};
+pub use rusty_xml_tree::{ParseSettings, PARSE_MAX_AMPLIFICATION_DEFAULT};
 
 use crate::attr_dup::{WideSeen, ATTR_SCAN_MAX};
 
@@ -81,7 +82,7 @@ const MAX_TEXT: usize = 10_000_000;
 /// libxml2's `XML_MAX_AMPLIFICATION_DEFAULT`: by default, entity expansion
 /// may produce at most five times the input consumed so far, once it has
 /// passed [`XML_PARSER_ALLOWED_EXPANSION`].
-pub const XML_MAX_AMPLIFICATION_DEFAULT: u32 = 5;
+pub const XML_MAX_AMPLIFICATION_DEFAULT: u32 = PARSE_MAX_AMPLIFICATION_DEFAULT;
 /// libxml2's `XML_PARSER_ALLOWED_EXPANSION`: expansion below this many bytes
 /// is never refused, whatever the ratio.
 const XML_PARSER_ALLOWED_EXPANSION: u64 = 1_000_000;
@@ -109,6 +110,10 @@ pub struct XmlParseSettings<'a> {
     /// the parse fails with `XML_ERR_USER_STOP` (111), even under
     /// `XML_PARSE_RECOVER`.
     pub interrupt: Option<&'a dyn Interrupt>,
+    /// The nesting cap (#71), as HTML has had since #48: `0` (the default)
+    /// for 5,000, or 1,000,000 under `XML_PARSE_HUGE`; a positive value for
+    /// that cap; a negative value for none.
+    pub max_depth: i32,
 }
 
 impl Default for XmlParseSettings<'_> {
@@ -116,7 +121,32 @@ impl Default for XmlParseSettings<'_> {
         Self {
             max_amplification: XML_MAX_AMPLIFICATION_DEFAULT,
             interrupt: None,
+            max_depth: 0,
         }
+    }
+}
+
+/// The XML settings a nested parse gets from the caller's (#70): XInclude
+/// and the reader parse with the interrupt, amplification and depth cap
+/// they were given.
+impl<'a> From<ParseSettings<'a>> for XmlParseSettings<'a> {
+    fn from(p: ParseSettings<'a>) -> Self {
+        let mut s = XmlParseSettings::new()
+            .with_max_amplification(p.max_amplification)
+            .with_max_depth(p.max_depth);
+        s.interrupt = p.interrupt;
+        s
+    }
+}
+
+/// Every XML entry runs on the one settings type (#71).
+impl<'a> From<XmlParseSettings<'a>> for ParseSettings<'a> {
+    fn from(s: XmlParseSettings<'a>) -> Self {
+        let mut p = ParseSettings::new()
+            .with_max_amplification(s.max_amplification)
+            .with_max_depth(s.max_depth);
+        p.interrupt = s.interrupt;
+        p
     }
 }
 
@@ -124,6 +154,7 @@ impl std::fmt::Debug for XmlParseSettings<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("XmlParseSettings")
             .field("max_amplification", &self.max_amplification)
+            .field("max_depth", &self.max_depth)
             .field("interrupt", &self.interrupt.is_some())
             .finish()
     }
@@ -146,6 +177,25 @@ impl<'a> XmlParseSettings<'a> {
         self.interrupt = Some(interrupt);
         self
     }
+
+    /// Sets the nesting cap: `0` for the default, a positive cap, or `-1`
+    /// for none.
+    pub fn with_max_depth(mut self, max_depth: i32) -> Self {
+        self.max_depth = max_depth;
+        self
+    }
+}
+
+/// The XML nesting cap: 5,000, or 1,000,000 under `XML_PARSE_HUGE`, unless the
+/// settings set one (#71). The rule is the HTML parser's, shared through
+/// [`ParseSettings::depth_cap`].
+fn xml_depth_cap(s: &XmlParseSettings<'_>, options: i32) -> u32 {
+    let cap = ParseSettings::from(*s).depth_cap(
+        MAX_DEPTH as usize,
+        MAX_DEPTH_HUGE as usize,
+        (options & XML_PARSE_HUGE) != 0,
+    );
+    u32::try_from(cap).unwrap_or(u32::MAX)
 }
 
 /// What a parse needs from its caller beyond the option bits.
@@ -630,7 +680,7 @@ fn push_fail(
         if let Some(mut doc) = partial {
             // As in a one-shot recovering parse, the tree says it was cut
             // short (#46).
-            doc.warnings.push(e.to_string());
+            record_fatal(&mut doc, &e);
             if terminate {
                 return Ok(Some(doc));
             }
@@ -681,6 +731,7 @@ fn parse_chunk(
         settings: XmlParseSettings {
             max_amplification: ctxt.max_ampl,
             interrupt,
+            max_depth: 0,
         },
         sax_stop: false,
         recovered: None,
@@ -826,7 +877,8 @@ fn parse_chunk(
     }
     let total = ctxt.consumed + ctxt.buf.len();
     let mut doc = p.suspend(open, true).doc;
-    if let Err(e) = apply_dtd_defaults(&mut doc, total, ctxt.options) {
+    let mut poll = interrupt.map(InterruptPoll::new);
+    if let Err(e) = apply_dtd_defaults(&mut doc, total, ctxt.options, poll.as_mut()) {
         return push_fail(ctxt, e, None, true);
     }
     normalize_tokenized_attrs(&mut doc);
@@ -875,6 +927,7 @@ fn fresh_parser<'a>(
         watch: cfg.sax_stop || cfg.settings.interrupt.is_some(),
         interrupt: cfg.settings.interrupt.map(InterruptPoll::new),
         interrupted: false,
+        depth_cap: xml_depth_cap(&cfg.settings, options),
         scan_hint: None,
         scratch_raw: Vec::new(),
         scratch_sax: Vec::new(),
@@ -1197,6 +1250,8 @@ struct Parser<'a> {
     interrupt: Option<InterruptPoll<'a>>,
     /// The interrupt fired: fail even under `XML_PARSE_RECOVER`.
     interrupted: bool,
+    /// The nesting cap from the settings and `XML_PARSE_HUGE` (#71).
+    depth_cap: u32,
     /// See [`ScanHint`].
     scan_hint: Option<ScanHint>,
 }
@@ -2074,6 +2129,7 @@ impl<'a> Parser<'a> {
             watch: false,
             interrupt: None,
             interrupted: false,
+            depth_cap: self.depth_cap,
             scan_hint: None,
         };
         // Lent, not cloned: copying the whole DTD for every reference made
@@ -2409,7 +2465,12 @@ impl<'a> Parser<'a> {
             // entities and ATTLIST defaults it declared just vanished and the
             // failure surfaced later as a bogus "entity not defined". Recovery
             // mode still tolerates it, because that is what recovery is for.
-            match crate::dtd::parse_dtd_subset_ampl(subset, self.old10, self.ampl.max_ampl) {
+            match crate::dtd::parse_dtd_subset_ampl(
+                subset,
+                self.old10,
+                self.ampl.max_ampl,
+                self.interrupt.as_ref().map(|p| p.interrupt()),
+            ) {
                 Ok(d) => d,
                 Err(_) if self.recover => rusty_xml_tree::XmlDtd::default(),
                 Err(e) => return Err(e),
@@ -2435,12 +2496,7 @@ impl<'a> Parser<'a> {
     /// by an explicit stack instead of by recursion.
     fn open_element(&mut self, parent: NodeId) -> Result<Option<OpenElem>, XmlError> {
         self.depth += 1;
-        let cap = if (self.options & XML_PARSE_HUGE) != 0 {
-            MAX_DEPTH_HUGE
-        } else {
-            MAX_DEPTH
-        };
-        if self.depth > cap {
+        if self.depth > self.depth_cap {
             return Err(self.err(XML_ERR_INTERNAL_ERROR, "Excessive element nesting"));
         }
         self.expect_byte(b'<', XML_ERR_LT_REQUIRED, "'<' required")?;
@@ -2923,6 +2979,7 @@ impl<'a> Parser<'a> {
             watch: cfg.sax_stop || cfg.settings.interrupt.is_some(),
             interrupt: cfg.settings.interrupt.map(InterruptPoll::new),
             interrupted: false,
+            depth_cap: xml_depth_cap(&cfg.settings, options),
             scan_hint: st.scan_hint,
             scratch_raw: Vec::new(),
             scratch_sax: Vec::new(),
@@ -3340,13 +3397,13 @@ fn parse_doc(
     sax: &mut dyn SaxHandler,
     cfg: ParseCfg<'_>,
 ) -> Result<XmlDoc, XmlError> {
-    // Conversion is one linear pass and is not polled; check either side.
-    if let Some(i) = cfg.settings.interrupt {
-        if i.is_interrupted() {
-            return Err(XmlError::new(XML_ERR_USER_STOP, "Parser interrupted", 0, 0));
-        }
+    if cfg.settings.interrupt.is_some_and(|i| i.is_interrupted()) {
+        return Err(crate::error::interrupted_error());
     }
-    let (converted, enc_name) = crate::encoding::xml_convert_to_utf8_cow(buffer, encoding)?;
+    // The shared byte entry (#71); a transcoding pass polls the interrupt in
+    // blocks (#70).
+    let (converted, enc_name) =
+        crate::encoding::decode_input(buffer, encoding, true, cfg.settings.interrupt)?;
     parse_utf8(&converted, enc_name.as_deref(), options, sax, cfg)
 }
 
@@ -3392,6 +3449,7 @@ fn parse_utf8(
         watch: cfg.sax_stop || cfg.settings.interrupt.is_some(),
         interrupt: cfg.settings.interrupt.map(InterruptPoll::new),
         interrupted: false,
+        depth_cap: xml_depth_cap(&cfg.settings, options),
         scan_hint: None,
         scratch_raw: Vec::new(),
         scratch_sax: Vec::new(),
@@ -3400,7 +3458,7 @@ fn parse_utf8(
     };
     match p.parse_document() {
         Ok(()) => {
-            apply_dtd_defaults(&mut p.doc, buffer.len(), options)?;
+            apply_dtd_defaults(&mut p.doc, buffer.len(), options, p.interrupt.as_mut())?;
             normalize_tokenized_attrs(&mut p.doc);
             match (&p.doc.encoding, enc_name) {
                 (None, Some(n)) => {
@@ -3440,7 +3498,7 @@ fn parse_utf8(
                 // functions could not tell a truncated tree from a whole one
                 // (#46).
                 p.sax.error(&e.message);
-                p.doc.warnings.push(e.to_string());
+                record_fatal(&mut p.doc, &e);
                 if let Some(slot) = cfg.recovered {
                     slot.set(Some(e));
                 }
@@ -3455,6 +3513,7 @@ fn apply_dtd_defaults(
     doc: &mut XmlDoc,
     input_len: usize,
     options: i32,
+    mut poll: Option<&mut InterruptPoll<'_>>,
 ) -> Result<(), XmlError> {
     // Completing attributes from ATTLIST defaults is opt-in, as it is in C:
     // libxml2 does it for XML_PARSE_DTDATTR (xmllint --dtdattr) and not
@@ -3514,6 +3573,11 @@ fn apply_dtd_defaults(
         let id = NodeId(i as u32);
         if doc.kind(id) != NodeKind::Element {
             continue;
+        }
+        // A walk over every element, after the parse loop but inside an
+        // interruptible call: ticked like the loop it follows (#70).
+        if let Some(p) = poll.as_deref_mut() {
+            p.tick().map_err(|_| crate::error::interrupted_error())?;
         }
         let Some(list) = by_elem.get(doc.name(id)) else {
             continue;

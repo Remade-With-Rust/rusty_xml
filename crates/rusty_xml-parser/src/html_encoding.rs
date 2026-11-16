@@ -45,21 +45,26 @@ pub(crate) enum Decision {
 
 /// Decode `b` as [`decide`] says. The input is validated as UTF-8 once, here,
 /// and the scanner and the result both reuse that.
-pub(crate) fn decode(b: &[u8]) -> Cow<'_, str> {
+pub(crate) fn decode<'b>(
+    b: &'b [u8],
+    interrupt: Option<&dyn rusty_xml_tree::Interrupt>,
+) -> Result<Cow<'b, str>, crate::error::XmlError> {
     let valid = std::str::from_utf8(b).ok();
-    match decide(b, valid) {
+    Ok(match decide(b, valid) {
         Decision::Utf8 => match valid {
             Some(s) => Cow::Borrowed(s),
             None => Cow::Owned(String::from_utf8_lossy(b).into_owned()),
         },
         Decision::Switch { at, enc } => {
             let mut out = String::from_utf8_lossy(&b[..at]).into_owned();
-            let rest =
-                single_byte_to_utf8(&b[at..], enc).expect("decide returns decodable encodings");
+            // The conversion polls the interrupt in blocks, as the XML one
+            // does (#70).
+            let rest = single_byte_to_utf8(&b[at..], enc, interrupt)?
+                .expect("decide returns decodable encodings");
             out.push_str(&String::from_utf8_lossy(&rest));
             Cow::Owned(out)
         }
-    }
+    })
 }
 
 /// The index of the first byte in `b[from..limit]` that is not ASCII, or

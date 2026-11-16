@@ -1,8 +1,8 @@
 //! XInclude 1.0. Resource fetch is caller-supplied; the library never opens the network.
 
-use rusty_xml_tree::{NodeId, NodeKind, XmlDoc};
-use crate::error::XmlError;
-use crate::parse::{default_parse_options, xml_read_memory};
+use rusty_xml_tree::{NodeId, NodeKind, ParseSettings, Walk, XmlDoc};
+use crate::error::{interrupted_error, XmlError};
+use crate::parse::{default_parse_options, xml_read_memory_with, XmlParseSettings};
 
 const XI: &str = "http://www.w3.org/2001/XInclude";
 
@@ -12,13 +12,28 @@ pub fn xml_xinclude_process<F>(doc: &mut XmlDoc, mut loader: F) -> Result<i32, X
 where
     F: FnMut(&str) -> Result<Vec<u8>, String>,
 {
-    xml_xinclude_process_tree(doc, NodeId::DOCUMENT, &mut loader)
+    xml_xinclude_process_tree(doc, NodeId::DOCUMENT, &mut loader, &ParseSettings::new())
+}
+
+/// [`xml_xinclude_process`] with [`ParseSettings`] (#70): the interrupt is
+/// polled between includes, and each included document is parsed with the
+/// interrupt, the amplification factor and the depth cap given here.
+pub fn xml_xinclude_process_with<F>(
+    doc: &mut XmlDoc,
+    mut loader: F,
+    settings: &ParseSettings<'_>,
+) -> Result<i32, XmlError>
+where
+    F: FnMut(&str) -> Result<Vec<u8>, String>,
+{
+    xml_xinclude_process_tree(doc, NodeId::DOCUMENT, &mut loader, settings)
 }
 
 fn xml_xinclude_process_tree<F>(
     doc: &mut XmlDoc,
     start: NodeId,
     loader: &mut F,
+    settings: &ParseSettings<'_>,
 ) -> Result<i32, XmlError>
 where
     F: FnMut(&str) -> Result<Vec<u8>, String>,
@@ -27,7 +42,10 @@ where
     collect_includes(doc, start, &mut subs);
     let mut n = 0i32;
     for id in subs {
-        if replace_include(doc, id, loader)? {
+        if settings.is_interrupted() {
+            return Err(interrupted_error());
+        }
+        if replace_include(doc, id, loader, settings)? {
             n += 1;
         }
     }
@@ -37,7 +55,7 @@ where
 /// Every `xi:include` element under `start`, in document order, without
 /// descending into one (its fallback stays nested).
 ///
-/// Walks first-child / next-sibling / parent links rather than recursing:
+/// Through [`XmlDoc::walk`], first-child / next-sibling / parent links, not recursion:
 /// under `XML_PARSE_HUGE` a document may nest 1,000,000 deep, and recursion
 /// per level overflowed the stack at about 20,000 (#34).
 fn collect_includes(doc: &XmlDoc, start: NodeId, out: &mut Vec<NodeId>) {
@@ -46,32 +64,30 @@ fn collect_includes(doc: &XmlDoc, start: NodeId, out: &mut Vec<NodeId>) {
             && doc.name(id) == "include"
             && (doc.ns_uri(id) == Some(XI) || doc.prefix(id) == Some("xi"))
     };
-    let mut cur = start;
-    loop {
-        if is_include(cur) {
-            out.push(cur);
-        } else if let Some(c) = doc.first_child(cur) {
-            cur = c;
-            continue;
-        }
-        // Next in document order that is not inside `cur`, staying under start.
-        loop {
-            if cur == start {
-                return;
-            }
-            if let Some(n) = doc.next_sibling(cur) {
-                cur = n;
-                break;
-            }
-            match doc.parent(cur) {
-                Some(p) => cur = p,
-                None => return,
-            }
-        }
+    if is_include(start) {
+        out.push(start);
+        return;
     }
+    doc.walk(
+        start,
+        |n| {
+            if is_include(n) {
+                out.push(n);
+                Walk::Skip
+            } else {
+                Walk::Descend
+            }
+        },
+        |_| {},
+    );
 }
 
-fn replace_include<F>(doc: &mut XmlDoc, id: NodeId, loader: &mut F) -> Result<bool, XmlError>
+fn replace_include<F>(
+    doc: &mut XmlDoc,
+    id: NodeId,
+    loader: &mut F,
+    settings: &ParseSettings<'_>,
+) -> Result<bool, XmlError>
 where
     F: FnMut(&str) -> Result<Vec<u8>, String>,
 {
@@ -82,14 +98,24 @@ where
         match loader(&h) {
             Ok(bytes) => {
                 if parse == "text" {
-                    let text = String::from_utf8_lossy(&bytes).into_owned();
+                    // Decoded as a document is, by the `encoding` attribute
+                    // or else as UTF-8, and refused when it is not (#70); it
+                    // was decoded lossily, whatever it declared.
+                    let encoding = doc.xml_get_prop(id, "encoding");
+                    let text = crate::encoding::decode_text(
+                        &bytes,
+                        encoding.as_deref(),
+                        settings.interrupt,
+                    )?
+                    .into_owned();
                     let n = doc.alloc(NodeKind::Text, "#text");
                     doc.node_mut(n).content = text.into();
                     doc.xml_add_prev_sibling(id, n);
                     doc.xml_unlink_node(id);
                     return Ok(true);
                 }
-                let included = xml_read_memory(&bytes, Some(&h), None, default_parse_options())?;
+                let s = XmlParseSettings::from(*settings);
+                let included = xml_read_memory_with(&bytes, Some(&h), None, default_parse_options(), &s)?;
                 if let Some(root) = included.xml_doc_get_root_element() {
                     graft(doc, parent, id, &included, root);
                     doc.xml_unlink_node(id);
@@ -183,12 +209,16 @@ fn copy_one(dst: &mut XmlDoc, src: &XmlDoc, id: NodeId) -> NodeId {
     for (p, u) in src.ns_defs(id) {
         dst.push_ns_def(n, p.clone(), u.clone());
     }
-    // xml_set_prop builds the attribute node. This used to copy each
-    // attribute first as well, leaving an unlinked node in the arena per
-    // attribute.
+    // Appended with their prefix and namespace. `xml_set_prop` scanned the
+    // copy's attributes for a name to replace before adding each one, so an
+    // element with 50,000 attributes took 3.7 s to include, and it dropped
+    // prefixes: `xml:lang` and `p:a` came out as `lang` and `a`, where xmllint
+    // keeps them. The source's names are already unique (the entry gates in
+    // `tests/entry_gates.rs` found both, #71).
     let mut a = src.first_attr(id);
     while let Some(x) = a {
-        dst.xml_set_prop(n, src.name(x), src.content(x));
+        let aid = dst.add_attr(n, src.name(x), src.prefix(x), src.content(x));
+        dst.set_ns_uri(aid, src.ns_uri(x));
         a = src.next_sibling(x);
     }
     n

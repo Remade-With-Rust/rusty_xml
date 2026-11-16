@@ -1,40 +1,149 @@
 //! DTD subset parser (internal + caller-supplied external). No network.
 
-use rusty_xml_tree::{AttrDecl, AttrDefault, ElementDecl, XmlDtd};
-use crate::error::XmlError;
+use rusty_xml_tree::{AttrDecl, AttrDefault, ElementDecl, Interrupt, InterruptPoll, ParseSettings, XmlDtd};
+use crate::error::{interrupted_error, XmlError};
 
 /// `xmlParseDTD` — parse a DTD from memory (caller already loaded the bytes).
+///
+/// The bytes are decoded as a document's are (#70): a BOM, or the text
+/// declaration's `encoding`, decides; with neither, they must be UTF-8, and
+/// invalid UTF-8 is refused (`XML_ERR_INVALID_ENCODING`) as libxml2 refuses
+/// it. A text declaration (`<?xml version="1.0" encoding="..."?>`, with an
+/// optional version and a required encoding) is read and skipped.
 #[doc(alias = "xmlParseDTD")]
 pub fn xml_parse_dtd(
     buffer: &[u8],
     public_id: Option<&str>,
     system_id: Option<&str>,
 ) -> Result<XmlDtd, XmlError> {
-    let text = String::from_utf8_lossy(buffer);
-    let mut dtd = parse_external_subset(&text, false)?;
+    xml_parse_dtd_with(buffer, public_id, system_id, &ParseSettings::new())
+}
+
+/// [`xml_parse_dtd`] with [`ParseSettings`] (#70): the interrupt is polled
+/// while the bytes are decoded, on every parameter-entity pass and every
+/// declaration, and the amplification factor bounds parameter-entity
+/// expansion.
+pub fn xml_parse_dtd_with(
+    buffer: &[u8],
+    public_id: Option<&str>,
+    system_id: Option<&str>,
+    settings: &ParseSettings<'_>,
+) -> Result<XmlDtd, XmlError> {
+    if settings.is_interrupted() {
+        return Err(interrupted_error());
+    }
+    let hint = text_decl_encoding(buffer);
+    let text = crate::encoding::decode_text(buffer, hint.as_deref(), settings.interrupt)?;
+    let body = skip_text_decl(&text)?;
+    let mut dtd = parse_subset(body, false, false, settings.max_amplification, settings.interrupt)?;
     dtd.public_id = public_id.map(str::to_string);
     dtd.system_id = system_id.map(str::to_string);
     Ok(dtd)
 }
 
-/// Parse a DTD internal/external subset into declarations.
-pub fn parse_dtd_subset(src: &str, old10: bool) -> Result<XmlDtd, XmlError> {
-    parse_subset(src, true, old10, crate::parse::XML_MAX_AMPLIFICATION_DEFAULT)
+/// The `encoding` of a text declaration at the start of `bytes` (after a
+/// UTF-8 BOM), read from the raw bytes: the declaration is ASCII in every
+/// ASCII-compatible encoding. `None` without one, or in UTF-16/UCS-4, where
+/// the BOM decides.
+fn text_decl_encoding(bytes: &[u8]) -> Option<String> {
+    let b = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF][..]).unwrap_or(bytes);
+    if !(b.starts_with(b"<?xml") && b.get(5).is_some_and(|c| c.is_ascii_whitespace())) {
+        return None;
+    }
+    let end = b[..b.len().min(1024)].windows(2).position(|w| w == b"?>")?;
+    let decl = std::str::from_utf8(&b[..end]).ok()?;
+    pseudo_attr(decl, "encoding").map(str::to_string)
 }
 
-/// [`parse_dtd_subset`] with the parse's entity amplification factor.
+/// The value of pseudo-attribute `name` in a declaration's text.
+fn pseudo_attr<'s>(decl: &'s str, name: &str) -> Option<&'s str> {
+    let at = decl.find(name)?;
+    let rest = decl[at + name.len()..].trim_start();
+    let rest = rest.strip_prefix('=')?.trim_start();
+    let q = rest.chars().next().filter(|&c| c == '"' || c == '\'')?;
+    let rest = &rest[1..];
+    Some(&rest[..rest.find(q)?])
+}
+
+/// Skip a text declaration at the start of a decoded external subset,
+/// checking it as libxml2's `xmlParseTextDecl` does: an optional `version`,
+/// a required `encoding`, nothing else. The declaration was refused outright
+/// before (#70), which stopped libxml2's own `NewsMLv1.2.dtd`.
+fn skip_text_decl(text: &str) -> Result<&str, XmlError> {
+    if !(text.starts_with("<?xml") && text[5..].starts_with([' ', '\t', '\r', '\n'])) {
+        return Ok(text);
+    }
+    let Some(end) = text.find("?>") else {
+        return Err(XmlError::new(
+            crate::error::XML_ERR_XMLDECL_NOT_FINISHED,
+            "parsing XML declaration: '?>' expected",
+            1,
+            0,
+        ));
+    };
+    let mut rest = text[5..end].trim_start();
+    if let Some(r) = rest.strip_prefix("version") {
+        let r = r.trim_start().strip_prefix('=').map(str::trim_start);
+        let q = r.and_then(|r| r.chars().next()).filter(|&c| c == '"' || c == '\'');
+        let (Some(r), Some(q)) = (r, q) else {
+            return Err(XmlError::new(crate::error::XML_ERR_XMLDECL_NOT_FINISHED, "Malformed version in text declaration", 1, 0));
+        };
+        let Some(close) = r[1..].find(q) else {
+            return Err(XmlError::new(crate::error::XML_ERR_XMLDECL_NOT_FINISHED, "Malformed version in text declaration", 1, 0));
+        };
+        let after = &r[1 + close + 1..];
+        if !after.starts_with([' ', '\t', '\r', '\n']) {
+            return Err(XmlError::new(crate::error::XML_ERR_SPACE_REQUIRED, "Space needed here", 1, 0));
+        }
+        rest = after.trim_start();
+    }
+    let Some(r) = rest.strip_prefix("encoding") else {
+        return Err(XmlError::new(
+            crate::error::XML_ERR_MISSING_ENCODING,
+            "Missing encoding in text declaration",
+            1,
+            0,
+        ));
+    };
+    let r = r.trim_start().strip_prefix('=').map(str::trim_start).unwrap_or("");
+    let q = r.chars().next().filter(|&c| c == '"' || c == '\'');
+    let close = q.and_then(|q| r[1..].find(q));
+    let Some(close) = close else {
+        return Err(XmlError::new(crate::error::XML_ERR_ENCODING_NAME, "Invalid XML encoding name", 1, 0));
+    };
+    // Anything after the encoding but whitespace (a `standalone`, say) is
+    // not part of a text declaration.
+    if !r[1 + close + 1..].trim().is_empty() {
+        return Err(XmlError::new(
+            crate::error::XML_ERR_XMLDECL_NOT_FINISHED,
+            "parsing XML declaration: '?>' expected",
+            1,
+            0,
+        ));
+    }
+    Ok(&text[end + 2..])
+}
+
+/// Parse a DTD internal/external subset into declarations.
+pub fn parse_dtd_subset(src: &str, old10: bool) -> Result<XmlDtd, XmlError> {
+    parse_subset(src, true, old10, crate::parse::XML_MAX_AMPLIFICATION_DEFAULT, None)
+}
+
+/// [`parse_dtd_subset`] with the parse's entity amplification factor and
+/// interrupt.
 pub(crate) fn parse_dtd_subset_ampl(
     src: &str,
     old10: bool,
     max_ampl: u32,
+    interrupt: Option<&dyn Interrupt>,
 ) -> Result<XmlDtd, XmlError> {
-    parse_subset(src, true, old10, max_ampl)
+    parse_subset(src, true, old10, max_ampl, interrupt)
 }
 
 /// Parse an external subset, where conditional sections are legal and a
 /// parameter entity may supply part of a declaration.
 pub fn parse_external_subset(src: &str, old10: bool) -> Result<XmlDtd, XmlError> {
-    parse_subset(src, false, old10, crate::parse::XML_MAX_AMPLIFICATION_DEFAULT)
+    parse_subset(src, false, old10, crate::parse::XML_MAX_AMPLIFICATION_DEFAULT, None)
 }
 
 fn parse_subset(
@@ -42,6 +151,7 @@ fn parse_subset(
     internal: bool,
     old10: bool,
     max_ampl: u32,
+    interrupt: Option<&dyn Interrupt>,
 ) -> Result<XmlDtd, XmlError> {
     // Conditional sections are resolved before parameter entities are
     // substituted, as libxml2 reads them: an IGNORE section is dropped whole,
@@ -52,7 +162,7 @@ fn parse_subset(
     } else {
         std::borrow::Cow::Borrowed(src)
     };
-    let mut expanded = expand_pe(&resolved, src.len(), internal, max_ampl)?;
+    let mut expanded = expand_pe(&resolved, src.len(), internal, max_ampl, interrupt)?;
     // A parameter entity can carry a section of its own.
     if !internal && has_cond_markers(&expanded) {
         expanded = resolve_conditional(&expanded)?;
@@ -65,6 +175,7 @@ fn parse_subset(
         dtd: &mut dtd,
         internal,
         old10,
+        poll: interrupt.map(InterruptPoll::new),
     };
     p.parse_markup()?;
     // A parameter entity reference in the subset means the declarations may be
@@ -110,6 +221,7 @@ fn expand_pe(
     consumed: usize,
     internal: bool,
     max_ampl: u32,
+    interrupt: Option<&dyn Interrupt>,
 ) -> Result<String, XmlError> {
     // Multi-pass PE expansion so `%percent;` can invent new PE names.
     //
@@ -124,6 +236,11 @@ fn expand_pe(
     };
     let mut cur = src.to_string();
     for _ in 0..16 {
+        // Each pass is linear in the subset; an interrupt is checked between
+        // them (#70).
+        if interrupt.is_some_and(|i| i.is_interrupted()) {
+            return Err(interrupted_error());
+        }
         let mut pes: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         let charged = harvest_pe(&cur, &mut pes, &mut ampl)?;
         let next = subst_pe(&cur, &pes, &charged, internal, &mut ampl)?;
@@ -741,6 +858,8 @@ struct DtdParser<'a> {
     /// under the old rules sailed through in a declaration -- and a PI
     /// target inside the subset was never checked at all.
     old10: bool,
+    /// The caller's interrupt, ticked once per declaration (#70).
+    poll: Option<InterruptPoll<'a>>,
 }
 
 impl<'a> DtdParser<'a> {
@@ -830,6 +949,9 @@ impl<'a> DtdParser<'a> {
     }
     fn parse_markup(&mut self) -> Result<(), XmlError> {
         loop {
+            if let Some(p) = self.poll.as_mut() {
+                p.tick().map_err(|_| interrupted_error())?;
+            }
             self.skip_ws_and_comments()?;
             if self.pos >= self.src.len() {
                 break;

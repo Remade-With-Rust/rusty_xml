@@ -2,8 +2,8 @@
 
 #![forbid(unsafe_code)]
 
-use rusty_xml_parser::{xml_read_memory, XmlError};
-use rusty_xml_tree::{NodeId, NodeKind, XmlDoc};
+use rusty_xml_parser::{xml_read_memory, xml_read_memory_with, XmlError, XmlParseSettings};
+use rusty_xml_tree::{NodeId, NodeKind, ParseSettings, XmlDoc};
 
 /// libxml2 `xmlReaderTypes`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -76,13 +76,22 @@ impl XmlTextReader {
         options: i32,
     ) -> Result<Self, XmlError> {
         let doc = xml_read_memory(buffer, url, encoding, options)?;
-        Ok(Self {
-            doc,
-            cur: None,
-            started: false,
-            eof: false,
-            attr: None,
-        })
+        Ok(Self::xml_reader_walker(doc))
+    }
+
+    /// [`XmlTextReader::xml_reader_for_memory`] with [`ParseSettings`]
+    /// (#70): the interrupt, the amplification factor and the depth cap
+    /// reach the parse the reader runs over the buffer.
+    pub fn xml_reader_for_memory_with(
+        buffer: &[u8],
+        url: Option<&str>,
+        encoding: Option<&str>,
+        options: i32,
+        settings: &ParseSettings<'_>,
+    ) -> Result<Self, XmlError> {
+        let s = XmlParseSettings::from(*settings);
+        let doc = xml_read_memory_with(buffer, url, encoding, options, &s)?;
+        Ok(Self::xml_reader_walker(doc))
     }
 
     /// `xmlReaderWalker`.
@@ -292,6 +301,18 @@ pub fn xml_reader_for_memory(
     options: i32,
 ) -> Result<XmlTextReader, XmlError> {
     XmlTextReader::xml_reader_for_memory(buffer, url, encoding, options)
+}
+
+/// [`xml_reader_for_memory`] with [`ParseSettings`]: see
+/// [`XmlTextReader::xml_reader_for_memory_with`].
+pub fn xml_reader_for_memory_with(
+    buffer: &[u8],
+    url: Option<&str>,
+    encoding: Option<&str>,
+    options: i32,
+    settings: &ParseSettings<'_>,
+) -> Result<XmlTextReader, XmlError> {
+    XmlTextReader::xml_reader_for_memory_with(buffer, url, encoding, options, settings)
 }
 
 /// `xmlReaderForDoc`.

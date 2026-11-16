@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-parser-v0.10.0...rusty_xml-parser-v0.10.1) - 2026-11-16
+
+### Added
+
+- one settings type, interruptible and encoding-aware DTD/XInclude/reader entries (#70, #71)
+
+### Other
+
+- Merge branch 'b/70-entries' into release/0.10.1
+
 ## [0.10.0](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-parser-v0.9.5...rusty_xml-parser-v0.10.0) - 2026-11-15
 
 ### Added

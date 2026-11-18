@@ -1,11 +1,12 @@
-//! #69, #70 and #71 regressions: the pooled end-tag QName, the pooled
-//! attribute URI, the shared duplicate-attribute check, and the arena
-//! policy that now ends every parse (push included) with a shrink.
+//! #69, #70, #71 and #75 regressions: the pooled end-tag QName, the pooled
+//! attribute URI, the shared duplicate-attribute check, the arena policy
+//! that now ends every parse (push included) with a shrink, and the push
+//! parser's length hint.
 
 use rusty_xml::{
-    default_parse_options, html_read_memory, xml_create_push_parser_ctxt, xml_parse_chunk,
-    xml_read_memory, xml_save_doc, xml_sax_parse_memory, SaxAttr, SaxEvent, SaxHandler,
-    SaxRecorder, XML_PARSE_NO_TREE,
+    default_parse_options, html_read_memory, xml_create_push_parser_ctxt,
+    xml_ctxt_set_expected_length, xml_parse_chunk, xml_read_memory, xml_save_doc,
+    xml_sax_parse_memory, SaxAttr, SaxEvent, SaxHandler, SaxRecorder, XML_PARSE_NO_TREE,
 };
 
 fn events(xml: &[u8], opts: i32) -> Vec<SaxEvent> {
@@ -135,4 +136,45 @@ fn push_and_one_shot_trees_hold_no_spare_arena() {
     let pushed = xml_parse_chunk(&mut c, &[], 1).unwrap().unwrap();
     assert_eq!(pushed.len(), one.len());
     assert_eq!(pushed.node_capacity(), pushed.len());
+}
+
+/// A push parse told the document's length reserves its arena once (#75).
+/// Whatever the length says, right, short or impossible, the tree is the
+/// one-shot tree and holds no spare arena.
+#[test]
+fn a_length_hint_changes_no_tree() {
+    let xml: String = format!(
+        "<?xml version=\"1.0\"?>\n<!DOCTYPE mesh [<!ATTLIST v t NMTOKENS #IMPLIED>]>\n<mesh>{}</mesh>",
+        (0..5_000)
+            .map(|i| format!("<v x=\"{i}\" t=\" a  b \"/>{}", if i % 7 == 0 { "text" } else { "" }))
+            .collect::<String>()
+    );
+    let utf16: Vec<u8> = [0xFF, 0xFE]
+        .into_iter()
+        .chain(xml.encode_utf16().flat_map(u16::to_le_bytes))
+        .collect();
+    let opts = default_parse_options();
+    for doc in [xml.as_bytes(), &utf16] {
+        let one = xml_read_memory(doc, None, None, opts).unwrap();
+        let want = xml_save_doc(&one, 0);
+        for len in [doc.len(), doc.len() / 3, 10 * doc.len(), usize::MAX] {
+            for chunk in [4, 4096, 65536, doc.len()] {
+                let mut c = xml_create_push_parser_ctxt(&[], None, None, opts);
+                xml_ctxt_set_expected_length(&mut c, len);
+                let mut out = None;
+                for (i, ch) in doc.chunks(chunk).enumerate() {
+                    let last = (i + 1) * chunk >= doc.len();
+                    out = xml_parse_chunk(&mut c, ch, last as i32).unwrap();
+                }
+                let pushed = out.expect("the last chunk returns the tree");
+                assert_eq!(xml_save_doc(&pushed, 0), want, "len {len}, chunk {chunk}");
+                assert_eq!(pushed.node_capacity(), pushed.len(), "len {len}, chunk {chunk}");
+            }
+        }
+    }
+    // No tree, no arena: the length is ignored.
+    let mut c = xml_create_push_parser_ctxt(&[], None, None, opts | XML_PARSE_NO_TREE);
+    xml_ctxt_set_expected_length(&mut c, xml.len());
+    let d = xml_parse_chunk(&mut c, xml.as_bytes(), 1).unwrap().unwrap();
+    assert!(d.node_capacity() < 64, "{}", d.node_capacity());
 }

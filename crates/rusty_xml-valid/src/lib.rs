@@ -12,8 +12,8 @@ mod schematron;
 use content::ContentModel;
 use interrupt::{NoPoll, Poll};
 use rusty_xml_tree::{
-    AttrDecl, AttrDefault, ElementDecl, Interrupt, InterruptPoll, NodeId, NodeKind, XmlDoc,
-    XmlDtd,
+    AttrDecl, AttrDefault, ElementDecl, Interrupt, InterruptPoll, NodeId, NodeKind, Walk,
+    XmlDoc, XmlDtd,
 };
 use std::collections::HashMap;
 
@@ -60,26 +60,37 @@ pub fn xml_validate_dtd_interruptible(
 fn validate_dtd<P: Poll>(doc: &XmlDoc, dtd: &XmlDtd, poll: &mut P) -> Result<(), ValidError> {
     poll.check()?;
     let root = check_declarations(doc, dtd)?;
-    // Walk iteratively: validation used to recurse per element, which is the
-    // same stack cliff the parser, the writer and C14N all had.
     let mut ids: HashMap<String, ()> = Default::default();
     let mut idrefs: Vec<String> = Vec::new();
     // Each element type's content model is compiled once, on first use, and
     // shared by every element of that type.
     let mut models: HashMap<String, Result<ContentModel, String>> = HashMap::new();
     let attlists = AttLists::build(dtd);
-    let mut stack = vec![root];
-    while let Some(id) = stack.pop() {
+    let mut element = |id| -> Result<(), ValidError> {
         poll.tick()?;
         validate_element(doc, id, dtd, &attlists, &mut ids, &mut idrefs, &mut models)?;
-        let mut c = doc.last_child(id);
-        while let Some(x) = c {
-            if doc.kind(x) == NodeKind::Element {
-                stack.push(x);
+        Ok(())
+    };
+    // The elements in document order, so the first error is the one met first.
+    element(root)?;
+    let mut failed = Ok(());
+    doc.walk(
+        root,
+        |x| {
+            if doc.kind(x) != NodeKind::Element {
+                return Walk::Skip;
             }
-            c = doc.prev_sibling(x);
-        }
-    }
+            match element(x) {
+                Ok(()) => Walk::Descend,
+                Err(e) => {
+                    failed = Err(e);
+                    Walk::Stop
+                }
+            }
+        },
+        |_| {},
+    );
+    failed?;
     // IDREF VC: every referenced ID must be declared somewhere in the
     // document. This was never checked at all.
     for r in &idrefs {

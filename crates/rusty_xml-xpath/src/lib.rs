@@ -8,7 +8,7 @@
 
 #![forbid(unsafe_code)]
 
-use rusty_xml_tree::{Interrupt, Interrupted, NodeId, NodeKind, XmlDoc};
+use rusty_xml_tree::{Interrupt, Interrupted, NodeId, NodeKind, Walk, XmlDoc};
 use std::cell::Cell;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -205,8 +205,14 @@ pub fn xml_xpath_is_inf(v: f64) -> i32 {
 
 /// Visits every node reachable from `doc`'s document node in document order:
 /// each node, then its attributes, then its children. Iterative, so depth
-/// costs no stack. `leave(id, last)` runs once a node's subtree is done, with
-/// the last value `enter` returned inside it.
+/// costs no stack. `leave(id)` runs once a node's subtree is done, right
+/// after `enter` for an attribute.
+///
+/// Its own loop, not [`XmlDoc::walk`] (an exception in `AGENTS.md`): the
+/// attributes go between a node and its children, and through `walk` this,
+/// the walk behind every XPath document-order sort, union and `id()`, cost
+/// 17% more instructions on `xml_xpath_order_doc_elems` and 3-5% on unions,
+/// `id()` and `//@*` (callgrind, #76).
 fn walk_doc_order(doc: &XmlDoc, mut enter: impl FnMut(NodeId), mut leave: impl FnMut(NodeId)) {
     let mut cur = NodeId::DOCUMENT;
     loop {
@@ -2012,69 +2018,23 @@ fn keep_matching(
 }
 
 /// Appends every descendant of `root` (not `root` itself, no attributes) in
-/// document order. Follows the links instead of recursing (#34).
+/// document order.
 fn collect_desc(doc: &XmlDoc, root: NodeId, out: &mut Vec<NodeId>) {
-    let Some(mut cur) = doc.first_child(root) else {
-        return;
-    };
-    loop {
-        out.push(cur);
-        if let Some(c) = doc.first_child(cur) {
-            cur = c;
-            continue;
-        }
-        loop {
-            if let Some(s) = doc.next_sibling(cur) {
-                cur = s;
-                break;
-            }
-            match doc.parent(cur) {
-                Some(p) if p != root => cur = p,
-                _ => return,
-            }
-        }
-    }
+    doc.walk(
+        root,
+        |n| {
+            out.push(n);
+            Walk::Descend
+        },
+        |_| {},
+    );
 }
 
 /// XPath string-value of a node: its own text for a leaf, else the text of
-/// every descendant text node reached through elements, as
-/// `XmlDoc::xml_node_get_content` gives it, but without recursion.
+/// every descendant text node reached through elements, which is what
+/// `xmlNodeGetContent` gives.
 fn string_value(doc: &XmlDoc, id: NodeId) -> String {
-    match doc.kind(id) {
-        NodeKind::Text
-        | NodeKind::CData
-        | NodeKind::Comment
-        | NodeKind::Pi
-        | NodeKind::Attribute => doc.content(id).to_string(),
-        _ => {
-            let mut out = String::new();
-            let Some(mut cur) = doc.first_child(id) else {
-                return out;
-            };
-            loop {
-                match doc.kind(cur) {
-                    NodeKind::Text | NodeKind::CData => out.push_str(doc.content(cur)),
-                    NodeKind::Element => {
-                        if let Some(c) = doc.first_child(cur) {
-                            cur = c;
-                            continue;
-                        }
-                    }
-                    _ => {}
-                }
-                loop {
-                    if let Some(s) = doc.next_sibling(cur) {
-                        cur = s;
-                        break;
-                    }
-                    match doc.parent(cur) {
-                        Some(p) if p != id => cur = p,
-                        _ => return out,
-                    }
-                }
-            }
-        }
-    }
+    doc.xml_node_get_content(id)
 }
 
 fn node_test(

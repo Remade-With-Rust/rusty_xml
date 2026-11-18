@@ -184,6 +184,10 @@ pub struct Atom(NonZeroU32);
 /// the index keeps the standard library's keyed hasher.
 const ATOM_SCAN_MAX: usize = 16;
 
+/// The most node arena a parser reserves from an estimate of the input, in
+/// bytes; past it the arena grows as it fills.
+const MAX_ARENA_BYTES: usize = 32 << 20;
+
 
 
 #[derive(Clone, Debug)]
@@ -313,7 +317,6 @@ impl XmlDoc {
     /// three trips for what one sized allocation does. The document node's
     /// name is implied by its kind, so it stores no String either.
     pub fn with_node_capacity(version: Option<&str>, cap: usize) -> Self {
-        const MAX_ARENA_BYTES: usize = 32 << 20;
         let ceiling = MAX_ARENA_BYTES / std::mem::size_of::<Node>();
         // A floor of 4 keeps a small document from reallocating its way up
         // from a single slot, which is what Vec::new()+push used to give it.
@@ -407,9 +410,18 @@ impl XmlDoc {
         // change); reserving correctly removes the rest of that traffic.
         // Cap by memory, not node count: 1<<20 nodes is ~190 MB of arena, which
         // a large document would commit up front before parsing a byte.
-        const MAX_ARENA_BYTES: usize = 32 << 20;
         let cap = MAX_ARENA_BYTES / std::mem::size_of::<Node>();
         self.nodes.reserve(n.min(cap));
+    }
+
+    /// Grow the node arena to hold `total` nodes in one allocation, without
+    /// the cap of [`XmlDoc::reserve_nodes`]: for a caller that knows how
+    /// large the whole input is, such as a push parse told its length (#75).
+    /// Returns `false`, leaving the arena as it was, if the allocator
+    /// refuses; the arena then grows as it fills.
+    pub fn try_reserve_nodes_total(&mut self, total: usize) -> bool {
+        let extra = total.saturating_sub(self.nodes.len());
+        self.nodes.try_reserve_exact(extra).is_ok()
     }
 
     pub fn node(&self, id: NodeId) -> &Node {
@@ -841,12 +853,19 @@ impl XmlDoc {
         mut enter: impl FnMut(NodeId) -> Walk,
         mut leave: impl FnMut(NodeId),
     ) {
-        let mut c = self.first_child(root);
+        // Each step reads a node's record once and takes every link it needs
+        // from it. Through `first_child` / `next_sibling` / `parent` each link
+        // was its own bounds-checked lookup, and the compiler could not merge
+        // them across the callbacks' writes: XPath's document-order walk cost
+        // 24% more instructions on this loop than on its own copy (#76).
+        let mut c = self.nodes[root.index()].first_child.get();
         while let Some(n) = c {
-            match enter(n) {
+            let step = enter(n);
+            let node = &self.nodes[n.index()];
+            match step {
                 Walk::Stop => return,
                 Walk::Descend => {
-                    if let Some(first) = self.first_child(n) {
+                    if let Some(first) = node.first_child.get() {
                         c = Some(first);
                         continue;
                     }
@@ -857,15 +876,15 @@ impl XmlDoc {
             // The next node in document order: a sibling, or the sibling of
             // the nearest ancestor below `root` that has one, leaving each
             // ancestor on the way up.
-            let mut m = n;
+            let mut at = node;
             c = loop {
-                if let Some(s) = self.next_sibling(m) {
+                if let Some(s) = at.next_sibling.get() {
                     break Some(s);
                 }
-                match self.parent(m) {
+                match at.parent.get() {
                     Some(p) if p != root => {
                         leave(p);
-                        m = p;
+                        at = &self.nodes[p.index()];
                     }
                     _ => break None,
                 }
@@ -951,6 +970,20 @@ impl XmlDoc {
         match self.prefix(id) {
             Some(p) => format!("{}:{}", p, self.name(id)),
             None => self.name(id).to_string(),
+        }
+    }
+
+    /// Whether [`XmlDoc::qname`] of `id` is `qn`, without building it.
+    pub fn qname_is(&self, id: NodeId, qn: &str) -> bool {
+        let name = self.name(id);
+        match self.prefix(id) {
+            Some(p) => {
+                qn.len() == p.len() + 1 + name.len()
+                    && qn.starts_with(p)
+                    && qn.as_bytes()[p.len()] == b':'
+                    && qn.ends_with(name)
+            }
+            None => qn == name,
         }
     }
 

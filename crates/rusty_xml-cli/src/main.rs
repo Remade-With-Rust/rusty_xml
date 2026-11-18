@@ -9,7 +9,7 @@ static ALLOC: rusty_xml_alloc::Allocator = rusty_xml_alloc::NEW;
 
 use rusty_xml::{
     default_parse_options, html_read_memory, xml_c14n_doc_dump_memory, xml_create_push_parser_ctxt,
-    xml_parse_chunk, xml_read_memory, xml_reader_for_memory, xml_relaxng_validate_doc,
+    xml_ctxt_set_expected_length, xml_parse_chunk, xml_read_memory, xml_reader_for_memory, xml_relaxng_validate_doc,
     xml_sax_parse_memory, xml_save_doc, xml_schema_validate_doc, xml_schematron_validate_doc,
     xml_validate_document, xml_xpath_eval, SaxRecorder, XmlXPathContext, XML_SAVE_FORMAT,
     XML_SAVE_NO_DECL, XML_SAVE_NO_EMPTY,
@@ -239,6 +239,7 @@ fn main() {
 
             let parsed = if push {
                 let mut ctxt = xml_create_push_parser_ctxt(&[], url, None, options);
+                xml_ctxt_set_expected_length(&mut ctxt, bytes.len());
                 const N: usize = 4;
                 let mut i = 0;
                 let mut last = Ok(None);

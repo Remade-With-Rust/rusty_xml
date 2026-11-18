@@ -1,7 +1,7 @@
 //! UTF-8 well-formed document parser. No DTD / HTML / XInclude / recovery (M1).
 
 use rusty_xml_sax::{SaxAttr, SaxHandler};
-use rusty_xml_tree::{CompactString, Interrupt, InterruptPoll, NodeId, NodeKind, XmlDoc};
+use rusty_xml_tree::{CompactString, Interrupt, InterruptPoll, NodeId, NodeKind, Walk, XmlDoc};
 pub use rusty_xml_tree::{ParseSettings, PARSE_MAX_AMPLIFICATION_DEFAULT};
 
 use crate::attr_dup::{WideSeen, ATTR_SCAN_MAX};
@@ -589,6 +589,8 @@ pub struct XmlPushParserCtxt {
     max_ampl: u32,
     /// Buffer length at the last attempt to parse the prolog.
     prolog_tried: usize,
+    /// [`xml_ctxt_set_expected_length`], until the arena is reserved from it.
+    length_hint: Option<crate::arena::LengthHint>,
 }
 
 impl XmlPushParserCtxt {
@@ -632,6 +634,7 @@ pub fn xml_create_push_parser_ctxt(
         recovered: None,
         max_ampl: XML_MAX_AMPLIFICATION_DEFAULT,
         prolog_tried: 0,
+        length_hint: None,
     }
 }
 
@@ -699,6 +702,28 @@ pub fn xml_ctxt_set_max_amplification(ctxt: &mut XmlPushParserCtxt, max_ampl: u3
     ctxt.max_ampl = max_ampl.max(1);
 }
 
+/// Tell a push context the length of the whole document in bytes, when the
+/// caller knows it (a file's size, a response's length). Call it before the
+/// first [`xml_parse_chunk`]. Not in libxml2; without it nothing changes.
+///
+/// Once 64 KiB have arrived, or the last chunk, the node arena is reserved
+/// once for the whole document, from the markup in those bytes projected over
+/// `len` (the one-shot parse's 3/2 nodes per `<` or `=`, at most one node per
+/// 2 bytes), and shrunk to the tree when the parse ends. Without a length the
+/// arena doubles as chunks arrive; on Windows each doubling holds the old and
+/// the new arena at once (#75).
+///
+/// The length is trusted: the reservation is made before the bytes arrive.
+/// Bound a length that comes from the peer as the body itself is bounded. A
+/// reservation the allocator refuses is skipped. A document that needs an
+/// encoding conversion is parsed whole at the end, sized as
+/// [`xml_read_memory`] sizes it, and `XML_PARSE_NO_TREE` builds no arena.
+pub fn xml_ctxt_set_expected_length(ctxt: &mut XmlPushParserCtxt, len: usize) {
+    if (ctxt.options & XML_PARSE_NO_TREE) == 0 {
+        ctxt.length_hint = Some(crate::arena::LengthHint::new(len, &ctxt.buf));
+    }
+}
+
 /// `xmlParseChunk`. `terminate != 0` finishes the document.
 #[doc(alias = "xmlParseChunk")]
 pub fn xml_parse_chunk(
@@ -757,7 +782,12 @@ fn parse_chunk(
         return Ok(ctxt.recovered.take());
     }
     ctxt.buf.extend_from_slice(chunk);
+    if let Some(h) = ctxt.length_hint.as_mut() {
+        h.see(chunk);
+    }
     let opts = ctxt.options;
+    // The arena is reserved from the hint in this call; start it small.
+    let hinted = ctxt.length_hint.as_ref().is_some_and(|h| h.ready(terminate));
 
     // Phase 1 -- prolog. Nothing can stream until the root's start tag is in
     // hand, so buffer until it parses. The prolog is small, and re-parsing it
@@ -788,7 +818,7 @@ fn parse_chunk(
     if ctxt.state.is_none() && !ctxt.no_stream {
         let mut sink = rusty_xml_sax::NullSax;
         let started = {
-            let mut p = fresh_parser(&ctxt.buf, opts, &mut sink, cfg);
+            let mut p = fresh_parser(&ctxt.buf, opts, &mut sink, cfg, hinted);
             match p.parse_prolog().and_then(|()| p.open_element(NodeId::DOCUMENT)) {
                 Ok(Some(root)) => {
                     let at = p.pos;
@@ -827,6 +857,10 @@ fn parse_chunk(
     // unparsed tail rather than the tree plus the whole document.
     let mut sink = rusty_xml_sax::NullSax;
     let mut st = ctxt.state.take().expect("state is present past the prolog");
+    if hinted {
+        let nodes = ctxt.length_hint.take().map_or(0, |h| h.nodes());
+        st.doc.try_reserve_nodes_total(nodes);
+    }
     let mut open = std::mem::take(&mut st.open);
     let was_closed = st.root_closed;
     let mut p = Parser::resume(&ctxt.buf, opts, &mut sink, st, ctxt.consumed, cfg);
@@ -892,11 +926,13 @@ fn parse_chunk(
 }
 
 /// A parser over a whole buffer, configured exactly as `parse_utf8` does.
+/// `hinted`: the caller reserves the node arena itself.
 fn fresh_parser<'a>(
     input: &'a [u8],
     options: i32,
     sax: &'a mut dyn SaxHandler,
     cfg: ParseCfg<'a>,
+    hinted: bool,
 ) -> Parser<'a> {
     Parser {
         input,
@@ -911,7 +947,7 @@ fn fresh_parser<'a>(
         sax,
         doc: XmlDoc::with_node_capacity(
             Some("1.0"),
-            if (options & XML_PARSE_NO_TREE) != 0 {
+            if (options & XML_PARSE_NO_TREE) != 0 || hinted {
                 4
             } else {
                 crate::arena::xml_reserve(input)
@@ -3683,50 +3719,67 @@ fn has_bare_ampersand(s: &str) -> bool {
 /// libxml2 does it whether or not you ask for defaults.
 fn normalize_tokenized_attrs(doc: &mut XmlDoc) {
     let Some(dtd) = doc.dtd.as_ref() else { return };
-    // The common case is a DTD with no tokenized attribute at all.
-    if !dtd.attributes.values().any(|a| a.att_type != "CDATA") {
-        return;
-    }
-    let tokenized: std::collections::HashSet<(String, String)> = dtd
-        .attributes
-        .iter()
-        .filter(|(_, a)| a.att_type != "CDATA")
-        .map(|((e, a), _)| (e.clone(), a.clone()))
-        .collect();
-
-    let mut stack = vec![NodeId::DOCUMENT];
-    let mut edits: Vec<(NodeId, String)> = Vec::new();
-    while let Some(id) = stack.pop() {
-        let mut c = doc.first_child(id);
-        while let Some(x) = c {
-            if doc.kind(x) == NodeKind::Element {
-                let elem = doc.qname(x);
-                let mut a = doc.first_attr(x);
-                while let Some(at) = a {
-                    if tokenized.contains(&(elem.clone(), doc.qname(at))) {
-                        let v = doc.content(at);
-                        // Space-separated, not whitespace-separated. XML 1.0
-                        // 3.3.3 turns LITERAL tab/newline into a space during
-                        // normalization, but a character reference contributes
-                        // its character unchanged -- so a referenced tab is
-                        // still a tab here and belongs to the token around it.
-                        // Splitting on it merged two tokens out of one.
-                        let norm = v
-                            .split(' ')
-                            .filter(|t| !t.is_empty())
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                        if norm != v {
-                            edits.push((at, norm));
-                        }
-                    }
-                    a = doc.next_sibling(at);
-                }
-                stack.push(x);
-            }
-            c = doc.next_sibling(x);
+    // Element QName to the QNames of its attributes declared other than CDATA.
+    let mut tokenized: std::collections::HashMap<&str, Vec<&str>> = Default::default();
+    for ((e, a), d) in &dtd.attributes {
+        if d.att_type != "CDATA" {
+            tokenized.entry(e.as_str()).or_default().push(a.as_str());
         }
     }
+    // The common case is a DTD with no tokenized attribute at all.
+    if tokenized.is_empty() {
+        return;
+    }
+
+    let mut edits: Vec<(NodeId, String)> = Vec::new();
+    let mut prefixed = String::new();
+    doc.walk(
+        NodeId::DOCUMENT,
+        |x| {
+            if doc.kind(x) != NodeKind::Element {
+                return Walk::Skip;
+            }
+            let Some(first) = doc.first_attr(x) else {
+                return Walk::Descend;
+            };
+            let elem = match doc.prefix(x) {
+                None => doc.name(x),
+                Some(p) => {
+                    prefixed.clear();
+                    prefixed.push_str(p);
+                    prefixed.push(':');
+                    prefixed.push_str(doc.name(x));
+                    &prefixed
+                }
+            };
+            let Some(names) = tokenized.get(elem) else {
+                return Walk::Descend;
+            };
+            let mut a = Some(first);
+            while let Some(at) = a {
+                let v = doc.content(at);
+                // Space-separated, not whitespace-separated. XML 1.0
+                // 3.3.3 turns LITERAL tab/newline into a space during
+                // normalization, but a character reference contributes
+                // its character unchanged -- so a referenced tab is
+                // still a tab here and belongs to the token around it.
+                // Splitting on it merged two tokens out of one.
+                if (v.starts_with(' ') || v.ends_with(' ') || v.contains("  "))
+                    && names.iter().any(|n| doc.qname_is(at, n))
+                {
+                    let norm = v
+                        .split(' ')
+                        .filter(|t| !t.is_empty())
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    edits.push((at, norm));
+                }
+                a = doc.next_sibling(at);
+            }
+            Walk::Descend
+        },
+        |_| {},
+    );
     for (at, v) in edits {
         doc.node_mut(at).content = v.into();
     }

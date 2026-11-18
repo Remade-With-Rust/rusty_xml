@@ -171,6 +171,8 @@ fn write_node_polled(
     format: bool,
     mut poll: Poll<'_, '_>,
 ) -> Result<(), Interrupted> {
+    // Its own stack, not `XmlDoc::walk`: indents and newlines go between
+    // children, where enter and leave have no turn.
     let mut stack: Vec<Step> = vec![Step::Open(id, level, format)];
     while let Some(step) = stack.pop() {
         match step {

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.2](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-parser-v0.10.1...rusty_xml-parser-v0.10.2) - 2026-11-18
+
+### Other
+
+- push-parse length hint ([#75](https://github.com/Remade-With-Rust/rusty_xml/pull/75)); one tree walk, made cheaper ([#76](https://github.com/Remade-With-Rust/rusty_xml/pull/76))
+- correct the 0.10 install line and the 0.9.3 SAX numbers
+
 ## [0.10.1](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-parser-v0.10.0...rusty_xml-parser-v0.10.1) - 2026-11-16
 
 ### Performance

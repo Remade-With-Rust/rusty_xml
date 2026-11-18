@@ -3,7 +3,7 @@
 use crate::interrupt::{NoPoll, Poll, PollWith};
 use crate::ValidError;
 use rusty_xml_parser::{default_parse_options, xml_read_memory};
-use rusty_xml_tree::{Interrupt, NodeId, NodeKind, XmlDoc};
+use rusty_xml_tree::{Interrupt, NodeId, NodeKind, Walk, XmlDoc};
 use rusty_xml_xpath::{
     xml_xpath_cast_to_boolean, xml_xpath_eval, xml_xpath_eval_interruptible, XPathError,
     XPathObject, XmlXPathContext,
@@ -62,16 +62,20 @@ fn walk_schema<P: Poll>(
     poll: &mut P,
 ) -> Result<(), ValidError> {
     let Some(top) = node else { return Ok(()) };
-    let mut stack = vec![top];
-    while let Some(id) = stack.pop() {
-        run_rule(sdoc, id, doc, errors, poll)?;
-        let mut c = sdoc.last_child(id);
-        while let Some(x) = c {
-            stack.push(x);
-            c = sdoc.prev_sibling(x);
-        }
-    }
-    Ok(())
+    run_rule(sdoc, top, doc, errors, poll)?;
+    let mut failed = Ok(());
+    sdoc.walk(
+        top,
+        |id| match run_rule(sdoc, id, doc, errors, poll) {
+            Ok(()) => Walk::Descend,
+            Err(e) => {
+                failed = Err(e);
+                Walk::Stop
+            }
+        },
+        |_| {},
+    );
+    failed
 }
 
 fn run_rule<P: Poll>(

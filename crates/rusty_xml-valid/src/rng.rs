@@ -3,7 +3,8 @@
 use crate::interrupt::{NoPoll, Poll};
 use crate::ValidError;
 use rusty_xml_parser::{default_parse_options, xml_read_memory};
-use rusty_xml_tree::{Interrupt, InterruptPoll, NodeId, NodeKind, XmlDoc};
+use rusty_xml_tree::{Interrupt, InterruptPoll, NodeId, NodeKind, Walk, XmlDoc};
+use std::cell::Cell;
 use std::collections::HashMap;
 
 const RNG_NS: &str = "http://relaxng.org/ns/structure/1.0";
@@ -116,20 +117,26 @@ fn compile(doc: &XmlDoc) -> Result<Schema, String> {
     Ok(schema)
 }
 
-/// The deepest element nesting under `root`, walked iteratively.
+/// The deepest element nesting under `root`, `root` itself at depth 1.
 fn max_depth(doc: &XmlDoc, root: NodeId) -> usize {
-    let mut deepest = 0;
-    let mut stack = vec![(root, 1usize)];
-    while let Some((id, d)) = stack.pop() {
-        deepest = deepest.max(d);
-        let mut c = doc.first_child(id);
-        while let Some(x) = c {
-            if doc.kind(x) == NodeKind::Element {
-                stack.push((x, d + 1));
+    let depth = Cell::new(1usize);
+    let mut deepest = 1;
+    doc.walk(
+        root,
+        |x| {
+            if doc.kind(x) != NodeKind::Element {
+                return Walk::Skip;
             }
-            c = doc.next_sibling(x);
-        }
-    }
+            depth.set(depth.get() + 1);
+            deepest = deepest.max(depth.get());
+            Walk::Descend
+        },
+        |x| {
+            if doc.kind(x) == NodeKind::Element {
+                depth.set(depth.get() - 1);
+            }
+        },
+    );
     deepest
 }
 
@@ -208,10 +215,10 @@ fn check_no_ref_cycle(schema: &Schema) -> Result<(), String> {
     Ok(())
 }
 
-/// Collect every `<define>`, walking the schema document iteratively.
+/// Collect every `<define>` in the schema document, in document order, so a
+/// later definition of a name replaces an earlier one.
 fn harvest_defs(doc: &XmlDoc, root: NodeId, defs: &mut HashMap<String, Pat>) {
-    let mut stack = vec![root];
-    while let Some(id) = stack.pop() {
+    let mut harvest = |id| {
         if is_rng(doc, id, "define") {
             if let Some(name) = doc.xml_get_prop(id, "name") {
                 if let Some(ch) = first_pat_child(doc, id) {
@@ -219,12 +226,16 @@ fn harvest_defs(doc: &XmlDoc, root: NodeId, defs: &mut HashMap<String, Pat>) {
                 }
             }
         }
-        let mut c = doc.last_child(id);
-        while let Some(x) = c {
-            stack.push(x);
-            c = doc.prev_sibling(x);
-        }
-    }
+    };
+    harvest(root);
+    doc.walk(
+        root,
+        |id| {
+            harvest(id);
+            Walk::Descend
+        },
+        |_| {},
+    );
 }
 
 fn is_rng(doc: &XmlDoc, id: NodeId, name: &str) -> bool {

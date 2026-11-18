@@ -179,6 +179,8 @@ fn emit_element<P: Poll>(
         Some(p) if p != NodeId::DOCUMENT => Rc::new(in_scope_ns(doc, p)),
         _ => Rc::new(Vec::new()),
     };
+    // Its own stack, not `XmlDoc::walk`: each element carries the namespace
+    // scope its children render against, which enter and leave cannot pass.
     let mut stack: Vec<Step> = vec![Step::Open(id, Rc::new(rendered.to_vec()), outer)];
     while let Some(step) = stack.pop() {
         poll.tick()?;

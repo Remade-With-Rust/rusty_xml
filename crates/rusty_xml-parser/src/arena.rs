@@ -42,6 +42,47 @@ pub(crate) fn xml_reserve(input: &[u8]) -> usize {
     reserve(input.len(), count_lt_eq(input), 3, 2)
 }
 
+/// A push parse told the document's length (#75): the markup in the bytes
+/// seen so far, until there are enough of them to size the arena once for
+/// the whole document instead of doubling it chunk by chunk, which on Windows
+/// holds the old and the new arena at once.
+pub(crate) struct LengthHint {
+    len: usize,
+    seen: usize,
+    markup: usize,
+}
+
+impl LengthHint {
+    /// Bytes counted before the arena is sized from them, so that a first
+    /// chunk of a few bytes does not decide a reservation for megabytes.
+    const SAMPLE: usize = 64 << 10;
+
+    pub(crate) fn new(len: usize, buffered: &[u8]) -> Self {
+        let mut h = LengthHint { len, seen: 0, markup: 0 };
+        h.see(buffered);
+        h
+    }
+
+    pub(crate) fn see(&mut self, b: &[u8]) {
+        self.seen += b.len();
+        self.markup += count_lt_eq(b);
+    }
+
+    /// Enough bytes have been counted, or no more are coming.
+    pub(crate) fn ready(&self, terminate: bool) -> bool {
+        terminate || self.seen >= Self::SAMPLE
+    }
+
+    /// [`xml_reserve`]'s rule over the markup the bytes seen project to the
+    /// whole length. Not capped at 32 MiB as an estimate from a prefix is:
+    /// the caller vouched for the length.
+    pub(crate) fn nodes(&self) -> usize {
+        let len = self.len.max(self.seen);
+        let markup = self.markup as u128 * len as u128 / self.seen.max(1) as u128;
+        reserve(len, usize::try_from(markup).unwrap_or(usize::MAX), 3, 2)
+    }
+}
+
 /// The tree is complete: release the capacity the reserve over-estimated, so
 /// the held tree pays for its nodes only. Every parser that returns a tree
 /// ends with this, the push parser included (#70).
@@ -72,6 +113,26 @@ mod tests {
         assert_eq!(count_lt_eq(&near), 2, "only 0x3C and 0x3D count");
         let all = vec![b'<'; 1000];
         assert_eq!(count_lt_eq(&all), all.len());
+    }
+
+    #[test]
+    fn a_length_hint_projects_the_markup_seen() {
+        let doc = b"<a x='1'><b/>text<b/></a>".repeat(100);
+        let whole = LengthHint::new(doc.len(), &doc);
+        assert!(!whole.ready(false) && whole.ready(true), "2.5 KB is below the sample");
+        assert_eq!(whole.nodes(), xml_reserve(&doc), "all of it seen: the one-shot rule");
+
+        let mut half = LengthHint::new(2 * doc.len(), b"");
+        half.see(&doc);
+        assert_eq!(half.nodes(), 2 * xml_reserve(&doc));
+
+        let short = LengthHint::new(10, &doc);
+        assert_eq!(short.nodes(), xml_reserve(&doc), "a length below what arrived");
+
+        let dense = LengthHint::new(usize::MAX, &[b'<'; 64]);
+        assert_eq!(dense.nodes(), usize::MAX / 2, "no overflow, one node per 2 bytes");
+        assert!(LengthHint::new(usize::MAX, &doc).nodes() < usize::MAX / 2);
+        assert_eq!(LengthHint::new(1 << 20, b"").nodes(), 0, "nothing seen");
     }
 
     #[test]

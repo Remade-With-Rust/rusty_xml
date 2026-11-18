@@ -3,7 +3,8 @@
 use crate::interrupt::{NoPoll, Poll};
 use crate::ValidError;
 use rusty_xml_parser::{default_parse_options, xml_read_memory};
-use rusty_xml_tree::{Interrupt, InterruptPoll, NodeId, NodeKind, XmlDoc};
+use rusty_xml_tree::{Interrupt, InterruptPoll, NodeId, NodeKind, Walk, XmlDoc};
+use std::cell::Cell;
 use std::collections::HashMap;
 
 /// How deeply the schema may nest. Compiling recurses once per level.
@@ -79,18 +80,30 @@ fn is_xs(doc: &XmlDoc, id: NodeId, name: &str) -> bool {
 fn compile(doc: &XmlDoc) -> Result<Schema, String> {
     let root = doc.xml_doc_get_root_element().ok_or("empty schema")?;
     // compile_element recurses through nested complex types, once per level.
-    let mut stack = vec![(root, 1usize)];
-    while let Some((id, d)) = stack.pop() {
-        if d > MAX_SCHEMA_DEPTH {
-            return Err(format!("XML Schema nested deeper than {MAX_SCHEMA_DEPTH} levels"));
-        }
-        let mut c = doc.first_child(id);
-        while let Some(x) = c {
-            if doc.kind(x) == NodeKind::Element {
-                stack.push((x, d + 1));
+    // The root is level 1.
+    let depth = Cell::new(1usize);
+    let mut too_deep = false;
+    doc.walk(
+        root,
+        |x| {
+            if doc.kind(x) != NodeKind::Element {
+                return Walk::Skip;
             }
-            c = doc.next_sibling(x);
-        }
+            depth.set(depth.get() + 1);
+            if depth.get() > MAX_SCHEMA_DEPTH {
+                too_deep = true;
+                return Walk::Stop;
+            }
+            Walk::Descend
+        },
+        |x| {
+            if doc.kind(x) == NodeKind::Element {
+                depth.set(depth.get() - 1);
+            }
+        },
+    );
+    if too_deep {
+        return Err(format!("XML Schema nested deeper than {MAX_SCHEMA_DEPTH} levels"));
     }
     let mut elements = HashMap::new();
     let mut c = doc.first_child(root);

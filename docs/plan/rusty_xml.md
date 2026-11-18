@@ -1,5 +1,9 @@
 # rusty_xml — remake libxml2 in Rust
 
+> This is the original plan, kept as history; parts of it, such as the
+> layout below, no longer match the code. The current crate map is the
+> README's "Architecture"; the working rules are in `AGENTS.md`.
+
 Status: M0–M6 landed (UTF-8 parse, tree/save/writer/reader, encodings/push/IO/catalogs, XPath 1.0, DTD/C14N/XInclude, HTML/RelaxNG/XSD/Schematron). M7 performance campaign next.
 
 Source of truth for the C surface: [GNOME/libxml2](https://github.com/GNOME/libxml2) (read-only mirror of [gitlab.gnome.org/GNOME/libxml2](https://gitlab.gnome.org/GNOME/libxml2)). MIT licensed. We reimplement the algorithms. We do not fork, vendor, or link the C.

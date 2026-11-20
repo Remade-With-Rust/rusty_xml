@@ -538,7 +538,7 @@ pub fn xml_sax_parse_memory_with(
     sax: &mut dyn SaxHandler,
     settings: &XmlParseSettings<'_>,
 ) -> Result<XmlDoc, XmlError> {
-    sax_parse(buffer, options, sax, settings, &mut ParsePools::default())
+    with_thread_pools(|pools| sax_parse(buffer, options, sax, settings, pools))
 }
 
 /// The SAX parse behind [`xml_sax_parse_memory_with`] and [`XmlSaxParser`].
@@ -563,11 +563,13 @@ fn sax_parse(
 
 /// A SAX parser kept from one document to the next (#80).
 ///
-/// [`xml_sax_parse_memory`] starts every parse from empty buffers, so a
-/// program reading many small documents -- the thousands of XML parts in a
-/// DOCX, XLSX or PPTX package -- grows them again for each one. An
-/// `XmlSaxParser` keeps what a parse grew (the namespace scope, the element
-/// stacks, the attribute and text buffers) and starts the next parse from it.
+/// A program reading many small documents -- the thousands of XML parts in a
+/// DOCX, XLSX or PPTX package -- would otherwise grow the same buffers again
+/// for each one. An `XmlSaxParser` keeps what a parse grew (the namespace
+/// scope, the element stacks, the attribute and text buffers) and starts the
+/// next parse from it. [`xml_sax_parse_memory`] does the same with buffers
+/// kept per thread, up to 64 KiB; an `XmlSaxParser` keeps them all, and the
+/// caller decides how long they live.
 ///
 /// Only capacity is kept: the events, errors and returned document of each
 /// parse are exactly those of [`xml_sax_parse_memory_with`], including after
@@ -1210,7 +1212,42 @@ struct ParsePools {
     open: Vec<OpenElem>,
 }
 
+impl ParsePools {
+    /// Heap bytes the pools hold (#80).
+    fn held_bytes(&self) -> usize {
+        use std::mem::size_of;
+        let opt = |s: &Option<String>| s.as_ref().map_or(0, String::capacity);
+        let attrs: usize = self
+            .sax
+            .iter()
+            .map(|a| a.local.capacity() + opt(&a.prefix) + opt(&a.uri) + a.value.capacity())
+            .sum();
+        let qnames: usize = self
+            .qname_pool
+            .iter()
+            .map(|q| if q.is_heap_allocated() { q.capacity() } else { 0 })
+            .sum();
+        self.ns.held_bytes()
+            + self.stack.capacity() * size_of::<NodeId>()
+            + self.char_buf.capacity()
+            + self.raw_vals.capacity() * size_of::<String>()
+            + self.raw_vals.iter().map(String::capacity).sum::<usize>()
+            + self.sax.capacity() * size_of::<SaxAttr>()
+            + attrs
+            + self.qname_pool.capacity() * size_of::<CompactString>()
+            + qnames
+            + self.open.capacity() * size_of::<OpenElem>()
+    }
+}
+
 impl NsScope {
+    /// Heap bytes held with nothing in scope (#80).
+    fn held_bytes(&self) -> usize {
+        use std::mem::size_of;
+        self.decls.capacity() * size_of::<(u32, Vec<(Option<String>, String)>)>()
+            + self.keys.capacity() * size_of::<(PrefixKey, NsLoc)>()
+    }
+
     /// Nothing in scope, capacity kept (#80).
     fn reset(&mut self) {
         self.decls.clear();
@@ -3717,7 +3754,38 @@ fn parse_doc(
     sax: &mut dyn SaxHandler,
     cfg: ParseCfg<'_>,
 ) -> Result<XmlDoc, XmlError> {
-    parse_doc_pooled(buffer, url, encoding, options, sax, cfg, &mut ParsePools::default())
+    with_thread_pools(|pools| parse_doc_pooled(buffer, url, encoding, options, sax, cfg, pools))
+}
+
+thread_local! {
+    /// What the last one-shot parse on this thread grew, so the next
+    /// [`xml_read_memory`] or [`xml_sax_parse_memory`] starts from it as an
+    /// [`XmlSaxParser`] does (#80). Taken for the length of a parse: a handler
+    /// that parses again from inside a callback gets empty buffers, not these.
+    static THREAD_POOLS: std::cell::Cell<Option<ParsePools>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// The most a thread keeps between one-shot parses (#80). An OOXML part
+/// leaves 2 to 6 KiB; a document with a long text run or attribute value
+/// leaves more, and its buffers are freed as before.
+const THREAD_POOL_MAX_BYTES: usize = 64 * 1024;
+
+/// Run a one-shot parse on this thread's pools. Starting each parse from
+/// empty buffers was 26 of the 43 allocations a fresh SAX parse of a PPTX
+/// part made (#80).
+fn with_thread_pools<R>(parse: impl FnOnce(&mut ParsePools) -> R) -> R {
+    let mut pools = THREAD_POOLS
+        .try_with(std::cell::Cell::take)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let result = parse(&mut pools);
+    if pools.held_bytes() <= THREAD_POOL_MAX_BYTES {
+        // Fails only while the thread is exiting; the pools are dropped then.
+        let _ = THREAD_POOLS.try_with(|c| c.set(Some(pools)));
+    }
+    result
 }
 
 /// [`parse_doc`] starting from, and leaving behind, `pools` (#80).

@@ -1720,17 +1720,25 @@ impl<'a> Parser<'a> {
             // the length limit settled once after it rather than tested per
             // byte. Both were 25% of name scanning on OOXML (#80).
             let run = &input[i..];
-            let n = run
-                .iter()
-                .position(|&b| b >= 0x80 || ASCII_NAME[b as usize] & 2 == 0)
-                .unwrap_or(run.len());
-            // The colons, in a second pass over the (short) run: tracked
-            // inside the walk above they cost more than the walk (#80).
-            if let Some(k) = run[..n].iter().position(|&b| b == b':') {
-                if colon.is_some() || run[k + 1..n].contains(&b':') {
+            // Colons are counted in the walk without a branch; where the
+            // first one is, only for a name that has one. Tracking its
+            // position inside the walk, or finding the second with
+            // `contains` (a call to memchr), cost more than the walk (#80).
+            let mut n = 0;
+            let mut colons = 0usize;
+            for &b in run {
+                if b >= 0x80 || ASCII_NAME[b as usize] & 2 == 0 {
+                    break;
+                }
+                colons += usize::from(b == b':');
+                n += 1;
+            }
+            if colons > 0 {
+                if colon.is_some() || colons > 1 {
                     many = true;
                 }
                 if colon.is_none() {
+                    let k = run[..n].iter().position(|&b| b == b':').unwrap_or(0);
                     colon = Some(i + k - start);
                 }
             }

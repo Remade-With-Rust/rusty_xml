@@ -78,10 +78,12 @@ attribute is parsed. Windows, release, four alternating rounds:
 rusty_xml still checks what quick-xml leaves to the caller: name characters,
 namespace bindings, duplicate attributes and attribute-value normalization.
 
-**Many small documents** (the XML parts of a DOCX, XLSX or PPTX package): keep
-one `XmlSaxParser` and call `parse_memory` per part. It starts each parse from
-the buffers the last one grew, with the same events as `xml_sax_parse_memory`;
-on 2,000 PPTX parts that is 2% fewer instructions again (#80).
+**Many small documents** (the XML parts of a DOCX, XLSX or PPTX package):
+`xml_sax_parse_memory` and `xml_read_memory` start each parse from the buffers
+the thread's last parse grew, up to 64 KiB, so a SAX parse of a PPTX part makes
+3 or 4 allocations. One `XmlSaxParser`, calling `parse_memory` per part, keeps
+every buffer, with no limit, for as long as you keep the parser. Events and
+results are the same either way (#80).
 
 ---
 

@@ -1041,14 +1041,32 @@ pub fn xml_ctxt_reset(ctxt: &mut XmlParserCtxt) {
 /// scope it switches to a prefix index, kept until they drop below half.
 #[derive(Default)]
 struct NsScope {
-    frames: Vec<Vec<(Option<String>, String)>>,
-    /// Indices of the frames that declare something, innermost last.
-    declaring: Vec<u32>,
+    /// One entry per element that declares something: its nesting level and
+    /// its declarations, innermost last. An element that declares nothing
+    /// pushes nothing: a frame per element was 4% of a SAX parse of
+    /// namespace-heavy OOXML (#80).
+    decls: Vec<(u32, Vec<(Option<String>, String)>)>,
+    /// Elements open, the root at 1.
+    level: u32,
     /// Declarations in scope.
     count: usize,
-    /// Prefix (`""` for the default namespace) to its URIs in scope,
-    /// innermost last. Present only while `count` is large.
-    index: Option<std::collections::HashMap<String, Vec<String>>>,
+    /// Prefix (`""` for the default namespace) to the positions of its
+    /// declarations in scope, innermost last. Present only while `count` is
+    /// large.
+    index: Option<std::collections::HashMap<String, Vec<NsLoc>>>,
+}
+
+/// Where a prefix's namespace was found: one of the two fixed bindings, or a
+/// declaration in scope, by position. Plain indices, so an open element keeps
+/// it for its end tag, across push chunks too, instead of looking the prefix
+/// up again: three lookups per element were 14% of a SAX parse of OOXML
+/// (#80). A position stays valid while the element is open, because the
+/// declarations around it are popped only after it closes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NsLoc {
+    Xml,
+    Xmlns,
+    At(u32, u32),
 }
 
 /// Declarations in scope beyond which lookup uses the prefix index.
@@ -1056,22 +1074,27 @@ const NS_WALK: usize = 32;
 
 impl NsScope {
     fn push(&mut self, frame: Vec<(Option<String>, String)>) {
+        self.level += 1;
         if !frame.is_empty() {
-            self.declaring.push(self.frames.len() as u32);
+            let di = self.decls.len() as u32;
             self.count += frame.len();
             if let Some(ix) = self.index.as_mut() {
-                for (p, u) in &frame {
-                    ix.entry(p.clone().unwrap_or_default()).or_default().push(u.clone());
+                for (k, (p, _)) in frame.iter().enumerate() {
+                    ix.entry(p.clone().unwrap_or_default())
+                        .or_default()
+                        .push(NsLoc::At(di, k as u32));
                 }
             }
+            self.decls.push((self.level, frame));
         }
-        self.frames.push(frame);
         if self.index.is_none() && self.count > NS_WALK {
-            let mut ix: std::collections::HashMap<String, Vec<String>> =
+            let mut ix: std::collections::HashMap<String, Vec<NsLoc>> =
                 std::collections::HashMap::new();
-            for &fi in &self.declaring {
-                for (p, u) in &self.frames[fi as usize] {
-                    ix.entry(p.clone().unwrap_or_default()).or_default().push(u.clone());
+            for (di, (_, f)) in self.decls.iter().enumerate() {
+                for (k, (p, _)) in f.iter().enumerate() {
+                    ix.entry(p.clone().unwrap_or_default())
+                        .or_default()
+                        .push(NsLoc::At(di as u32, k as u32));
                 }
             }
             self.index = Some(ix);
@@ -1079,45 +1102,53 @@ impl NsScope {
     }
 
     fn pop(&mut self) {
-        let Some(frame) = self.frames.pop() else {
-            return;
-        };
-        if frame.is_empty() {
-            return;
-        }
-        self.declaring.pop();
-        self.count -= frame.len();
-        if let Some(ix) = self.index.as_mut() {
-            for (p, _) in &frame {
-                if let Some(v) = ix.get_mut(p.as_deref().unwrap_or("")) {
-                    v.pop();
+        if self.decls.last().is_some_and(|(l, _)| *l == self.level) {
+            let (_, frame) = self.decls.pop().expect("checked above");
+            self.count -= frame.len();
+            if let Some(ix) = self.index.as_mut() {
+                for (p, _) in &frame {
+                    if let Some(v) = ix.get_mut(p.as_deref().unwrap_or("")) {
+                        v.pop();
+                    }
+                }
+                if self.count < NS_WALK / 2 {
+                    self.index = None;
                 }
             }
-            if self.count < NS_WALK / 2 {
-                self.index = None;
-            }
+        }
+        self.level = self.level.saturating_sub(1);
+    }
+
+    /// The innermost open element's own declarations.
+    fn last(&self) -> &[(Option<String>, String)] {
+        match self.decls.last() {
+            Some((l, f)) if *l == self.level => f,
+            _ => &[],
         }
     }
 
-    fn last(&self) -> Option<&Vec<(Option<String>, String)>> {
-        self.frames.last()
-    }
-
-    fn lookup(&self, prefix: Option<&str>) -> Option<&str> {
+    /// Where `prefix` is declared in scope (not the fixed `xml` and `xmlns`).
+    fn locate(&self, prefix: Option<&str>) -> Option<NsLoc> {
         if let Some(ix) = &self.index {
-            return ix
-                .get(prefix.unwrap_or(""))
-                .and_then(|v| v.last())
-                .map(String::as_str);
+            return ix.get(prefix.unwrap_or("")).and_then(|v| v.last()).copied();
         }
-        for &fi in self.declaring.iter().rev() {
-            for (p, uri) in self.frames[fi as usize].iter().rev() {
+        for (di, (_, f)) in self.decls.iter().enumerate().rev() {
+            for (k, (p, _)) in f.iter().enumerate().rev() {
                 if p.as_deref() == prefix {
-                    return Some(uri);
+                    return Some(NsLoc::At(di as u32, k as u32));
                 }
             }
         }
         None
+    }
+
+    /// The namespace at a location [`ns_locate`] returned.
+    fn uri(&self, loc: NsLoc) -> &str {
+        match loc {
+            NsLoc::Xml => XML_NS,
+            NsLoc::Xmlns => XMLNS_NS,
+            NsLoc::At(d, k) => &self.decls[d as usize].1[k as usize].1,
+        }
     }
 }
 
@@ -1154,6 +1185,8 @@ struct OpenElem {
     qname: CompactString,
     /// Length of the prefix when the QName splits as `prefix:local`.
     prefix_len: Option<usize>,
+    /// Where the element's namespace was found when it opened (#80).
+    uri_loc: Option<NsLoc>,
     elem: NodeId,
 }
 
@@ -1239,10 +1272,16 @@ fn take_text(buf: &mut String) -> rusty_xml_tree::CompactString {
 
 /// A namespace lookup that borrows the URI from the scope stack.
 fn ns_lookup<'s>(ns: &'s NsScope, prefix: Option<&str>) -> Option<&'s str> {
+    ns_locate(ns, prefix).map(|l| ns.uri(l))
+}
+
+/// [`ns_lookup`] that returns where the namespace was found, to be resolved
+/// again with [`NsScope::uri`] without a second lookup.
+fn ns_locate(ns: &NsScope, prefix: Option<&str>) -> Option<NsLoc> {
     match prefix {
-        Some("xml") => Some(XML_NS),
-        Some("xmlns") => Some(XMLNS_NS),
-        p => ns.lookup(p),
+        Some("xml") => Some(NsLoc::Xml),
+        Some("xmlns") => Some(NsLoc::Xmlns),
+        p => ns.locate(p),
     }
 }
 
@@ -2675,7 +2714,10 @@ impl<'a> Parser<'a> {
         // readers borrow it back from there.
         self.ns_stack.push(ns_frame);
 
-        if prefix.is_some() && ns_lookup(&self.ns_stack, prefix).is_none() {
+        // Located once: the check below, the start event, the element node
+        // and the end tag all use it (#80).
+        let elem_loc = ns_locate(&self.ns_stack, prefix);
+        if prefix.is_some() && elem_loc.is_none() {
             // Scraped markup is full of prefixes nobody declared, and an
             // undeclared prefix is a namespace error, not a well-formedness
             // one. libxml2 reports it and carries on -- exits zero -- so
@@ -2826,11 +2868,10 @@ impl<'a> Parser<'a> {
             n_sax += 1;
         }
 
-        let frame: &[(Option<String>, String)] =
-            self.ns_stack.last().map(Vec::as_slice).unwrap_or(&[]);
+        let frame: &[(Option<String>, String)] = self.ns_stack.last();
         // Borrowed from the scope stack: an owned copy of the URI was one
         // allocation per element (#52).
-        let elem_uri = ns_lookup(&self.ns_stack, prefix);
+        let elem_uri = elem_loc.map(|l| self.ns_stack.uri(l));
         self.sax
             .start_element_ns(local, prefix, elem_uri, frame, &sax_attrs[..n_sax], 0);
 
@@ -2843,10 +2884,10 @@ impl<'a> Parser<'a> {
         } else {
             let elem = self.doc.alloc(NodeKind::Element, local);
             self.doc.set_prefix(elem, prefix);
-            self.doc.set_ns_uri(elem, ns_lookup(&self.ns_stack, prefix));
-            for i in 0..self.ns_stack.last().map_or(0, Vec::len) {
+            self.doc.set_ns_uri(elem, elem_loc.map(|l| self.ns_stack.uri(l)));
+            for i in 0..self.ns_stack.last().len() {
                 let (p, u) = {
-                    let f = self.ns_stack.last().unwrap();
+                    let f = self.ns_stack.last();
                     (f[i].0.clone(), f[i].1.clone())
                 };
                 self.doc.push_ns_def(elem, p, u);
@@ -2869,7 +2910,7 @@ impl<'a> Parser<'a> {
 
         if empty {
             let uri = if self.no_tree {
-                ns_lookup(&self.ns_stack, prefix)
+                elem_loc.map(|l| self.ns_stack.uri(l))
             } else {
                 self.doc.ns_uri(elem)
             };
@@ -2883,6 +2924,7 @@ impl<'a> Parser<'a> {
         let qname = self.pooled_qname(qn.s);
         Ok(Some(OpenElem {
             qname,
+            uri_loc: elem_loc,
             prefix_len: qn.prefix_len(),
             elem,
         }))
@@ -2936,7 +2978,7 @@ impl<'a> Parser<'a> {
             ));
         }
         let uri = if self.no_tree {
-            ns_lookup(&self.ns_stack, prefix)
+            open.uri_loc.map(|l| self.ns_stack.uri(l))
         } else {
             self.doc.ns_uri(open.elem)
         };

@@ -1587,26 +1587,35 @@ impl<'a> Parser<'a> {
             }
         }
         loop {
-            let mut i = self.pos;
-            while let Some(&b) = input.get(i) {
-                if b >= 0x80 || ASCII_NAME[b as usize] & 2 == 0 {
-                    break;
+            let i = self.pos;
+            // The ASCII run: a slice walk, so no per-byte bounds check, and
+            // the length limit settled once after it rather than tested per
+            // byte. Both were 25% of name scanning on OOXML (#80).
+            let run = &input[i..];
+            let n = run
+                .iter()
+                .position(|&b| b >= 0x80 || ASCII_NAME[b as usize] & 2 == 0)
+                .unwrap_or(run.len());
+            // The colons, in a second pass over the (short) run: tracked
+            // inside the walk above they cost more than the walk (#80).
+            if let Some(k) = run[..n].iter().position(|&b| b == b':') {
+                if colon.is_some() || run[k + 1..n].contains(&b':') {
+                    many = true;
                 }
-                if i - start >= max {
-                    self.col += (i - self.pos) as u32;
-                    self.pos = i;
-                    return Err(self.err(XML_ERR_NAME_REQUIRED, "Name too long"));
+                if colon.is_none() {
+                    colon = Some(i + k - start);
                 }
-                if b == b':' {
-                    if colon.is_some() {
-                        many = true;
-                    } else {
-                        colon = Some(i - start);
-                    }
-                }
-                i += 1;
             }
-            self.col += (i - self.pos) as u32;
+            if i + n - start > max {
+                // Where the per-byte test used to stop: the first byte past
+                // the limit.
+                let at = start + max;
+                self.col += (at - i) as u32;
+                self.pos = at;
+                return Err(self.err(XML_ERR_NAME_REQUIRED, "Name too long"));
+            }
+            let i = i + n;
+            self.col += n as u32;
             self.pos = i;
             match input.get(i) {
                 Some(&b) if b >= 0x80 => {

@@ -1213,9 +1213,13 @@ struct ParsePools {
     ns: NsScope,
     stack: Vec<NodeId>,
     char_buf: String,
-    /// Attribute value buffers (the raw attributes themselves borrow the
-    /// input, so only their buffers outlive a parse).
+    /// Attribute value buffers, in slot order from the end: the next parse's
+    /// first slot pops the buffer the first slot grew.
     raw_vals: Vec<String>,
+    /// The raw attribute slots' storage, empty. A slot borrows the input, so
+    /// it is kept as `'static` and converted in place, which keeps the
+    /// allocation (#80).
+    raw: Vec<RawAttr<'static>>,
     sax: Vec<SaxAttr>,
     qname_pool: Vec<CompactString>,
     open: Vec<OpenElem>,
@@ -1241,6 +1245,7 @@ impl ParsePools {
             + self.char_buf.capacity()
             + self.raw_vals.capacity() * size_of::<String>()
             + self.raw_vals.iter().map(String::capacity).sum::<usize>()
+            + self.raw.capacity() * size_of::<RawAttr<'static>>()
             + self.sax.capacity() * size_of::<SaxAttr>()
             + attrs
             + self.qname_pool.capacity() * size_of::<CompactString>()
@@ -1456,6 +1461,13 @@ struct RawAttr<'a> {
     qname: QName<'a>,
     value: String,
     value_off: usize,
+}
+
+/// Empty raw attribute storage, re-borrowed for another input. Collected in
+/// place, so the allocation is kept; nothing is copied, as nothing is in it.
+fn relifetime<'b>(v: Vec<RawAttr<'_>>) -> Vec<RawAttr<'b>> {
+    debug_assert!(v.is_empty());
+    v.into_iter().filter_map(|_| None).collect()
 }
 
 /// A name read in place from the input, with its QName colon found by the
@@ -3359,9 +3371,11 @@ impl<'a> Parser<'a> {
         let mut char_buf = std::mem::take(&mut self.char_buf);
         char_buf.clear();
         let mut raw_vals = std::mem::take(&mut self.raw_vals);
-        if let Some(raw) = self.scratch_raw.take() {
-            raw_vals.extend(raw.into_iter().map(|r| r.value));
-        }
+        let mut slots = self.scratch_raw.take().unwrap_or_default();
+        // Last slot first, so the first slot's buffer is popped first and
+        // each slot gets back the buffer it grew: in reverse, the first
+        // slot's long namespace URIs reallocated a short buffer (#80).
+        raw_vals.extend(slots.drain(..).rev().map(|r| r.value));
         let mut open = std::mem::take(&mut self.open_pool);
         open.clear();
         ParsePools {
@@ -3369,6 +3383,7 @@ impl<'a> Parser<'a> {
             stack,
             char_buf,
             raw_vals,
+            raw: relifetime(slots),
             sax: self.scratch_sax.take().unwrap_or_default(),
             qname_pool: std::mem::take(&mut self.qname_pool),
             open,
@@ -3904,6 +3919,7 @@ fn parse_utf8(
         stack,
         char_buf,
         raw_vals,
+        raw,
         sax: sax_pool,
         qname_pool,
         open,
@@ -3945,7 +3961,7 @@ fn parse_utf8(
         interrupted: false,
         depth_cap: xml_depth_cap(&cfg.settings, options),
         scan_hint: None,
-        scratch_raw: None,
+        scratch_raw: Some(relifetime(raw)),
         scratch_sax: Some(sax_pool),
         qname_pool,
         raw_vals,

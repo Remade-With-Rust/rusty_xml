@@ -538,6 +538,17 @@ pub fn xml_sax_parse_memory_with(
     sax: &mut dyn SaxHandler,
     settings: &XmlParseSettings<'_>,
 ) -> Result<XmlDoc, XmlError> {
+    sax_parse(buffer, options, sax, settings, &mut ParsePools::default())
+}
+
+/// The SAX parse behind [`xml_sax_parse_memory_with`] and [`XmlSaxParser`].
+fn sax_parse(
+    buffer: &[u8],
+    options: i32,
+    sax: &mut dyn SaxHandler,
+    settings: &XmlParseSettings<'_>,
+    pools: &mut ParsePools,
+) -> Result<XmlDoc, XmlError> {
     let mut gate = StopGate {
         inner: sax,
         stopped: false,
@@ -547,7 +558,80 @@ pub fn xml_sax_parse_memory_with(
         sax_stop: true,
         recovered: None,
     };
-    parse_doc(buffer, None, None, options, &mut gate, cfg)
+    parse_doc_pooled(buffer, None, None, options, &mut gate, cfg, pools)
+}
+
+/// A SAX parser kept from one document to the next (#80).
+///
+/// [`xml_sax_parse_memory`] starts every parse from empty buffers, so a
+/// program reading many small documents -- the thousands of XML parts in a
+/// DOCX, XLSX or PPTX package -- grows them again for each one. An
+/// `XmlSaxParser` keeps what a parse grew (the namespace scope, the element
+/// stacks, the attribute and text buffers) and starts the next parse from it.
+///
+/// Only capacity is kept: the events, errors and returned document of each
+/// parse are exactly those of [`xml_sax_parse_memory_with`], including after
+/// a parse that failed or was stopped.
+///
+/// ```
+/// use rusty_xml_parser::{default_parse_options, XmlSaxParser, XML_PARSE_NO_TREE};
+/// use rusty_xml_sax::{SaxAttr, SaxHandler};
+///
+/// struct Count(usize);
+/// impl SaxHandler for Count {
+///     fn start_element_ns(&mut self, _: &str, _: Option<&str>, _: Option<&str>,
+///                         _: &[(Option<String>, String)], _: &[SaxAttr], _: i32) {
+///         self.0 += 1;
+///     }
+/// }
+///
+/// let mut parser = XmlSaxParser::new();
+/// let mut count = Count(0);
+/// let opts = default_parse_options() | XML_PARSE_NO_TREE;
+/// for part in [&b"<a><b/></a>"[..], b"<c/>"] {
+///     parser.parse_memory(part, opts, &mut count).unwrap();
+/// }
+/// assert_eq!(count.0, 3);
+/// ```
+#[derive(Default)]
+pub struct XmlSaxParser {
+    pools: ParsePools,
+}
+
+impl std::fmt::Debug for XmlSaxParser {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("XmlSaxParser").finish_non_exhaustive()
+    }
+}
+
+impl XmlSaxParser {
+    /// A parser with nothing grown yet.
+    pub fn new() -> XmlSaxParser {
+        XmlSaxParser::default()
+    }
+
+    /// [`xml_sax_parse_memory`], starting from the buffers earlier parses
+    /// grew.
+    pub fn parse_memory(
+        &mut self,
+        buffer: &[u8],
+        options: i32,
+        sax: &mut dyn SaxHandler,
+    ) -> Result<XmlDoc, XmlError> {
+        self.parse_memory_with(buffer, options, sax, &XmlParseSettings::new())
+    }
+
+    /// [`xml_sax_parse_memory_with`], starting from the buffers earlier
+    /// parses grew.
+    pub fn parse_memory_with(
+        &mut self,
+        buffer: &[u8],
+        options: i32,
+        sax: &mut dyn SaxHandler,
+        settings: &XmlParseSettings<'_>,
+    ) -> Result<XmlDoc, XmlError> {
+        sax_parse(buffer, options, sax, settings, &mut self.pools)
+    }
 }
 
 /// [`xml_sax_parse_memory`] that also polls `interrupt`.
@@ -965,9 +1049,11 @@ fn fresh_parser<'a>(
         interrupted: false,
         depth_cap: xml_depth_cap(&cfg.settings, options),
         scan_hint: None,
-        scratch_raw: Vec::new(),
-        scratch_sax: Vec::new(),
+        scratch_raw: None,
+        scratch_sax: None,
         qname_pool: Vec::new(),
+        raw_vals: Vec::new(),
+        open_pool: Vec::new(),
         started: false,
     }
 }
@@ -1041,83 +1127,203 @@ pub fn xml_ctxt_reset(ctxt: &mut XmlParserCtxt) {
 /// scope it switches to a prefix index, kept until they drop below half.
 #[derive(Default)]
 struct NsScope {
-    frames: Vec<Vec<(Option<String>, String)>>,
-    /// Indices of the frames that declare something, innermost last.
-    declaring: Vec<u32>,
+    /// One entry per element that declares something: its nesting level and
+    /// its declarations, innermost last. An element that declares nothing
+    /// pushes nothing: a frame per element was 4% of a SAX parse of
+    /// namespace-heavy OOXML (#80).
+    decls: Vec<(u32, Vec<(Option<String>, String)>)>,
+    /// Elements open, the root at 1.
+    level: u32,
     /// Declarations in scope.
     count: usize,
-    /// Prefix (`""` for the default namespace) to its URIs in scope,
-    /// innermost last. Present only while `count` is large.
-    index: Option<std::collections::HashMap<String, Vec<String>>>,
+    /// Every declaration in scope as a packed prefix key and its position,
+    /// innermost last, so a lookup compares one integer per declaration
+    /// instead of calling `memcmp` on each prefix: OOXML parts bind 3 to 10
+    /// prefixes, most of them one byte long (#80).
+    keys: Vec<(PrefixKey, NsLoc)>,
+    /// Prefix (`""` for the default namespace) to the positions of its
+    /// declarations in scope, innermost last. Present only while `count` is
+    /// large.
+    index: Option<std::collections::HashMap<String, Vec<NsLoc>>>,
+}
+
+/// A prefix packed for comparison: its first 8 bytes and its length, with
+/// `u16::MAX` for the default namespace. Prefixes of up to 8 bytes compare
+/// exactly on the key; a longer one is confirmed against the stored prefix.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct PrefixKey {
+    head: u64,
+    len: u16,
+}
+
+impl PrefixKey {
+    #[inline]
+    fn of(prefix: Option<&str>) -> PrefixKey {
+        match prefix {
+            None => PrefixKey { head: 0, len: u16::MAX },
+            Some(p) => {
+                let b = p.as_bytes();
+                // Byte by byte: a runtime-length copy into a [u8; 8] was a
+                // call to memcpy per lookup, and most prefixes are 1 to 3
+                // bytes (#80).
+                let mut head = 0u64;
+                for (k, &c) in b.iter().take(8).enumerate() {
+                    head |= u64::from(c) << (8 * k);
+                }
+                PrefixKey {
+                    head,
+                    len: u16::try_from(b.len()).unwrap_or(u16::MAX - 1),
+                }
+            }
+        }
+    }
+}
+
+/// Where a prefix's namespace was found: one of the two fixed bindings, or a
+/// declaration in scope, by position. Plain indices, so an open element keeps
+/// it for its end tag, across push chunks too, instead of looking the prefix
+/// up again: three lookups per element were 14% of a SAX parse of OOXML
+/// (#80). A position stays valid while the element is open, because the
+/// declarations around it are popped only after it closes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NsLoc {
+    Xml,
+    Xmlns,
+    At(u32, u32),
 }
 
 /// Declarations in scope beyond which lookup uses the prefix index.
 const NS_WALK: usize = 32;
 
+/// Buffers a parse grows that the next parse can start from (#80). Capacity
+/// only: each is empty between parses.
+#[derive(Default)]
+struct ParsePools {
+    ns: NsScope,
+    stack: Vec<NodeId>,
+    char_buf: String,
+    /// Attribute value buffers (the raw attributes themselves borrow the
+    /// input, so only their buffers outlive a parse).
+    raw_vals: Vec<String>,
+    sax: Vec<SaxAttr>,
+    qname_pool: Vec<CompactString>,
+    open: Vec<OpenElem>,
+}
+
 impl NsScope {
+    /// Nothing in scope, capacity kept (#80).
+    fn reset(&mut self) {
+        self.decls.clear();
+        self.keys.clear();
+        self.level = 0;
+        self.count = 0;
+        self.index = None;
+    }
+
+    /// An element that declares nothing: a level, and nothing to store.
+    #[inline]
+    fn enter(&mut self) {
+        self.level += 1;
+    }
+
     fn push(&mut self, frame: Vec<(Option<String>, String)>) {
+        self.level += 1;
         if !frame.is_empty() {
-            self.declaring.push(self.frames.len() as u32);
+            let di = self.decls.len() as u32;
             self.count += frame.len();
+            for (k, (p, _)) in frame.iter().enumerate() {
+                self.keys
+                    .push((PrefixKey::of(p.as_deref()), NsLoc::At(di, k as u32)));
+            }
             if let Some(ix) = self.index.as_mut() {
-                for (p, u) in &frame {
-                    ix.entry(p.clone().unwrap_or_default()).or_default().push(u.clone());
+                for (k, (p, _)) in frame.iter().enumerate() {
+                    ix.entry(p.clone().unwrap_or_default())
+                        .or_default()
+                        .push(NsLoc::At(di, k as u32));
                 }
             }
+            self.decls.push((self.level, frame));
         }
-        self.frames.push(frame);
         if self.index.is_none() && self.count > NS_WALK {
-            let mut ix: std::collections::HashMap<String, Vec<String>> =
+            let mut ix: std::collections::HashMap<String, Vec<NsLoc>> =
                 std::collections::HashMap::new();
-            for &fi in &self.declaring {
-                for (p, u) in &self.frames[fi as usize] {
-                    ix.entry(p.clone().unwrap_or_default()).or_default().push(u.clone());
+            for (di, (_, f)) in self.decls.iter().enumerate() {
+                for (k, (p, _)) in f.iter().enumerate() {
+                    ix.entry(p.clone().unwrap_or_default())
+                        .or_default()
+                        .push(NsLoc::At(di as u32, k as u32));
                 }
             }
             self.index = Some(ix);
         }
     }
 
+    #[inline]
     fn pop(&mut self) {
-        let Some(frame) = self.frames.pop() else {
-            return;
-        };
-        if frame.is_empty() {
-            return;
+        if self.decls.last().is_some_and(|(l, _)| *l == self.level) {
+            self.pop_frame();
         }
-        self.declaring.pop();
-        self.count -= frame.len();
-        if let Some(ix) = self.index.as_mut() {
-            for (p, _) in &frame {
-                if let Some(v) = ix.get_mut(p.as_deref().unwrap_or("")) {
-                    v.pop();
+        self.level = self.level.saturating_sub(1);
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn pop_frame(&mut self) {
+        {
+            let (_, frame) = self.decls.pop().expect("the caller checked it");
+            self.count -= frame.len();
+            self.keys.truncate(self.keys.len() - frame.len());
+            if let Some(ix) = self.index.as_mut() {
+                for (p, _) in &frame {
+                    if let Some(v) = ix.get_mut(p.as_deref().unwrap_or("")) {
+                        v.pop();
+                    }
+                }
+                if self.count < NS_WALK / 2 {
+                    self.index = None;
                 }
             }
-            if self.count < NS_WALK / 2 {
-                self.index = None;
-            }
         }
     }
 
-    fn last(&self) -> Option<&Vec<(Option<String>, String)>> {
-        self.frames.last()
+    /// The innermost open element's own declarations.
+    fn last(&self) -> &[(Option<String>, String)] {
+        match self.decls.last() {
+            Some((l, f)) if *l == self.level => f,
+            _ => &[],
+        }
     }
 
-    fn lookup(&self, prefix: Option<&str>) -> Option<&str> {
+    /// Where `prefix` is declared in scope (not the fixed `xml` and `xmlns`).
+    fn locate(&self, prefix: Option<&str>) -> Option<NsLoc> {
         if let Some(ix) = &self.index {
-            return ix
-                .get(prefix.unwrap_or(""))
-                .and_then(|v| v.last())
-                .map(String::as_str);
+            return ix.get(prefix.unwrap_or("")).and_then(|v| v.last()).copied();
         }
-        for &fi in self.declaring.iter().rev() {
-            for (p, uri) in self.frames[fi as usize].iter().rev() {
-                if p.as_deref() == prefix {
-                    return Some(uri);
-                }
+        let key = PrefixKey::of(prefix);
+        for &(k, loc) in self.keys.iter().rev() {
+            if k == key && (key.len <= 8 || key.len == u16::MAX || self.prefix_at(loc) == prefix) {
+                return Some(loc);
             }
         }
         None
+    }
+
+    /// The prefix declared at a position.
+    fn prefix_at(&self, loc: NsLoc) -> Option<&str> {
+        match loc {
+            NsLoc::At(d, k) => self.decls[d as usize].1[k as usize].0.as_deref(),
+            NsLoc::Xml => Some("xml"),
+            NsLoc::Xmlns => Some("xmlns"),
+        }
+    }
+
+    /// The namespace at a location [`ns_locate`] returned.
+    fn uri(&self, loc: NsLoc) -> &str {
+        match loc {
+            NsLoc::Xml => XML_NS,
+            NsLoc::Xmlns => XMLNS_NS,
+            NsLoc::At(d, k) => &self.decls[d as usize].1[k as usize].1,
+        }
     }
 }
 
@@ -1154,6 +1360,8 @@ struct OpenElem {
     qname: CompactString,
     /// Length of the prefix when the QName splits as `prefix:local`.
     prefix_len: Option<usize>,
+    /// Where the element's namespace was found when it opened (#80).
+    uri_loc: Option<NsLoc>,
     elem: NodeId,
 }
 
@@ -1239,10 +1447,16 @@ fn take_text(buf: &mut String) -> rusty_xml_tree::CompactString {
 
 /// A namespace lookup that borrows the URI from the scope stack.
 fn ns_lookup<'s>(ns: &'s NsScope, prefix: Option<&str>) -> Option<&'s str> {
+    ns_locate(ns, prefix).map(|l| ns.uri(l))
+}
+
+/// [`ns_lookup`] that returns where the namespace was found, to be resolved
+/// again with [`NsScope::uri`] without a second lookup.
+fn ns_locate(ns: &NsScope, prefix: Option<&str>) -> Option<NsLoc> {
     match prefix {
-        Some("xml") => Some(XML_NS),
-        Some("xmlns") => Some(XMLNS_NS),
-        p => ns.lookup(p),
+        Some("xml") => Some(NsLoc::Xml),
+        Some("xmlns") => Some(NsLoc::Xmlns),
+        p => ns.locate(p),
     }
 }
 
@@ -1263,8 +1477,15 @@ struct Parser<'a> {
     doc: XmlDoc,
     stack: Vec<NodeId>,
     char_buf: String,
-    scratch_raw: Vec<RawAttr<'a>>,
-    scratch_sax: Vec<SaxAttr>,
+    // Optional so that putting a pool back is an inline test of an empty
+    // slot, not an out-of-line drop of the empty Vec `take` left in it: three
+    // of those per element were 2.7% of a SAX parse of OOXML (#80).
+    scratch_raw: Option<Vec<RawAttr<'a>>>,
+    scratch_sax: Option<Vec<SaxAttr>>,
+    /// Spare attribute value buffers, from an earlier parse (#80).
+    raw_vals: Vec<String>,
+    /// The open-element stack's buffer, between parses (#80).
+    open_pool: Vec<OpenElem>,
     /// Heap buffers of closed elements' long QNames, reused by the next
     /// element that opens with one (#69). At most one per nesting level.
     qname_pool: Vec<CompactString>,
@@ -1330,6 +1551,13 @@ impl<'a> Parser<'a> {
 
     fn starts_with(&self, s: &[u8]) -> bool {
         self.input[self.pos..].starts_with(s)
+    }
+
+    /// At `/>`: two byte tests. Through `starts_with` it was a call to
+    /// memcmp after every attribute and start tag, 1% of a SAX parse of
+    /// OOXML (#80); marking `starts_with` inline changed nothing.
+    fn at_empty_tag_end(&self) -> bool {
+        self.input.get(self.pos) == Some(&b'/') && self.input.get(self.pos + 1) == Some(&b'>')
     }
 
     fn bump_byte(&mut self) -> Option<u8> {
@@ -1487,26 +1715,43 @@ impl<'a> Parser<'a> {
             }
         }
         loop {
-            let mut i = self.pos;
-            while let Some(&b) = input.get(i) {
+            let i = self.pos;
+            // The ASCII run: a slice walk, so no per-byte bounds check, and
+            // the length limit settled once after it rather than tested per
+            // byte. Both were 25% of name scanning on OOXML (#80).
+            let run = &input[i..];
+            // Colons are counted in the walk without a branch; where the
+            // first one is, only for a name that has one. Tracking its
+            // position inside the walk, or finding the second with
+            // `contains` (a call to memchr), cost more than the walk (#80).
+            let mut n = 0;
+            let mut colons = 0usize;
+            for &b in run {
                 if b >= 0x80 || ASCII_NAME[b as usize] & 2 == 0 {
                     break;
                 }
-                if i - start >= max {
-                    self.col += (i - self.pos) as u32;
-                    self.pos = i;
-                    return Err(self.err(XML_ERR_NAME_REQUIRED, "Name too long"));
-                }
-                if b == b':' {
-                    if colon.is_some() {
-                        many = true;
-                    } else {
-                        colon = Some(i - start);
-                    }
-                }
-                i += 1;
+                colons += usize::from(b == b':');
+                n += 1;
             }
-            self.col += (i - self.pos) as u32;
+            if colons > 0 {
+                if colon.is_some() || colons > 1 {
+                    many = true;
+                }
+                if colon.is_none() {
+                    let k = run[..n].iter().position(|&b| b == b':').unwrap_or(0);
+                    colon = Some(i + k - start);
+                }
+            }
+            if i + n - start > max {
+                // Where the per-byte test used to stop: the first byte past
+                // the limit.
+                let at = start + max;
+                self.col += (at - i) as u32;
+                self.pos = at;
+                return Err(self.err(XML_ERR_NAME_REQUIRED, "Name too long"));
+            }
+            let i = i + n;
+            self.col += n as u32;
             self.pos = i;
             match input.get(i) {
                 Some(&b) if b >= 0x80 => {
@@ -2154,9 +2399,11 @@ impl<'a> Parser<'a> {
             stack: Vec::new(),
             char_buf: String::new(),
         char_buf_from_reference: false,
-            scratch_raw: Vec::new(),
-            scratch_sax: Vec::new(),
+            scratch_raw: None,
+            scratch_sax: None,
             qname_pool: Vec::new(),
+            raw_vals: Vec::new(),
+            open_pool: Vec::new(),
             started: false,
             no_tree: false,
             recover: self.recover,
@@ -2553,13 +2800,13 @@ impl<'a> Parser<'a> {
         // A pool reused across elements, entries past `n_raw` included: each
         // keeps its value buffer, so a value is parsed into capacity an
         // earlier attribute left behind instead of a fresh String (#52).
-        let mut raw_attrs: Vec<RawAttr<'a>> = std::mem::take(&mut self.scratch_raw);
+        let mut raw_attrs: Vec<RawAttr<'a>> = self.scratch_raw.take().unwrap_or_default();
         let mut n_raw = 0usize;
         loop {
             let before_ws = self.pos;
             self.skip_s()?;
             let had_ws = self.pos > before_ws;
-            if self.starts_with(b"/>") || self.peek_byte() == Some(b'>') {
+            if self.at_empty_tag_end() || self.peek_byte() == Some(b'>') {
                 break;
             }
             // `att1="a"att2="b"` was accepted; the grammar requires S
@@ -2578,7 +2825,7 @@ impl<'a> Parser<'a> {
             if n_raw == raw_attrs.len() {
                 raw_attrs.push(RawAttr {
                     qname: an,
-                    value: String::new(),
+                    value: self.raw_vals.pop().unwrap_or_default(),
                     value_off: 0,
                 });
             }
@@ -2591,7 +2838,7 @@ impl<'a> Parser<'a> {
             raw_attrs[n_raw].value_off = value_off;
             n_raw += 1;
         }
-        let empty = if self.starts_with(b"/>") {
+        let empty = if self.at_empty_tag_end() {
             self.pos += 2;
             self.col += 2;
             true
@@ -2600,7 +2847,7 @@ impl<'a> Parser<'a> {
             false
         };
 
-        let mut ns_frame: Vec<(Option<String>, String)> = Vec::new();
+        let mut ns_frame: Option<Vec<(Option<String>, String)>> = None;
         // A namespace declaration is an attribute, and if the DTD declares it
         // as a tokenized type its value is normalized before it means
         // anything. Namespace declarations never reach the attribute chain, so
@@ -2634,7 +2881,8 @@ impl<'a> Parser<'a> {
                 } else if a.value == XMLNS_NS {
                     self.ns_error("xmlns namespace URI cannot be the default namespace");
                 }
-                ns_frame.push((None, normalize_ns(self, a.qname.s, &a.value)));
+                let v = normalize_ns(self, a.qname.s, &a.value);
+                ns_frame.get_or_insert_with(Vec::new).push((None, v));
             } else if ap == Some("xmlns") {
                 if !a.value.is_empty()
                     && !Self::uri_has_scheme(&a.value)
@@ -2668,14 +2916,21 @@ impl<'a> Parser<'a> {
                 if a.value.is_empty() {
                     self.ns_error("Empty XML namespace is not allowed");
                 }
-                ns_frame.push((Some(al.to_string()), normalize_ns(self, a.qname.s, &a.value)));
+                let v = normalize_ns(self, a.qname.s, &a.value);
+                ns_frame.get_or_insert_with(Vec::new).push((Some(al.to_string()), v));
             }
         }
         // The frame is pushed, not copied; the stack owns it and both later
         // readers borrow it back from there.
-        self.ns_stack.push(ns_frame);
+        match ns_frame {
+            None => self.ns_stack.enter(),
+            Some(f) => self.ns_stack.push(f),
+        }
 
-        if prefix.is_some() && ns_lookup(&self.ns_stack, prefix).is_none() {
+        // Located once: the check below, the start event, the element node
+        // and the end tag all use it (#80).
+        let elem_loc = ns_locate(&self.ns_stack, prefix);
+        if prefix.is_some() && elem_loc.is_none() {
             // Scraped markup is full of prefixes nobody declared, and an
             // undeclared prefix is a namespace error, not a well-formedness
             // one. libxml2 reports it and carries on -- exits zero -- so
@@ -2695,7 +2950,7 @@ impl<'a> Parser<'a> {
         let mut seen_qnames: Option<WideSeen> = None;
         // Pooled like `raw_attrs`: the handler sees `sax_attrs[..n_sax]`, and
         // the entries keep their buffers for the next element (#52).
-        let mut sax_attrs: Vec<SaxAttr> = std::mem::take(&mut self.scratch_sax);
+        let mut sax_attrs: Vec<SaxAttr> = self.scratch_sax.take().unwrap_or_default();
         let mut n_sax = 0usize;
         for raw in &mut raw_attrs[..n_raw] {
             let (ap, al) = raw.qname.parts();
@@ -2826,11 +3081,10 @@ impl<'a> Parser<'a> {
             n_sax += 1;
         }
 
-        let frame: &[(Option<String>, String)] =
-            self.ns_stack.last().map(Vec::as_slice).unwrap_or(&[]);
+        let frame: &[(Option<String>, String)] = self.ns_stack.last();
         // Borrowed from the scope stack: an owned copy of the URI was one
         // allocation per element (#52).
-        let elem_uri = ns_lookup(&self.ns_stack, prefix);
+        let elem_uri = elem_loc.map(|l| self.ns_stack.uri(l));
         self.sax
             .start_element_ns(local, prefix, elem_uri, frame, &sax_attrs[..n_sax], 0);
 
@@ -2843,10 +3097,10 @@ impl<'a> Parser<'a> {
         } else {
             let elem = self.doc.alloc(NodeKind::Element, local);
             self.doc.set_prefix(elem, prefix);
-            self.doc.set_ns_uri(elem, ns_lookup(&self.ns_stack, prefix));
-            for i in 0..self.ns_stack.last().map_or(0, Vec::len) {
+            self.doc.set_ns_uri(elem, elem_loc.map(|l| self.ns_stack.uri(l)));
+            for i in 0..self.ns_stack.last().len() {
                 let (p, u) = {
-                    let f = self.ns_stack.last().unwrap();
+                    let f = self.ns_stack.last();
                     (f[i].0.clone(), f[i].1.clone())
                 };
                 self.doc.push_ns_def(elem, p, u);
@@ -2864,12 +3118,12 @@ impl<'a> Parser<'a> {
             elem
         };
 
-        self.scratch_raw = raw_attrs;
-        self.scratch_sax = sax_attrs;
+        self.scratch_raw = Some(raw_attrs);
+        self.scratch_sax = Some(sax_attrs);
 
         if empty {
             let uri = if self.no_tree {
-                ns_lookup(&self.ns_stack, prefix)
+                elem_loc.map(|l| self.ns_stack.uri(l))
             } else {
                 self.doc.ns_uri(elem)
             };
@@ -2883,6 +3137,7 @@ impl<'a> Parser<'a> {
         let qname = self.pooled_qname(qn.s);
         Ok(Some(OpenElem {
             qname,
+            uri_loc: elem_loc,
             prefix_len: qn.prefix_len(),
             elem,
         }))
@@ -2936,7 +3191,7 @@ impl<'a> Parser<'a> {
             ));
         }
         let uri = if self.no_tree {
-            ns_lookup(&self.ns_stack, prefix)
+            open.uri_loc.map(|l| self.ns_stack.uri(l))
         } else {
             self.doc.ns_uri(open.elem)
         };
@@ -2969,9 +3224,36 @@ impl<'a> Parser<'a> {
     /// descent is an explicit stack and the depth of a document costs no stack
     /// at all.
     fn parse_content(&mut self, parent: NodeId) -> Result<(), XmlError> {
-        let mut open: Vec<OpenElem> = Vec::new();
-        self.parse_content_inner(parent, &mut open, false, false)?;
-        Ok(())
+        let mut open: Vec<OpenElem> = std::mem::take(&mut self.open_pool);
+        let r = self.parse_content_inner(parent, &mut open, false, false);
+        open.clear();
+        self.open_pool = open;
+        r.map(drop)
+    }
+
+    /// The buffers this parse grew, emptied, for the next one (#80).
+    fn take_pools(&mut self) -> ParsePools {
+        let mut ns = std::mem::take(&mut self.ns_stack);
+        ns.reset();
+        let mut stack = std::mem::take(&mut self.stack);
+        stack.clear();
+        let mut char_buf = std::mem::take(&mut self.char_buf);
+        char_buf.clear();
+        let mut raw_vals = std::mem::take(&mut self.raw_vals);
+        if let Some(raw) = self.scratch_raw.take() {
+            raw_vals.extend(raw.into_iter().map(|r| r.value));
+        }
+        let mut open = std::mem::take(&mut self.open_pool);
+        open.clear();
+        ParsePools {
+            ns,
+            stack,
+            char_buf,
+            raw_vals,
+            sax: self.scratch_sax.take().unwrap_or_default(),
+            qname_pool: std::mem::take(&mut self.qname_pool),
+            open,
+        }
     }
 
     fn parse_document(&mut self) -> Result<(), XmlError> {
@@ -3017,9 +3299,11 @@ impl<'a> Parser<'a> {
             interrupted: false,
             depth_cap: xml_depth_cap(&cfg.settings, options),
             scan_hint: st.scan_hint,
-            scratch_raw: Vec::new(),
-            scratch_sax: Vec::new(),
+            scratch_raw: None,
+            scratch_sax: None,
             qname_pool: Vec::new(),
+            raw_vals: Vec::new(),
+            open_pool: Vec::new(),
             started: true,
         }
     }
@@ -3427,11 +3711,24 @@ impl<'a> Parser<'a> {
 
 fn parse_doc(
     buffer: &[u8],
+    url: Option<&str>,
+    encoding: Option<&str>,
+    options: i32,
+    sax: &mut dyn SaxHandler,
+    cfg: ParseCfg<'_>,
+) -> Result<XmlDoc, XmlError> {
+    parse_doc_pooled(buffer, url, encoding, options, sax, cfg, &mut ParsePools::default())
+}
+
+/// [`parse_doc`] starting from, and leaving behind, `pools` (#80).
+fn parse_doc_pooled(
+    buffer: &[u8],
     _url: Option<&str>,
     encoding: Option<&str>,
     options: i32,
     sax: &mut dyn SaxHandler,
     cfg: ParseCfg<'_>,
+    pools: &mut ParsePools,
 ) -> Result<XmlDoc, XmlError> {
     if cfg.settings.interrupt.is_some_and(|i| i.is_interrupted()) {
         return Err(crate::error::interrupted_error());
@@ -3440,7 +3737,7 @@ fn parse_doc(
     // blocks (#70).
     let (converted, enc_name) =
         crate::encoding::decode_input(buffer, encoding, true, cfg.settings.interrupt)?;
-    parse_utf8(&converted, enc_name.as_deref(), options, sax, cfg)
+    parse_utf8(&converted, enc_name.as_deref(), options, sax, cfg, pools)
 }
 
 fn parse_utf8(
@@ -3449,8 +3746,18 @@ fn parse_utf8(
     options: i32,
     sax: &mut dyn SaxHandler,
     cfg: ParseCfg<'_>,
+    pools: &mut ParsePools,
 ) -> Result<XmlDoc, XmlError> {
     let options = options | XML_PARSE_NONET | XML_PARSE_NO_XXE;
+    let ParsePools {
+        ns,
+        stack,
+        char_buf,
+        raw_vals,
+        sax: sax_pool,
+        qname_pool,
+        open,
+    } = std::mem::take(pools);
     let mut p = Parser {
         input: buffer,
         src: std::str::from_utf8(buffer).ok(),
@@ -3460,7 +3767,7 @@ fn parse_utf8(
         options,
         old10: (options & XML_PARSE_OLD10) != 0,
         depth: 0,
-        ns_stack: NsScope::default(),
+        ns_stack: ns,
         sax,
         // Reserving a full arena is the dominant cost of a no-tree parse --
         // pre-allocating a tree only to leave it empty.
@@ -3475,8 +3782,8 @@ fn parse_utf8(
                 crate::arena::xml_reserve(buffer)
             },
         ),
-        stack: Vec::new(),
-        char_buf: String::new(),
+        stack,
+        char_buf,
         char_buf_from_reference: false,
         no_tree: (options & XML_PARSE_NO_TREE) != 0,
         recover: (options & XML_PARSE_RECOVER) != 0,
@@ -3487,12 +3794,16 @@ fn parse_utf8(
         interrupted: false,
         depth_cap: xml_depth_cap(&cfg.settings, options),
         scan_hint: None,
-        scratch_raw: Vec::new(),
-        scratch_sax: Vec::new(),
-        qname_pool: Vec::new(),
+        scratch_raw: None,
+        scratch_sax: Some(sax_pool),
+        qname_pool,
+        raw_vals,
+        open_pool: open,
         started: false,
     };
-    match p.parse_document() {
+    let result = p.parse_document();
+    *pools = p.take_pools();
+    match result {
         Ok(()) => {
             apply_dtd_defaults(&mut p.doc, buffer.len(), options, p.interrupt.as_mut())?;
             normalize_tokenized_attrs(&mut p.doc);

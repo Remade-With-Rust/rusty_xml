@@ -1077,11 +1077,15 @@ impl PrefixKey {
             None => PrefixKey { head: 0, len: u16::MAX },
             Some(p) => {
                 let b = p.as_bytes();
-                let mut w = [0u8; 8];
-                let n = b.len().min(8);
-                w[..n].copy_from_slice(&b[..n]);
+                // Byte by byte: a runtime-length copy into a [u8; 8] was a
+                // call to memcpy per lookup, and most prefixes are 1 to 3
+                // bytes (#80).
+                let mut head = 0u64;
+                for (k, &c) in b.iter().take(8).enumerate() {
+                    head |= u64::from(c) << (8 * k);
+                }
                 PrefixKey {
-                    head: u64::from_le_bytes(w),
+                    head,
                     len: u16::try_from(b.len()).unwrap_or(u16::MAX - 1),
                 }
             }

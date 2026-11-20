@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.4](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-tree-v0.10.3...rusty_xml-tree-v0.10.4) - 2026-11-20
+
+### Changed
+
+- `XmlDoc::with_node_capacity` reserves exactly `cap` nodes (at least 1); it used to raise a `cap` under 4 to 4. `xml_new_doc` and the parsers that build trees still ask for at least 4, so their arenas are unchanged; a no-tree parse asks for 1 and has nothing to shrink ([#80](https://github.com/Remade-With-Rust/rusty_xml/issues/80), [#85](https://github.com/Remade-With-Rust/rusty_xml/pull/85)).
+
 ## [0.10.2](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-tree-v0.10.1...rusty_xml-tree-v0.10.2) - 2026-11-18
 
 ### Other

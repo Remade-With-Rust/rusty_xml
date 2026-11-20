@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.4](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-parser-v0.10.3...rusty_xml-parser-v0.10.4) - 2026-11-20
+
+### Performance
+
+- `xml_sax_parse_memory` and `xml_read_memory` start each parse from the buffers the thread's last one-shot parse grew, as an `XmlSaxParser` does. A thread keeps at most 64 KiB (12 KiB after the 202 XML parts of four PPTX files); a parse that grows more frees its buffers as before.
+- Namespace declarations reuse their frames and prefix and URI buffers. The per-parse setup no longer allocates for encoding names, the XML declaration's version and standalone values, or a no-tree arena that was shrunk back.
+- A SAX parse of a real PPTX part now makes 3 or 4 allocations, fresh or reused (0.10.3: 43 to 85 fresh, 17 to 48 reused).
+- Windows, system allocator, 2,000 real PPTX parts, pinned ABBA (20 pairs): a fresh `xml_sax_parse_memory` per part is 8.6% faster (54.4 to 49.9 ms) and a reused `XmlSaxParser` 2.2% faster. Reuse is now worth 0.2% over a fresh parse, down from 7.3%.
+- callgrind Ir on the same parts: 2.75% fewer instructions fresh, 0.92% fewer reused. Tree and HTML parsing are flat (−0.08%, −0.05%). Output is identical to 0.10.3 ([#80](https://github.com/Remade-With-Rust/rusty_xml/issues/80), [#85](https://github.com/Remade-With-Rust/rusty_xml/pull/85)).
+
 ## [0.10.3](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-parser-v0.10.2...rusty_xml-parser-v0.10.3) - 2026-11-20
 
 ### Added

@@ -1050,10 +1050,43 @@ struct NsScope {
     level: u32,
     /// Declarations in scope.
     count: usize,
+    /// Every declaration in scope as a packed prefix key and its position,
+    /// innermost last, so a lookup compares one integer per declaration
+    /// instead of calling `memcmp` on each prefix: OOXML parts bind 3 to 10
+    /// prefixes, most of them one byte long (#80).
+    keys: Vec<(PrefixKey, NsLoc)>,
     /// Prefix (`""` for the default namespace) to the positions of its
     /// declarations in scope, innermost last. Present only while `count` is
     /// large.
     index: Option<std::collections::HashMap<String, Vec<NsLoc>>>,
+}
+
+/// A prefix packed for comparison: its first 8 bytes and its length, with
+/// `u16::MAX` for the default namespace. Prefixes of up to 8 bytes compare
+/// exactly on the key; a longer one is confirmed against the stored prefix.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct PrefixKey {
+    head: u64,
+    len: u16,
+}
+
+impl PrefixKey {
+    #[inline]
+    fn of(prefix: Option<&str>) -> PrefixKey {
+        match prefix {
+            None => PrefixKey { head: 0, len: u16::MAX },
+            Some(p) => {
+                let b = p.as_bytes();
+                let mut w = [0u8; 8];
+                let n = b.len().min(8);
+                w[..n].copy_from_slice(&b[..n]);
+                PrefixKey {
+                    head: u64::from_le_bytes(w),
+                    len: u16::try_from(b.len()).unwrap_or(u16::MAX - 1),
+                }
+            }
+        }
+    }
 }
 
 /// Where a prefix's namespace was found: one of the two fixed bindings, or a
@@ -1073,11 +1106,21 @@ enum NsLoc {
 const NS_WALK: usize = 32;
 
 impl NsScope {
+    /// An element that declares nothing: a level, and nothing to store.
+    #[inline]
+    fn enter(&mut self) {
+        self.level += 1;
+    }
+
     fn push(&mut self, frame: Vec<(Option<String>, String)>) {
         self.level += 1;
         if !frame.is_empty() {
             let di = self.decls.len() as u32;
             self.count += frame.len();
+            for (k, (p, _)) in frame.iter().enumerate() {
+                self.keys
+                    .push((PrefixKey::of(p.as_deref()), NsLoc::At(di, k as u32)));
+            }
             if let Some(ix) = self.index.as_mut() {
                 for (k, (p, _)) in frame.iter().enumerate() {
                     ix.entry(p.clone().unwrap_or_default())
@@ -1101,10 +1144,21 @@ impl NsScope {
         }
     }
 
+    #[inline]
     fn pop(&mut self) {
         if self.decls.last().is_some_and(|(l, _)| *l == self.level) {
-            let (_, frame) = self.decls.pop().expect("checked above");
+            self.pop_frame();
+        }
+        self.level = self.level.saturating_sub(1);
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn pop_frame(&mut self) {
+        {
+            let (_, frame) = self.decls.pop().expect("the caller checked it");
             self.count -= frame.len();
+            self.keys.truncate(self.keys.len() - frame.len());
             if let Some(ix) = self.index.as_mut() {
                 for (p, _) in &frame {
                     if let Some(v) = ix.get_mut(p.as_deref().unwrap_or("")) {
@@ -1116,7 +1170,6 @@ impl NsScope {
                 }
             }
         }
-        self.level = self.level.saturating_sub(1);
     }
 
     /// The innermost open element's own declarations.
@@ -1132,14 +1185,22 @@ impl NsScope {
         if let Some(ix) = &self.index {
             return ix.get(prefix.unwrap_or("")).and_then(|v| v.last()).copied();
         }
-        for (di, (_, f)) in self.decls.iter().enumerate().rev() {
-            for (k, (p, _)) in f.iter().enumerate().rev() {
-                if p.as_deref() == prefix {
-                    return Some(NsLoc::At(di as u32, k as u32));
-                }
+        let key = PrefixKey::of(prefix);
+        for &(k, loc) in self.keys.iter().rev() {
+            if k == key && (key.len <= 8 || key.len == u16::MAX || self.prefix_at(loc) == prefix) {
+                return Some(loc);
             }
         }
         None
+    }
+
+    /// The prefix declared at a position.
+    fn prefix_at(&self, loc: NsLoc) -> Option<&str> {
+        match loc {
+            NsLoc::At(d, k) => self.decls[d as usize].1[k as usize].0.as_deref(),
+            NsLoc::Xml => Some("xml"),
+            NsLoc::Xmlns => Some("xmlns"),
+        }
     }
 
     /// The namespace at a location [`ns_locate`] returned.
@@ -2712,7 +2773,11 @@ impl<'a> Parser<'a> {
         }
         // The frame is pushed, not copied; the stack owns it and both later
         // readers borrow it back from there.
-        self.ns_stack.push(ns_frame);
+        if ns_frame.is_empty() {
+            self.ns_stack.enter();
+        } else {
+            self.ns_stack.push(ns_frame);
+        }
 
         // Located once: the check below, the start event, the element node
         // and the end tag all use it (#80).

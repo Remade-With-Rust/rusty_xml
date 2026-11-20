@@ -75,3 +75,22 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo package -p rusty_xml --allow-dirty
+      # Every published crate must ship the licence texts its `license` field
+      # names (and the NOTICE), as copies identical to the root files: cargo
+      # cannot package files from outside a crate's directory.
+      - name: Published crates ship LICENSE-MIT, LICENSE-APACHE, NOTICE.md
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo metadata --no-deps --format-version 1 > "$RUNNER_TEMP/meta.json"
+          jq -r '.packages[] | select(.publish != []) | "\(.name) \(.manifest_path)"' \
+              "$RUNNER_TEMP/meta.json" \
+            | while read -r p manifest; do
+                dir=$(dirname "$manifest")
+                list=$(cargo package --list -p "$p" --allow-dirty < /dev/null)
+                for f in LICENSE-MIT LICENSE-APACHE NOTICE.md; do
+                  diff -u "$f" "$dir/$f"
+                  grep -qx "$f" <<<"$list" || { echo "$p does not package $f"; exit 1; }
+                done
+                echo "$p ships LICENSE-MIT, LICENSE-APACHE, NOTICE.md"
+              done

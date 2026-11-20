@@ -1033,10 +1033,13 @@ fn fresh_parser<'a>(
         sax,
         doc: XmlDoc::with_node_capacity(
             Some("1.0"),
-            if (options & XML_PARSE_NO_TREE) != 0 || hinted {
+            if (options & XML_PARSE_NO_TREE) != 0 {
+                // The document node only, as the one-shot parse (#80).
+                1
+            } else if hinted {
                 4
             } else {
-                crate::arena::xml_reserve(input)
+                crate::arena::xml_reserve(input).max(4)
             },
         ),
         stack: Vec::new(),
@@ -2043,7 +2046,7 @@ impl<'a> Parser<'a> {
         self.skip_s()?;
         self.expect_byte(b'=', XML_ERR_EQUAL_REQUIRED, "'=' required")?;
         self.skip_s()?;
-        let ver = self.parse_quoted()?;
+        let ver = self.parse_quoted_ascii()?;
         // VersionNum ::= '1.' [0-9]+ in 1.0 5th ed; libxml2 accepts the older
         // [a-zA-Z0-9_.:-]+ form. Either way `1.0?` is not one.
         if ver.is_empty()
@@ -2053,7 +2056,9 @@ impl<'a> Parser<'a> {
         {
             return Err(self.err(XML_ERR_XMLDECL_NOT_FINISHED, "Invalid XML version value"));
         }
-        self.doc.version = ver;
+        if self.doc.version != *ver {
+            self.doc.version = ver.into_owned();
+        }
         // S is required between the version info and whatever follows it;
         // `version="1.0"encoding="UTF-8"` was accepted.
         let had_s = self.require_s();
@@ -2066,7 +2071,7 @@ impl<'a> Parser<'a> {
             self.skip_s()?;
             self.expect_byte(b'=', XML_ERR_EQUAL_REQUIRED, "'=' required")?;
             self.skip_s()?;
-            let enc = self.parse_quoted()?;
+            let enc = self.parse_quoted_ascii()?;
             // EncName ::= [A-Za-z] ([A-Za-z0-9._] | '-')*
             // Any string at all was accepted, including "_UTF-8" and "".
             let mut cs = enc.chars();
@@ -2075,7 +2080,7 @@ impl<'a> Parser<'a> {
             if !ok {
                 return Err(self.err(XML_ERR_ENCODING_NAME, "Invalid XML encoding name"));
             }
-            self.doc.encoding = Some(enc);
+            self.doc.encoding = Some(enc.into_owned());
             self.skip_s()?;
         }
         if self.starts_with(b"standalone") {
@@ -2087,8 +2092,8 @@ impl<'a> Parser<'a> {
             self.skip_s()?;
             self.expect_byte(b'=', XML_ERR_EQUAL_REQUIRED, "'=' required")?;
             self.skip_s()?;
-            let st = self.parse_quoted()?;
-            self.doc.standalone = match st.as_str() {
+            let st = self.parse_quoted_ascii()?;
+            self.doc.standalone = match &*st {
                 "yes" => Some(true),
                 "no" => Some(false),
                 _ => return Err(self.err(XML_ERR_XMLDECL_NOT_FINISHED, "standalone must be yes or no")),
@@ -2101,6 +2106,32 @@ impl<'a> Parser<'a> {
         self.pos += 2;
         self.col += 2;
         Ok(())
+    }
+
+    /// [`Self::parse_quoted`], borrowing the input when the literal is
+    /// printable ASCII, as an XML declaration's values are: copying the
+    /// version, encoding and standalone values was three allocations per parse
+    /// (#80). Anything else takes the general path.
+    fn parse_quoted_ascii(&mut self) -> Result<std::borrow::Cow<'a, str>, XmlError> {
+        let input = self.input;
+        if let Some(&q) = input.get(self.pos) {
+            if q == b'"' || q == b'\'' {
+                let start = self.pos + 1;
+                let mut i = start;
+                while i < input.len() && input[i] != q && (0x20..0x7f).contains(&input[i]) {
+                    i += 1;
+                }
+                if input.get(i) == Some(&q) {
+                    if let Ok(v) = std::str::from_utf8(&input[start..i]) {
+                        // Printable ASCII: one column per byte, no line break.
+                        self.col += (i + 1 - self.pos) as u32;
+                        self.pos = i + 1;
+                        return Ok(std::borrow::Cow::Borrowed(v));
+                    }
+                }
+            }
+        }
+        self.parse_quoted().map(std::borrow::Cow::Owned)
     }
 
     fn parse_quoted(&mut self) -> Result<String, XmlError> {
@@ -3895,10 +3926,11 @@ fn parse_utf8(
             if (options & XML_PARSE_NO_TREE) != 0 {
                 // No element node is created in this mode (#52), so there is
                 // nothing to reserve for: `len / 32` committed up to 32 MiB for
-                // a document that would never use it.
-                4
+                // a document that would never use it. The document node only,
+                // so the end of the parse has nothing to shrink (#80).
+                1
             } else {
-                crate::arena::xml_reserve(buffer)
+                crate::arena::xml_reserve(buffer).max(4)
             },
         ),
         stack,
@@ -4221,12 +4253,15 @@ fn normalize_tokenized_attrs(doc: &mut XmlDoc) {
 /// declaration says UTF-16, and those agree. UTF-8 against UTF-16 does not.
 fn encodings_agree(declared: &str, detected: &str) -> bool {
     fn family(n: &str) -> &'static str {
-        let n = n.to_ascii_uppercase();
-        if n.starts_with("UTF-16") || n.starts_with("UTF16") {
+        // Compared ASCII case-insensitively: an uppercased copy of each name
+        // was two allocations per parse that declares an encoding (#80).
+        let starts =
+            |p: &str| n.as_bytes().get(..p.len()).is_some_and(|h| h.eq_ignore_ascii_case(p.as_bytes()));
+        if starts("UTF-16") || starts("UTF16") {
             "16"
-        } else if n.starts_with("UTF-32") || n.starts_with("UTF32") {
+        } else if starts("UTF-32") || starts("UTF32") {
             "32"
-        } else if n.starts_with("UTF-8") || n.starts_with("UTF8") || n == "US-ASCII" {
+        } else if starts("UTF-8") || starts("UTF8") || n.eq_ignore_ascii_case("US-ASCII") {
             "8"
         } else {
             "other"

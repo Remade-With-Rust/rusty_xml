@@ -370,7 +370,7 @@ fn html_parse_str(
     // 17/8 rather than 2 (#62): at 2, 428 of 1,017 real pages just overflowed
     // the reserve and doubled the arena, copying it; at 2.125 274 do, and a
     // page that just overflowed peaks at 2.4 MiB of commit instead of 5.7.
-    let mut doc = XmlDoc::with_node_capacity(Some("1.0"), crate::arena::reserve(text.len(), lt, 17, 8));
+    let mut doc = XmlDoc::with_node_capacity(Some("1.0"), crate::arena::reserve(text.len(), lt, 17, 8).max(4));
     doc.encoding = Some("HTML".into());
     // Mark it as an HTML document so the serializer can tell: C emits the
     // doctype where XML would emit a declaration.

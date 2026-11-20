@@ -8,6 +8,11 @@
 //! wrong: prefixes sharing their first 8 bytes, redeclaration and its undoing
 //! at the end tag, the default namespace, and the indexed path past 32
 //! declarations. Each is checked in both SAX modes and against the tree.
+//!
+//! The one-shot entries (`xml_sax_parse_memory`, `xml_read_memory`) start
+//! from the buffers the thread's last parse grew, as an `XmlSaxParser` does.
+//! A parse on a new thread starts from nothing, so that is the reference
+//! every reused path is compared with.
 
 use rusty_xml::{
     default_parse_options, xml_read_memory, xml_sax_parse_memory, NodeId, NodeKind, SaxAttr,
@@ -243,7 +248,9 @@ const DOCS: &[&str] = &[
     "<q:r xmlns:q='w'>&#65;&#x42;<![CDATA[c]]></q:r>",
 ];
 
-fn fresh(xml: &[u8], opts: i32, stop: usize) -> (Vec<SaxEvent>, String) {
+/// A one-shot parse on the calling thread, starting from whatever the
+/// thread's earlier parses left.
+fn one_shot(xml: &[u8], opts: i32, stop: usize) -> (Vec<SaxEvent>, String) {
     let mut h = StopAfter {
         rec: SaxRecorder::new(),
         starts: 0,
@@ -251,6 +258,14 @@ fn fresh(xml: &[u8], opts: i32, stop: usize) -> (Vec<SaxEvent>, String) {
     };
     let r = xml_sax_parse_memory(xml, opts, &mut h);
     (h.rec.events, format!("{:?}", r.map(|d| tree_uris(&d))))
+}
+
+/// A one-shot parse on a new thread: no buffers from any earlier parse.
+fn fresh(xml: &[u8], opts: i32, stop: usize) -> (Vec<SaxEvent>, String) {
+    let xml = xml.to_vec();
+    std::thread::spawn(move || one_shot(&xml, opts, stop))
+        .join()
+        .expect("parse thread")
 }
 
 fn reused(p: &mut XmlSaxParser, xml: &[u8], opts: i32, stop: usize) -> (Vec<SaxEvent>, String) {
@@ -292,6 +307,111 @@ fn a_reused_parser_matches_fresh_parses() {
             }
         }
     }
+}
+
+/// One-shot parses on one thread, which start from the thread's last
+/// buffers, give each document exactly what a parse on a new thread gives it.
+#[test]
+fn one_shot_parses_on_one_thread_match_fresh_parses() {
+    let big = format!("<r a='{}'>{}</r>", "v".repeat(70_000), "t".repeat(70_000));
+    let mut docs: Vec<&str> = DOCS.to_vec();
+    // Grows the pools past what a thread keeps, so they are dropped.
+    docs.insert(4, &big);
+    for opts in [
+        default_parse_options(),
+        default_parse_options() | XML_PARSE_NO_TREE,
+        default_parse_options() | XML_PARSE_RECOVER,
+    ] {
+        for round in 0..3 {
+            let step = [1, 3, 7][round];
+            for i in 0..docs.len() {
+                let d = docs[(i * step + round) % docs.len()].as_bytes();
+                let stop = if (i + round) % 3 == 0 { 2 } else { usize::MAX };
+                assert_eq!(
+                    one_shot(d, opts, stop),
+                    fresh(d, opts, stop),
+                    "options {opts:#x}, round {round}: {}",
+                    String::from_utf8_lossy(&d[..d.len().min(80)])
+                );
+            }
+        }
+    }
+}
+
+/// The tree entry shares the thread's buffers: every document's whole tree
+/// matches a parse on a new thread.
+#[test]
+fn tree_parses_on_one_thread_match_fresh_parses() {
+    let tree = |xml: &[u8], opts: i32| format!("{:?}", xml_read_memory(xml, None, None, opts));
+    for opts in [
+        default_parse_options(),
+        default_parse_options() | XML_PARSE_RECOVER,
+    ] {
+        for round in 0..2 {
+            for i in 0..DOCS.len() {
+                let d = DOCS[(i * (round + 1) + round) % DOCS.len()].as_bytes();
+                let here = tree(d, opts);
+                let owned = d.to_vec();
+                let there = std::thread::spawn(move || tree(&owned, opts))
+                    .join()
+                    .expect("parse thread");
+                assert_eq!(here, there, "{}", String::from_utf8_lossy(d));
+            }
+        }
+    }
+}
+
+/// A handler that parses another document from inside a callback: the inner
+/// parse runs while the outer one holds the thread's buffers, and both see
+/// what they would alone.
+#[test]
+fn a_parse_inside_a_callback_is_independent() {
+    struct Nested {
+        rec: SaxRecorder,
+        inner: Vec<Vec<SaxEvent>>,
+    }
+    impl SaxHandler for Nested {
+        fn start_element_ns(
+            &mut self,
+            local: &str,
+            prefix: Option<&str>,
+            uri: Option<&str>,
+            ns: &[(Option<String>, String)],
+            attrs: &[SaxAttr],
+            d: i32,
+        ) {
+            self.rec.start_element_ns(local, prefix, uri, ns, attrs, d);
+            let mut r = SaxRecorder::new();
+            xml_sax_parse_memory(DOCS[0].as_bytes(), default_parse_options(), &mut r)
+                .expect("inner parse");
+            self.inner.push(r.events);
+        }
+        fn end_element_ns(&mut self, local: &str, prefix: Option<&str>, uri: Option<&str>) {
+            self.rec.end_element_ns(local, prefix, uri);
+        }
+    }
+    let opts = default_parse_options();
+    // Every event, as the inner parse records them, on a new thread.
+    let alone = std::thread::spawn(move || {
+        let mut r = SaxRecorder::new();
+        xml_sax_parse_memory(DOCS[0].as_bytes(), opts, &mut r).expect("parses");
+        r.events
+    })
+    .join()
+    .expect("parse thread");
+    let outer_doc = DOCS[4].as_bytes();
+    let mut h = Nested {
+        rec: SaxRecorder::new(),
+        inner: Vec::new(),
+    };
+    xml_sax_parse_memory(outer_doc, opts, &mut h).expect("outer parse");
+    assert_eq!(h.inner.len(), 5);
+    for events in &h.inner {
+        assert_eq!(events, &alone);
+    }
+    let names_here = names(&h.rec.events);
+    let names_alone = names(&fresh(outer_doc, opts, usize::MAX).0);
+    assert_eq!(names_here, names_alone);
 }
 
 #[test]

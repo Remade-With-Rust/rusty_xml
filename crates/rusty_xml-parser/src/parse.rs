@@ -538,7 +538,7 @@ pub fn xml_sax_parse_memory_with(
     sax: &mut dyn SaxHandler,
     settings: &XmlParseSettings<'_>,
 ) -> Result<XmlDoc, XmlError> {
-    sax_parse(buffer, options, sax, settings, &mut ParsePools::default())
+    with_thread_pools(|pools| sax_parse(buffer, options, sax, settings, pools))
 }
 
 /// The SAX parse behind [`xml_sax_parse_memory_with`] and [`XmlSaxParser`].
@@ -563,11 +563,13 @@ fn sax_parse(
 
 /// A SAX parser kept from one document to the next (#80).
 ///
-/// [`xml_sax_parse_memory`] starts every parse from empty buffers, so a
-/// program reading many small documents -- the thousands of XML parts in a
-/// DOCX, XLSX or PPTX package -- grows them again for each one. An
-/// `XmlSaxParser` keeps what a parse grew (the namespace scope, the element
-/// stacks, the attribute and text buffers) and starts the next parse from it.
+/// A program reading many small documents -- the thousands of XML parts in a
+/// DOCX, XLSX or PPTX package -- would otherwise grow the same buffers again
+/// for each one. An `XmlSaxParser` keeps what a parse grew (the namespace
+/// scope, the element stacks, the attribute and text buffers) and starts the
+/// next parse from it. [`xml_sax_parse_memory`] does the same with buffers
+/// kept per thread, up to 64 KiB; an `XmlSaxParser` keeps them all, and the
+/// caller decides how long they live.
 ///
 /// Only capacity is kept: the events, errors and returned document of each
 /// parse are exactly those of [`xml_sax_parse_memory_with`], including after
@@ -1031,10 +1033,13 @@ fn fresh_parser<'a>(
         sax,
         doc: XmlDoc::with_node_capacity(
             Some("1.0"),
-            if (options & XML_PARSE_NO_TREE) != 0 || hinted {
+            if (options & XML_PARSE_NO_TREE) != 0 {
+                // The document node only, as the one-shot parse (#80).
+                1
+            } else if hinted {
                 4
             } else {
-                crate::arena::xml_reserve(input)
+                crate::arena::xml_reserve(input).max(4)
             },
         ),
         stack: Vec::new(),
@@ -1141,6 +1146,12 @@ struct NsScope {
     /// instead of calling `memcmp` on each prefix: OOXML parts bind 3 to 10
     /// prefixes, most of them one byte long (#80).
     keys: Vec<(PrefixKey, NsLoc)>,
+    /// Emptied frames, and the emptied prefix and URI buffers of declarations
+    /// that went out of scope, for the next element that declares something.
+    /// A PPTX part binds 3 to 14 prefixes, a frame and two Strings each, and
+    /// those were half the allocations a reused parse made (#80).
+    spare_frames: Vec<Vec<(Option<String>, String)>>,
+    spare_strs: Vec<String>,
     /// Prefix (`""` for the default namespace) to the positions of its
     /// declarations in scope, innermost last. Present only while `count` is
     /// large.
@@ -1202,18 +1213,88 @@ struct ParsePools {
     ns: NsScope,
     stack: Vec<NodeId>,
     char_buf: String,
-    /// Attribute value buffers (the raw attributes themselves borrow the
-    /// input, so only their buffers outlive a parse).
+    /// Attribute value buffers, in slot order from the end: the next parse's
+    /// first slot pops the buffer the first slot grew.
     raw_vals: Vec<String>,
+    /// The raw attribute slots' storage, empty. A slot borrows the input, so
+    /// it is kept as `'static` and converted in place, which keeps the
+    /// allocation (#80).
+    raw: Vec<RawAttr<'static>>,
     sax: Vec<SaxAttr>,
     qname_pool: Vec<CompactString>,
     open: Vec<OpenElem>,
 }
 
+impl ParsePools {
+    /// Heap bytes the pools hold (#80).
+    fn held_bytes(&self) -> usize {
+        use std::mem::size_of;
+        let opt = |s: &Option<String>| s.as_ref().map_or(0, String::capacity);
+        let attrs: usize = self
+            .sax
+            .iter()
+            .map(|a| a.local.capacity() + opt(&a.prefix) + opt(&a.uri) + a.value.capacity())
+            .sum();
+        let qnames: usize = self
+            .qname_pool
+            .iter()
+            .map(|q| if q.is_heap_allocated() { q.capacity() } else { 0 })
+            .sum();
+        self.ns.held_bytes()
+            + self.stack.capacity() * size_of::<NodeId>()
+            + self.char_buf.capacity()
+            + self.raw_vals.capacity() * size_of::<String>()
+            + self.raw_vals.iter().map(String::capacity).sum::<usize>()
+            + self.raw.capacity() * size_of::<RawAttr<'static>>()
+            + self.sax.capacity() * size_of::<SaxAttr>()
+            + attrs
+            + self.qname_pool.capacity() * size_of::<CompactString>()
+            + qnames
+            + self.open.capacity() * size_of::<OpenElem>()
+    }
+}
+
 impl NsScope {
+    /// Heap bytes held with nothing in scope (#80).
+    fn held_bytes(&self) -> usize {
+        use std::mem::size_of;
+        let frames: usize = self.spare_frames.iter().map(Vec::capacity).sum();
+        self.decls.capacity() * size_of::<(u32, Vec<(Option<String>, String)>)>()
+            + self.keys.capacity() * size_of::<(PrefixKey, NsLoc)>()
+            + self.spare_frames.capacity() * size_of::<Vec<(Option<String>, String)>>()
+            + frames * size_of::<(Option<String>, String)>()
+            + self.spare_strs.capacity() * size_of::<String>()
+            + self.spare_strs.iter().map(String::capacity).sum::<usize>()
+    }
+
+    /// An empty frame for an element's declarations (#80).
+    fn spare_frame(&mut self) -> Vec<(Option<String>, String)> {
+        self.spare_frames.pop().unwrap_or_default()
+    }
+
+    /// An empty buffer for a declaration's prefix or URI (#80).
+    fn spare_str(&mut self) -> String {
+        self.spare_strs.pop().unwrap_or_default()
+    }
+
+    /// Keep a frame that went out of scope, and its buffers, emptied.
+    fn recycle(&mut self, mut frame: Vec<(Option<String>, String)>) {
+        for (prefix, mut uri) in frame.drain(..) {
+            if let Some(mut p) = prefix {
+                p.clear();
+                self.spare_strs.push(p);
+            }
+            uri.clear();
+            self.spare_strs.push(uri);
+        }
+        self.spare_frames.push(frame);
+    }
+
     /// Nothing in scope, capacity kept (#80).
     fn reset(&mut self) {
-        self.decls.clear();
+        while let Some((_, frame)) = self.decls.pop() {
+            self.recycle(frame);
+        }
         self.keys.clear();
         self.level = 0;
         self.count = 0;
@@ -1283,6 +1364,7 @@ impl NsScope {
                     self.index = None;
                 }
             }
+            self.recycle(frame);
         }
     }
 
@@ -1379,6 +1461,17 @@ struct RawAttr<'a> {
     qname: QName<'a>,
     value: String,
     value_off: usize,
+}
+
+/// Empty raw attribute storage, re-borrowed for another input. Collected in
+/// place, so the allocation is kept; nothing is copied, as nothing is in it.
+#[allow(
+    clippy::unnecessary_filter_map,
+    reason = "filter keeps the item type; the point is a new lifetime"
+)]
+fn relifetime<'b>(v: Vec<RawAttr<'_>>) -> Vec<RawAttr<'b>> {
+    debug_assert!(v.is_empty());
+    v.into_iter().filter_map(|_| None).collect()
 }
 
 /// A name read in place from the input, with its QName colon found by the
@@ -1969,7 +2062,7 @@ impl<'a> Parser<'a> {
         self.skip_s()?;
         self.expect_byte(b'=', XML_ERR_EQUAL_REQUIRED, "'=' required")?;
         self.skip_s()?;
-        let ver = self.parse_quoted()?;
+        let ver = self.parse_quoted_ascii()?;
         // VersionNum ::= '1.' [0-9]+ in 1.0 5th ed; libxml2 accepts the older
         // [a-zA-Z0-9_.:-]+ form. Either way `1.0?` is not one.
         if ver.is_empty()
@@ -1979,7 +2072,9 @@ impl<'a> Parser<'a> {
         {
             return Err(self.err(XML_ERR_XMLDECL_NOT_FINISHED, "Invalid XML version value"));
         }
-        self.doc.version = ver;
+        if self.doc.version != *ver {
+            self.doc.version = ver.into_owned();
+        }
         // S is required between the version info and whatever follows it;
         // `version="1.0"encoding="UTF-8"` was accepted.
         let had_s = self.require_s();
@@ -1992,7 +2087,7 @@ impl<'a> Parser<'a> {
             self.skip_s()?;
             self.expect_byte(b'=', XML_ERR_EQUAL_REQUIRED, "'=' required")?;
             self.skip_s()?;
-            let enc = self.parse_quoted()?;
+            let enc = self.parse_quoted_ascii()?;
             // EncName ::= [A-Za-z] ([A-Za-z0-9._] | '-')*
             // Any string at all was accepted, including "_UTF-8" and "".
             let mut cs = enc.chars();
@@ -2001,7 +2096,7 @@ impl<'a> Parser<'a> {
             if !ok {
                 return Err(self.err(XML_ERR_ENCODING_NAME, "Invalid XML encoding name"));
             }
-            self.doc.encoding = Some(enc);
+            self.doc.encoding = Some(enc.into_owned());
             self.skip_s()?;
         }
         if self.starts_with(b"standalone") {
@@ -2013,8 +2108,8 @@ impl<'a> Parser<'a> {
             self.skip_s()?;
             self.expect_byte(b'=', XML_ERR_EQUAL_REQUIRED, "'=' required")?;
             self.skip_s()?;
-            let st = self.parse_quoted()?;
-            self.doc.standalone = match st.as_str() {
+            let st = self.parse_quoted_ascii()?;
+            self.doc.standalone = match &*st {
                 "yes" => Some(true),
                 "no" => Some(false),
                 _ => return Err(self.err(XML_ERR_XMLDECL_NOT_FINISHED, "standalone must be yes or no")),
@@ -2027,6 +2122,32 @@ impl<'a> Parser<'a> {
         self.pos += 2;
         self.col += 2;
         Ok(())
+    }
+
+    /// [`Self::parse_quoted`], borrowing the input when the literal is
+    /// printable ASCII, as an XML declaration's values are: copying the
+    /// version, encoding and standalone values was three allocations per parse
+    /// (#80). Anything else takes the general path.
+    fn parse_quoted_ascii(&mut self) -> Result<std::borrow::Cow<'a, str>, XmlError> {
+        let input = self.input;
+        if let Some(&q) = input.get(self.pos) {
+            if q == b'"' || q == b'\'' {
+                let start = self.pos + 1;
+                let mut i = start;
+                while i < input.len() && input[i] != q && (0x20..0x7f).contains(&input[i]) {
+                    i += 1;
+                }
+                if input.get(i) == Some(&q) {
+                    if let Ok(v) = std::str::from_utf8(&input[start..i]) {
+                        // Printable ASCII: one column per byte, no line break.
+                        self.col += (i + 1 - self.pos) as u32;
+                        self.pos = i + 1;
+                        return Ok(std::borrow::Cow::Borrowed(v));
+                    }
+                }
+            }
+        }
+        self.parse_quoted().map(std::borrow::Cow::Owned)
     }
 
     fn parse_quoted(&mut self) -> Result<String, XmlError> {
@@ -2855,16 +2976,22 @@ impl<'a> Parser<'a> {
         // prefixes could bind to URIs that are equal only after normalization
         // without ever being noticed as equal.
         let elem_qname = qn.s;
-        let normalize_ns = |p: &Parser, name: &str, value: &str| -> String {
+        // Into `out`, an empty buffer from the scope's pool (#80).
+        let normalize_ns = |p: &Parser, name: &str, value: &str, out: &mut String| {
             let tokenized = p.doc.dtd.as_ref().is_some_and(|d| {
                 d.attributes
                     .get(&(elem_qname.to_string(), name.to_string()))
                     .is_some_and(|a| a.att_type != "CDATA")
             });
             if tokenized {
-                value.split(' ').filter(|t| !t.is_empty()).collect::<Vec<_>>().join(" ")
+                for t in value.split(' ').filter(|t| !t.is_empty()) {
+                    if !out.is_empty() {
+                        out.push(' ');
+                    }
+                    out.push_str(t);
+                }
             } else {
-                value.to_string()
+                out.push_str(value);
             }
         };
         for a in &raw_attrs[..n_raw] {
@@ -2881,8 +3008,11 @@ impl<'a> Parser<'a> {
                 } else if a.value == XMLNS_NS {
                     self.ns_error("xmlns namespace URI cannot be the default namespace");
                 }
-                let v = normalize_ns(self, a.qname.s, &a.value);
-                ns_frame.get_or_insert_with(Vec::new).push((None, v));
+                let mut v = self.ns_stack.spare_str();
+                normalize_ns(self, a.qname.s, &a.value, &mut v);
+                ns_frame
+                    .get_or_insert_with(|| self.ns_stack.spare_frame())
+                    .push((None, v));
             } else if ap == Some("xmlns") {
                 if !a.value.is_empty()
                     && !Self::uri_has_scheme(&a.value)
@@ -2916,8 +3046,13 @@ impl<'a> Parser<'a> {
                 if a.value.is_empty() {
                     self.ns_error("Empty XML namespace is not allowed");
                 }
-                let v = normalize_ns(self, a.qname.s, &a.value);
-                ns_frame.get_or_insert_with(Vec::new).push((Some(al.to_string()), v));
+                let mut v = self.ns_stack.spare_str();
+                normalize_ns(self, a.qname.s, &a.value, &mut v);
+                let mut p = self.ns_stack.spare_str();
+                p.push_str(al);
+                ns_frame
+                    .get_or_insert_with(|| self.ns_stack.spare_frame())
+                    .push((Some(p), v));
             }
         }
         // The frame is pushed, not copied; the stack owns it and both later
@@ -3240,9 +3375,11 @@ impl<'a> Parser<'a> {
         let mut char_buf = std::mem::take(&mut self.char_buf);
         char_buf.clear();
         let mut raw_vals = std::mem::take(&mut self.raw_vals);
-        if let Some(raw) = self.scratch_raw.take() {
-            raw_vals.extend(raw.into_iter().map(|r| r.value));
-        }
+        let mut slots = self.scratch_raw.take().unwrap_or_default();
+        // Last slot first, so the first slot's buffer is popped first and
+        // each slot gets back the buffer it grew: in reverse, the first
+        // slot's long namespace URIs reallocated a short buffer (#80).
+        raw_vals.extend(slots.drain(..).rev().map(|r| r.value));
         let mut open = std::mem::take(&mut self.open_pool);
         open.clear();
         ParsePools {
@@ -3250,6 +3387,7 @@ impl<'a> Parser<'a> {
             stack,
             char_buf,
             raw_vals,
+            raw: relifetime(slots),
             sax: self.scratch_sax.take().unwrap_or_default(),
             qname_pool: std::mem::take(&mut self.qname_pool),
             open,
@@ -3717,7 +3855,38 @@ fn parse_doc(
     sax: &mut dyn SaxHandler,
     cfg: ParseCfg<'_>,
 ) -> Result<XmlDoc, XmlError> {
-    parse_doc_pooled(buffer, url, encoding, options, sax, cfg, &mut ParsePools::default())
+    with_thread_pools(|pools| parse_doc_pooled(buffer, url, encoding, options, sax, cfg, pools))
+}
+
+thread_local! {
+    /// What the last one-shot parse on this thread grew, so the next
+    /// [`xml_read_memory`] or [`xml_sax_parse_memory`] starts from it as an
+    /// [`XmlSaxParser`] does (#80). Taken for the length of a parse: a handler
+    /// that parses again from inside a callback gets empty buffers, not these.
+    static THREAD_POOLS: std::cell::Cell<Option<ParsePools>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// The most a thread keeps between one-shot parses (#80). The 202 XML parts
+/// of four PPTX files leave 12 KiB; a document with a long text run or
+/// attribute value leaves more, and its buffers are freed as before.
+const THREAD_POOL_MAX_BYTES: usize = 64 * 1024;
+
+/// Run a one-shot parse on this thread's pools. Starting each parse from
+/// empty buffers was 26 of the 43 allocations a fresh SAX parse of a PPTX
+/// part made (#80).
+fn with_thread_pools<R>(parse: impl FnOnce(&mut ParsePools) -> R) -> R {
+    let mut pools = THREAD_POOLS
+        .try_with(std::cell::Cell::take)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let result = parse(&mut pools);
+    if pools.held_bytes() <= THREAD_POOL_MAX_BYTES {
+        // Fails only while the thread is exiting; the pools are dropped then.
+        let _ = THREAD_POOLS.try_with(|c| c.set(Some(pools)));
+    }
+    result
 }
 
 /// [`parse_doc`] starting from, and leaving behind, `pools` (#80).
@@ -3754,6 +3923,7 @@ fn parse_utf8(
         stack,
         char_buf,
         raw_vals,
+        raw,
         sax: sax_pool,
         qname_pool,
         open,
@@ -3776,10 +3946,11 @@ fn parse_utf8(
             if (options & XML_PARSE_NO_TREE) != 0 {
                 // No element node is created in this mode (#52), so there is
                 // nothing to reserve for: `len / 32` committed up to 32 MiB for
-                // a document that would never use it.
-                4
+                // a document that would never use it. The document node only,
+                // so the end of the parse has nothing to shrink (#80).
+                1
             } else {
-                crate::arena::xml_reserve(buffer)
+                crate::arena::xml_reserve(buffer).max(4)
             },
         ),
         stack,
@@ -3794,7 +3965,7 @@ fn parse_utf8(
         interrupted: false,
         depth_cap: xml_depth_cap(&cfg.settings, options),
         scan_hint: None,
-        scratch_raw: None,
+        scratch_raw: Some(relifetime(raw)),
         scratch_sax: Some(sax_pool),
         qname_pool,
         raw_vals,
@@ -4102,12 +4273,15 @@ fn normalize_tokenized_attrs(doc: &mut XmlDoc) {
 /// declaration says UTF-16, and those agree. UTF-8 against UTF-16 does not.
 fn encodings_agree(declared: &str, detected: &str) -> bool {
     fn family(n: &str) -> &'static str {
-        let n = n.to_ascii_uppercase();
-        if n.starts_with("UTF-16") || n.starts_with("UTF16") {
+        // Compared ASCII case-insensitively: an uppercased copy of each name
+        // was two allocations per parse that declares an encoding (#80).
+        let starts =
+            |p: &str| n.as_bytes().get(..p.len()).is_some_and(|h| h.eq_ignore_ascii_case(p.as_bytes()));
+        if starts("UTF-16") || starts("UTF16") {
             "16"
-        } else if n.starts_with("UTF-32") || n.starts_with("UTF32") {
+        } else if starts("UTF-32") || starts("UTF32") {
             "32"
-        } else if n.starts_with("UTF-8") || n.starts_with("UTF8") || n == "US-ASCII" {
+        } else if starts("UTF-8") || starts("UTF8") || n.eq_ignore_ascii_case("US-ASCII") {
             "8"
         } else {
             "other"

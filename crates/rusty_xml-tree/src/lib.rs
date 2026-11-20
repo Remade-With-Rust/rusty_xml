@@ -309,18 +309,22 @@ impl XmlDoc {
     /// `xmlNewDoc`.
     #[doc(alias = "xmlNewDoc")]
     pub fn xml_new_doc(version: Option<&str>) -> Self {
-        Self::with_node_capacity(version, 1)
+        // A floor of 4 keeps a document built by hand from reallocating its
+        // way up from a single slot, which is what Vec::new()+push gave it.
+        Self::with_node_capacity(version, 4)
     }
 
     /// Build a document whose node arena is sized up front. Starting a parse
     /// used to allocate the arena, push into it, then reallocate on reserve --
     /// three trips for what one sized allocation does. The document node's
-    /// name is implied by its kind, so it stores no String either.
+    /// name is implied by its kind, so it stores no String either. The arena
+    /// holds exactly `cap` nodes, at least 1, before it reallocates; before
+    /// 0.10.4 a `cap` under 4 was raised to 4.
     pub fn with_node_capacity(version: Option<&str>, cap: usize) -> Self {
         let ceiling = MAX_ARENA_BYTES / std::mem::size_of::<Node>();
-        // A floor of 4 keeps a small document from reallocating its way up
-        // from a single slot, which is what Vec::new()+push used to give it.
-        let mut nodes = Vec::with_capacity(cap.clamp(4, ceiling));
+        // Exactly `cap`, at least the document node: a no-tree parse asks for
+        // 1, and a floor of 4 made it allocate 4 and shrink to 1 (#80).
+        let mut nodes = Vec::with_capacity(cap.clamp(1, ceiling));
         nodes.push(Node::new(NodeKind::Document, CompactString::default()));
         Self {
             nodes,

@@ -236,9 +236,12 @@ const NAME_MAP: &[(&str, XmlCharEncoding)] = &[
 /// `xmlParseCharEncoding`.
 #[doc(alias = "xmlParseCharEncoding")]
 pub fn xml_parse_char_encoding(name: &str) -> XmlCharEncoding {
-    let lower = name.trim().to_ascii_lowercase();
+    // NAME_MAP is lowercase (a test holds it to that), so an ASCII
+    // case-insensitive compare matches what lowercasing a copy did, without
+    // the allocation on every parse that declares an encoding (#80).
+    let name = name.trim();
     for (n, enc) in NAME_MAP {
-        if *n == lower {
+        if n.eq_ignore_ascii_case(name) {
             return if *enc == XmlCharEncoding::Utf16 {
                 XmlCharEncoding::Utf16Le
             } else {
@@ -247,6 +250,16 @@ pub fn xml_parse_char_encoding(name: &str) -> XmlCharEncoding {
         }
     }
     XmlCharEncoding::Error
+}
+
+#[cfg(test)]
+#[test]
+fn name_map_is_lowercase() {
+    for (n, _) in NAME_MAP {
+        assert_eq!(*n, n.to_ascii_lowercase());
+    }
+    assert_eq!(xml_parse_char_encoding(" Iso-8859-1 "), XmlCharEncoding::Iso8859_1);
+    assert_eq!(xml_parse_char_encoding("UTF-8"), XmlCharEncoding::Utf8);
 }
 
 /// `xmlGetCharEncodingName`.

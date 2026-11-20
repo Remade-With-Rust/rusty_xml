@@ -1465,6 +1465,10 @@ struct RawAttr<'a> {
 
 /// Empty raw attribute storage, re-borrowed for another input. Collected in
 /// place, so the allocation is kept; nothing is copied, as nothing is in it.
+#[allow(
+    clippy::unnecessary_filter_map,
+    reason = "filter keeps the item type; the point is a new lifetime"
+)]
 fn relifetime<'b>(v: Vec<RawAttr<'_>>) -> Vec<RawAttr<'b>> {
     debug_assert!(v.is_empty());
     v.into_iter().filter_map(|_| None).collect()

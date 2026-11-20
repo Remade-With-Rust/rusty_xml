@@ -1435,6 +1435,13 @@ impl<'a> Parser<'a> {
         self.input[self.pos..].starts_with(s)
     }
 
+    /// At `/>`: two byte tests. Through `starts_with` it was a call to
+    /// memcmp after every attribute and start tag, 1% of a SAX parse of
+    /// OOXML (#80); marking `starts_with` inline changed nothing.
+    fn at_empty_tag_end(&self) -> bool {
+        self.input.get(self.pos) == Some(&b'/') && self.input.get(self.pos + 1) == Some(&b'>')
+    }
+
     fn bump_byte(&mut self) -> Option<u8> {
         let b = self.peek_byte()?;
         self.pos += 1;
@@ -2671,7 +2678,7 @@ impl<'a> Parser<'a> {
             let before_ws = self.pos;
             self.skip_s()?;
             let had_ws = self.pos > before_ws;
-            if self.starts_with(b"/>") || self.peek_byte() == Some(b'>') {
+            if self.at_empty_tag_end() || self.peek_byte() == Some(b'>') {
                 break;
             }
             // `att1="a"att2="b"` was accepted; the grammar requires S
@@ -2703,7 +2710,7 @@ impl<'a> Parser<'a> {
             raw_attrs[n_raw].value_off = value_off;
             n_raw += 1;
         }
-        let empty = if self.starts_with(b"/>") {
+        let empty = if self.at_empty_tag_end() {
             self.pos += 2;
             self.col += 2;
             true

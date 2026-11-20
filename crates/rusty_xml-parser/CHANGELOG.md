@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.4](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-parser-v0.10.3...rusty_xml-parser-v0.10.4) - 2026-11-20
+
+### Other
+
+- *(parser)* say why relifetime collects through filter_map ([#80](https://github.com/Remade-With-Rust/rusty_xml/pull/80))
+- *(parser)* measured size of the thread's pools ([#80](https://github.com/Remade-With-Rust/rusty_xml/pull/80))
+- *(parser)* raw attribute slots kept across parses, buffers in slot order ([#80](https://github.com/Remade-With-Rust/rusty_xml/pull/80))
+- *(parser)* per-parse setup without allocations ([#80](https://github.com/Remade-With-Rust/rusty_xml/pull/80))
+- *(parser)* namespace declarations reuse their frames and buffers ([#80](https://github.com/Remade-With-Rust/rusty_xml/pull/80))
+- *(parser)* one-shot parses start from the thread's last buffers ([#80](https://github.com/Remade-With-Rust/rusty_xml/pull/80))
+
 ## [0.10.3](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-parser-v0.10.2...rusty_xml-parser-v0.10.3) - 2026-11-20
 
 ### Added

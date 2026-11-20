@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.4](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-v0.10.3...rusty_xml-v0.10.4) - 2026-11-20
+
+### Other
+
+- one-shot parses on the thread's pools match fresh parses ([#80](https://github.com/Remade-With-Rust/rusty_xml/pull/80))
+
 ## [0.10.3](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-v0.10.2...rusty_xml-v0.10.3) - 2026-11-20
 
 ### Added

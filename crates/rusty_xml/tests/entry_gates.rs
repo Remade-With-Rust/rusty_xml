@@ -6,14 +6,16 @@
 //! case does not apply to is listed with the reason.
 //!
 //! Entries: the HTML parser, the XML parser, SAX (with and without
-//! `XML_PARSE_NO_TREE`), push, the reader, `xml_parse_dtd`, XInclude.
+//! `XML_PARSE_NO_TREE`, and through one reused `XmlSaxParser`), push, the
+//! reader, `xml_parse_dtd`, XInclude.
 
 use rusty_xml::{
     default_parse_options, html_read_memory_with, xml_create_push_parser_ctxt,
     xml_parse_chunk, xml_parse_chunk_interruptible, xml_parse_dtd, xml_parse_dtd_with,
     xml_read_memory, xml_read_memory_with, xml_reader_for_memory_with, xml_sax_parse_memory_with,
     xml_xinclude_process_with, HtmlParseSettings, NullSax, ParseSettings, XmlDoc, XmlError,
-    XmlParseSettings, XML_ERR_INVALID_ENCODING, XML_ERR_USER_STOP, XML_PARSE_NO_TREE,
+    XmlParseSettings, XmlSaxParser, XML_ERR_INVALID_ENCODING, XML_ERR_USER_STOP,
+    XML_PARSE_NO_TREE,
 };
 use std::cell::Cell;
 use std::time::{Duration, Instant};
@@ -31,6 +33,15 @@ fn xml_entries() -> Vec<(&'static str, XmlEntry)> {
     fn sax_no_tree(b: &[u8], s: &XmlParseSettings<'_>) -> Result<(), XmlError> {
         let o = default_parse_options() | XML_PARSE_NO_TREE;
         xml_sax_parse_memory_with(b, o, &mut NullSax, s).map(drop)
+    }
+    fn sax_reused(b: &[u8], s: &XmlParseSettings<'_>) -> Result<(), XmlError> {
+        // One parser per thread, reused by every case: each gate also runs
+        // after whatever the previous case left behind (#80).
+        thread_local! {
+            static P: std::cell::RefCell<XmlSaxParser> = std::cell::RefCell::new(XmlSaxParser::new());
+        }
+        let o = default_parse_options() | XML_PARSE_NO_TREE;
+        P.with(|p| p.borrow_mut().parse_memory_with(b, o, &mut NullSax, s).map(drop))
     }
     fn reader(b: &[u8], s: &XmlParseSettings<'_>) -> Result<(), XmlError> {
         xml_reader_for_memory_with(b, None, None, default_parse_options(), &ParseSettings::from(*s))
@@ -52,6 +63,7 @@ fn xml_entries() -> Vec<(&'static str, XmlEntry)> {
         ("xml_read_memory_with", tree as XmlEntry),
         ("xml_sax_parse_memory_with", sax),
         ("xml_sax_parse_memory_with + NO_TREE", sax_no_tree),
+        ("XmlSaxParser::parse_memory_with (reused) + NO_TREE", sax_reused),
         ("xml_reader_for_memory_with", reader),
         ("xml_xinclude_process_with (included document)", xinclude),
     ]

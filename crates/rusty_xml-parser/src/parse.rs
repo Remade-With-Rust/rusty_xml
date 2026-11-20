@@ -538,6 +538,17 @@ pub fn xml_sax_parse_memory_with(
     sax: &mut dyn SaxHandler,
     settings: &XmlParseSettings<'_>,
 ) -> Result<XmlDoc, XmlError> {
+    sax_parse(buffer, options, sax, settings, &mut ParsePools::default())
+}
+
+/// The SAX parse behind [`xml_sax_parse_memory_with`] and [`XmlSaxParser`].
+fn sax_parse(
+    buffer: &[u8],
+    options: i32,
+    sax: &mut dyn SaxHandler,
+    settings: &XmlParseSettings<'_>,
+    pools: &mut ParsePools,
+) -> Result<XmlDoc, XmlError> {
     let mut gate = StopGate {
         inner: sax,
         stopped: false,
@@ -547,7 +558,80 @@ pub fn xml_sax_parse_memory_with(
         sax_stop: true,
         recovered: None,
     };
-    parse_doc(buffer, None, None, options, &mut gate, cfg)
+    parse_doc_pooled(buffer, None, None, options, &mut gate, cfg, pools)
+}
+
+/// A SAX parser kept from one document to the next (#80).
+///
+/// [`xml_sax_parse_memory`] starts every parse from empty buffers, so a
+/// program reading many small documents -- the thousands of XML parts in a
+/// DOCX, XLSX or PPTX package -- grows them again for each one. An
+/// `XmlSaxParser` keeps what a parse grew (the namespace scope, the element
+/// stacks, the attribute and text buffers) and starts the next parse from it.
+///
+/// Only capacity is kept: the events, errors and returned document of each
+/// parse are exactly those of [`xml_sax_parse_memory_with`], including after
+/// a parse that failed or was stopped.
+///
+/// ```
+/// use rusty_xml_parser::{default_parse_options, XmlSaxParser, XML_PARSE_NO_TREE};
+/// use rusty_xml_sax::{SaxAttr, SaxHandler};
+///
+/// struct Count(usize);
+/// impl SaxHandler for Count {
+///     fn start_element_ns(&mut self, _: &str, _: Option<&str>, _: Option<&str>,
+///                         _: &[(Option<String>, String)], _: &[SaxAttr], _: i32) {
+///         self.0 += 1;
+///     }
+/// }
+///
+/// let mut parser = XmlSaxParser::new();
+/// let mut count = Count(0);
+/// let opts = default_parse_options() | XML_PARSE_NO_TREE;
+/// for part in [&b"<a><b/></a>"[..], b"<c/>"] {
+///     parser.parse_memory(part, opts, &mut count).unwrap();
+/// }
+/// assert_eq!(count.0, 3);
+/// ```
+#[derive(Default)]
+pub struct XmlSaxParser {
+    pools: ParsePools,
+}
+
+impl std::fmt::Debug for XmlSaxParser {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("XmlSaxParser").finish_non_exhaustive()
+    }
+}
+
+impl XmlSaxParser {
+    /// A parser with nothing grown yet.
+    pub fn new() -> XmlSaxParser {
+        XmlSaxParser::default()
+    }
+
+    /// [`xml_sax_parse_memory`], starting from the buffers earlier parses
+    /// grew.
+    pub fn parse_memory(
+        &mut self,
+        buffer: &[u8],
+        options: i32,
+        sax: &mut dyn SaxHandler,
+    ) -> Result<XmlDoc, XmlError> {
+        self.parse_memory_with(buffer, options, sax, &XmlParseSettings::new())
+    }
+
+    /// [`xml_sax_parse_memory_with`], starting from the buffers earlier
+    /// parses grew.
+    pub fn parse_memory_with(
+        &mut self,
+        buffer: &[u8],
+        options: i32,
+        sax: &mut dyn SaxHandler,
+        settings: &XmlParseSettings<'_>,
+    ) -> Result<XmlDoc, XmlError> {
+        sax_parse(buffer, options, sax, settings, &mut self.pools)
+    }
 }
 
 /// [`xml_sax_parse_memory`] that also polls `interrupt`.
@@ -968,6 +1052,8 @@ fn fresh_parser<'a>(
         scratch_raw: None,
         scratch_sax: None,
         qname_pool: Vec::new(),
+        raw_vals: Vec::new(),
+        open_pool: Vec::new(),
         started: false,
     }
 }
@@ -1109,7 +1195,31 @@ enum NsLoc {
 /// Declarations in scope beyond which lookup uses the prefix index.
 const NS_WALK: usize = 32;
 
+/// Buffers a parse grows that the next parse can start from (#80). Capacity
+/// only: each is empty between parses.
+#[derive(Default)]
+struct ParsePools {
+    ns: NsScope,
+    stack: Vec<NodeId>,
+    char_buf: String,
+    /// Attribute value buffers (the raw attributes themselves borrow the
+    /// input, so only their buffers outlive a parse).
+    raw_vals: Vec<String>,
+    sax: Vec<SaxAttr>,
+    qname_pool: Vec<CompactString>,
+    open: Vec<OpenElem>,
+}
+
 impl NsScope {
+    /// Nothing in scope, capacity kept (#80).
+    fn reset(&mut self) {
+        self.decls.clear();
+        self.keys.clear();
+        self.level = 0;
+        self.count = 0;
+        self.index = None;
+    }
+
     /// An element that declares nothing: a level, and nothing to store.
     #[inline]
     fn enter(&mut self) {
@@ -1372,6 +1482,10 @@ struct Parser<'a> {
     // of those per element were 2.7% of a SAX parse of OOXML (#80).
     scratch_raw: Option<Vec<RawAttr<'a>>>,
     scratch_sax: Option<Vec<SaxAttr>>,
+    /// Spare attribute value buffers, from an earlier parse (#80).
+    raw_vals: Vec<String>,
+    /// The open-element stack's buffer, between parses (#80).
+    open_pool: Vec<OpenElem>,
     /// Heap buffers of closed elements' long QNames, reused by the next
     /// element that opens with one (#69). At most one per nesting level.
     qname_pool: Vec<CompactString>,
@@ -2280,6 +2394,8 @@ impl<'a> Parser<'a> {
             scratch_raw: None,
             scratch_sax: None,
             qname_pool: Vec::new(),
+            raw_vals: Vec::new(),
+            open_pool: Vec::new(),
             started: false,
             no_tree: false,
             recover: self.recover,
@@ -2701,7 +2817,7 @@ impl<'a> Parser<'a> {
             if n_raw == raw_attrs.len() {
                 raw_attrs.push(RawAttr {
                     qname: an,
-                    value: String::new(),
+                    value: self.raw_vals.pop().unwrap_or_default(),
                     value_off: 0,
                 });
             }
@@ -3100,9 +3216,36 @@ impl<'a> Parser<'a> {
     /// descent is an explicit stack and the depth of a document costs no stack
     /// at all.
     fn parse_content(&mut self, parent: NodeId) -> Result<(), XmlError> {
-        let mut open: Vec<OpenElem> = Vec::new();
-        self.parse_content_inner(parent, &mut open, false, false)?;
-        Ok(())
+        let mut open: Vec<OpenElem> = std::mem::take(&mut self.open_pool);
+        let r = self.parse_content_inner(parent, &mut open, false, false);
+        open.clear();
+        self.open_pool = open;
+        r.map(drop)
+    }
+
+    /// The buffers this parse grew, emptied, for the next one (#80).
+    fn take_pools(&mut self) -> ParsePools {
+        let mut ns = std::mem::take(&mut self.ns_stack);
+        ns.reset();
+        let mut stack = std::mem::take(&mut self.stack);
+        stack.clear();
+        let mut char_buf = std::mem::take(&mut self.char_buf);
+        char_buf.clear();
+        let mut raw_vals = std::mem::take(&mut self.raw_vals);
+        if let Some(raw) = self.scratch_raw.take() {
+            raw_vals.extend(raw.into_iter().map(|r| r.value));
+        }
+        let mut open = std::mem::take(&mut self.open_pool);
+        open.clear();
+        ParsePools {
+            ns,
+            stack,
+            char_buf,
+            raw_vals,
+            sax: self.scratch_sax.take().unwrap_or_default(),
+            qname_pool: std::mem::take(&mut self.qname_pool),
+            open,
+        }
     }
 
     fn parse_document(&mut self) -> Result<(), XmlError> {
@@ -3151,6 +3294,8 @@ impl<'a> Parser<'a> {
             scratch_raw: None,
             scratch_sax: None,
             qname_pool: Vec::new(),
+            raw_vals: Vec::new(),
+            open_pool: Vec::new(),
             started: true,
         }
     }
@@ -3558,11 +3703,24 @@ impl<'a> Parser<'a> {
 
 fn parse_doc(
     buffer: &[u8],
+    url: Option<&str>,
+    encoding: Option<&str>,
+    options: i32,
+    sax: &mut dyn SaxHandler,
+    cfg: ParseCfg<'_>,
+) -> Result<XmlDoc, XmlError> {
+    parse_doc_pooled(buffer, url, encoding, options, sax, cfg, &mut ParsePools::default())
+}
+
+/// [`parse_doc`] starting from, and leaving behind, `pools` (#80).
+fn parse_doc_pooled(
+    buffer: &[u8],
     _url: Option<&str>,
     encoding: Option<&str>,
     options: i32,
     sax: &mut dyn SaxHandler,
     cfg: ParseCfg<'_>,
+    pools: &mut ParsePools,
 ) -> Result<XmlDoc, XmlError> {
     if cfg.settings.interrupt.is_some_and(|i| i.is_interrupted()) {
         return Err(crate::error::interrupted_error());
@@ -3571,7 +3729,7 @@ fn parse_doc(
     // blocks (#70).
     let (converted, enc_name) =
         crate::encoding::decode_input(buffer, encoding, true, cfg.settings.interrupt)?;
-    parse_utf8(&converted, enc_name.as_deref(), options, sax, cfg)
+    parse_utf8(&converted, enc_name.as_deref(), options, sax, cfg, pools)
 }
 
 fn parse_utf8(
@@ -3580,8 +3738,18 @@ fn parse_utf8(
     options: i32,
     sax: &mut dyn SaxHandler,
     cfg: ParseCfg<'_>,
+    pools: &mut ParsePools,
 ) -> Result<XmlDoc, XmlError> {
     let options = options | XML_PARSE_NONET | XML_PARSE_NO_XXE;
+    let ParsePools {
+        ns,
+        stack,
+        char_buf,
+        raw_vals,
+        sax: sax_pool,
+        qname_pool,
+        open,
+    } = std::mem::take(pools);
     let mut p = Parser {
         input: buffer,
         src: std::str::from_utf8(buffer).ok(),
@@ -3591,7 +3759,7 @@ fn parse_utf8(
         options,
         old10: (options & XML_PARSE_OLD10) != 0,
         depth: 0,
-        ns_stack: NsScope::default(),
+        ns_stack: ns,
         sax,
         // Reserving a full arena is the dominant cost of a no-tree parse --
         // pre-allocating a tree only to leave it empty.
@@ -3606,8 +3774,8 @@ fn parse_utf8(
                 crate::arena::xml_reserve(buffer)
             },
         ),
-        stack: Vec::new(),
-        char_buf: String::new(),
+        stack,
+        char_buf,
         char_buf_from_reference: false,
         no_tree: (options & XML_PARSE_NO_TREE) != 0,
         recover: (options & XML_PARSE_RECOVER) != 0,
@@ -3619,11 +3787,15 @@ fn parse_utf8(
         depth_cap: xml_depth_cap(&cfg.settings, options),
         scan_hint: None,
         scratch_raw: None,
-        scratch_sax: None,
-        qname_pool: Vec::new(),
+        scratch_sax: Some(sax_pool),
+        qname_pool,
+        raw_vals,
+        open_pool: open,
         started: false,
     };
-    match p.parse_document() {
+    let result = p.parse_document();
+    *pools = p.take_pools();
+    match result {
         Ok(()) => {
             apply_dtd_defaults(&mut p.doc, buffer.len(), options, p.interrupt.as_mut())?;
             normalize_tokenized_attrs(&mut p.doc);

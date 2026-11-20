@@ -965,8 +965,8 @@ fn fresh_parser<'a>(
         interrupted: false,
         depth_cap: xml_depth_cap(&cfg.settings, options),
         scan_hint: None,
-        scratch_raw: Vec::new(),
-        scratch_sax: Vec::new(),
+        scratch_raw: None,
+        scratch_sax: None,
         qname_pool: Vec::new(),
         started: false,
     }
@@ -1363,8 +1363,11 @@ struct Parser<'a> {
     doc: XmlDoc,
     stack: Vec<NodeId>,
     char_buf: String,
-    scratch_raw: Vec<RawAttr<'a>>,
-    scratch_sax: Vec<SaxAttr>,
+    // Optional so that putting a pool back is an inline test of an empty
+    // slot, not an out-of-line drop of the empty Vec `take` left in it: three
+    // of those per element were 2.7% of a SAX parse of OOXML (#80).
+    scratch_raw: Option<Vec<RawAttr<'a>>>,
+    scratch_sax: Option<Vec<SaxAttr>>,
     /// Heap buffers of closed elements' long QNames, reused by the next
     /// element that opens with one (#69). At most one per nesting level.
     qname_pool: Vec<CompactString>,
@@ -2263,8 +2266,8 @@ impl<'a> Parser<'a> {
             stack: Vec::new(),
             char_buf: String::new(),
         char_buf_from_reference: false,
-            scratch_raw: Vec::new(),
-            scratch_sax: Vec::new(),
+            scratch_raw: None,
+            scratch_sax: None,
             qname_pool: Vec::new(),
             started: false,
             no_tree: false,
@@ -2662,7 +2665,7 @@ impl<'a> Parser<'a> {
         // A pool reused across elements, entries past `n_raw` included: each
         // keeps its value buffer, so a value is parsed into capacity an
         // earlier attribute left behind instead of a fresh String (#52).
-        let mut raw_attrs: Vec<RawAttr<'a>> = std::mem::take(&mut self.scratch_raw);
+        let mut raw_attrs: Vec<RawAttr<'a>> = self.scratch_raw.take().unwrap_or_default();
         let mut n_raw = 0usize;
         loop {
             let before_ws = self.pos;
@@ -2709,7 +2712,7 @@ impl<'a> Parser<'a> {
             false
         };
 
-        let mut ns_frame: Vec<(Option<String>, String)> = Vec::new();
+        let mut ns_frame: Option<Vec<(Option<String>, String)>> = None;
         // A namespace declaration is an attribute, and if the DTD declares it
         // as a tokenized type its value is normalized before it means
         // anything. Namespace declarations never reach the attribute chain, so
@@ -2743,7 +2746,8 @@ impl<'a> Parser<'a> {
                 } else if a.value == XMLNS_NS {
                     self.ns_error("xmlns namespace URI cannot be the default namespace");
                 }
-                ns_frame.push((None, normalize_ns(self, a.qname.s, &a.value)));
+                let v = normalize_ns(self, a.qname.s, &a.value);
+                ns_frame.get_or_insert_with(Vec::new).push((None, v));
             } else if ap == Some("xmlns") {
                 if !a.value.is_empty()
                     && !Self::uri_has_scheme(&a.value)
@@ -2777,15 +2781,15 @@ impl<'a> Parser<'a> {
                 if a.value.is_empty() {
                     self.ns_error("Empty XML namespace is not allowed");
                 }
-                ns_frame.push((Some(al.to_string()), normalize_ns(self, a.qname.s, &a.value)));
+                let v = normalize_ns(self, a.qname.s, &a.value);
+                ns_frame.get_or_insert_with(Vec::new).push((Some(al.to_string()), v));
             }
         }
         // The frame is pushed, not copied; the stack owns it and both later
         // readers borrow it back from there.
-        if ns_frame.is_empty() {
-            self.ns_stack.enter();
-        } else {
-            self.ns_stack.push(ns_frame);
+        match ns_frame {
+            None => self.ns_stack.enter(),
+            Some(f) => self.ns_stack.push(f),
         }
 
         // Located once: the check below, the start event, the element node
@@ -2811,7 +2815,7 @@ impl<'a> Parser<'a> {
         let mut seen_qnames: Option<WideSeen> = None;
         // Pooled like `raw_attrs`: the handler sees `sax_attrs[..n_sax]`, and
         // the entries keep their buffers for the next element (#52).
-        let mut sax_attrs: Vec<SaxAttr> = std::mem::take(&mut self.scratch_sax);
+        let mut sax_attrs: Vec<SaxAttr> = self.scratch_sax.take().unwrap_or_default();
         let mut n_sax = 0usize;
         for raw in &mut raw_attrs[..n_raw] {
             let (ap, al) = raw.qname.parts();
@@ -2979,8 +2983,8 @@ impl<'a> Parser<'a> {
             elem
         };
 
-        self.scratch_raw = raw_attrs;
-        self.scratch_sax = sax_attrs;
+        self.scratch_raw = Some(raw_attrs);
+        self.scratch_sax = Some(sax_attrs);
 
         if empty {
             let uri = if self.no_tree {
@@ -3133,8 +3137,8 @@ impl<'a> Parser<'a> {
             interrupted: false,
             depth_cap: xml_depth_cap(&cfg.settings, options),
             scan_hint: st.scan_hint,
-            scratch_raw: Vec::new(),
-            scratch_sax: Vec::new(),
+            scratch_raw: None,
+            scratch_sax: None,
             qname_pool: Vec::new(),
             started: true,
         }
@@ -3603,8 +3607,8 @@ fn parse_utf8(
         interrupted: false,
         depth_cap: xml_depth_cap(&cfg.settings, options),
         scan_hint: None,
-        scratch_raw: Vec::new(),
-        scratch_sax: Vec::new(),
+        scratch_raw: None,
+        scratch_sax: None,
         qname_pool: Vec::new(),
         started: false,
     };

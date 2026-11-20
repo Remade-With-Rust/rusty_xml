@@ -78,6 +78,11 @@ attribute is parsed. Windows, release, four alternating rounds:
 rusty_xml still checks what quick-xml leaves to the caller: name characters,
 namespace bindings, duplicate attributes and attribute-value normalization.
 
+**Many small documents** (the XML parts of a DOCX, XLSX or PPTX package): keep
+one `XmlSaxParser` and call `parse_memory` per part. It starts each parse from
+the buffers the last one grew, with the same events as `xml_sax_parse_memory`;
+on 2,000 PPTX parts that is 2% fewer instructions again (#80).
+
 ---
 
 ### Conformance — where we actually stand

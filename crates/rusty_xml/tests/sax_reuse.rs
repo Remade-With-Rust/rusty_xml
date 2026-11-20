@@ -20,7 +20,13 @@ fn names(events: &[SaxEvent]) -> Vec<String> {
     let mut out = Vec::new();
     for e in events {
         match e {
-            SaxEvent::StartElementNs { local, prefix, uri, attributes, .. } => {
+            SaxEvent::StartElementNs {
+                local,
+                prefix,
+                uri,
+                attributes,
+                ..
+            } => {
                 out.push(format!("<{prefix:?}:{local} {uri:?}"));
                 for a in attributes {
                     out.push(format!("  @{:?}:{} {:?}", a.prefix, a.local, a.uri));
@@ -68,7 +74,11 @@ fn check(xml: &str, want: &[&str]) {
     let no_tree = sax(xml, default_parse_options() | XML_PARSE_NO_TREE);
     assert_eq!(tree, no_tree, "no-tree events differ for {xml}");
     let doc = xml_read_memory(xml.as_bytes(), None, None, default_parse_options()).unwrap();
-    assert_eq!(tree_uris(&doc), sax_uris(&no_tree), "tree URIs differ for {xml}");
+    assert_eq!(
+        tree_uris(&doc),
+        sax_uris(&no_tree),
+        "tree URIs differ for {xml}"
+    );
     assert_eq!(names(&no_tree), want, "for {xml}");
 }
 
@@ -134,9 +144,15 @@ fn the_fixed_prefixes_and_an_unbound_one() {
     let opts = default_parse_options() | XML_PARSE_NO_TREE | XML_PARSE_RECOVER;
     xml_sax_parse_memory(xml.as_bytes(), opts, &mut rec).unwrap();
     let n = names(&rec.events);
-    assert_eq!(n[1], "  @Some(\"xml\"):lang Some(\"http://www.w3.org/XML/1998/namespace\")");
+    assert_eq!(
+        n[1],
+        "  @Some(\"xml\"):lang Some(\"http://www.w3.org/XML/1998/namespace\")"
+    );
     assert_eq!(n[2], "<Some(\"q\"):e None");
-    assert!(rec.events.iter().any(|e| matches!(e, SaxEvent::Error(m) if m.contains("prefix q"))));
+    assert!(rec
+        .events
+        .iter()
+        .any(|e| matches!(e, SaxEvent::Error(m) if m.contains("prefix q"))));
 }
 
 /// Past 32 declarations in scope lookups go through an index; it must agree
@@ -160,7 +176,10 @@ fn many_declarations_in_scope() {
     xml.push_str("</r>");
     let no_tree = sax(&xml, default_parse_options() | XML_PARSE_NO_TREE);
     let n = names(&no_tree);
-    assert!(n.contains(&"<Some(\"p3\"):b Some(\"re3\")".to_string()), "{n:#?}");
+    assert!(
+        n.contains(&"<Some(\"p3\"):b Some(\"re3\")".to_string()),
+        "{n:#?}"
+    );
     assert!(n.contains(&"  @Some(\"p0\"):x Some(\"u0\")".to_string()));
     assert!(n.contains(&"  @Some(\"p39\"):y Some(\"u39\")".to_string()));
     assert!(n.contains(&"<Some(\"p3\"):c Some(\"u3\")".to_string()));
@@ -225,13 +244,21 @@ const DOCS: &[&str] = &[
 ];
 
 fn fresh(xml: &[u8], opts: i32, stop: usize) -> (Vec<SaxEvent>, String) {
-    let mut h = StopAfter { rec: SaxRecorder::new(), starts: 0, after: stop };
+    let mut h = StopAfter {
+        rec: SaxRecorder::new(),
+        starts: 0,
+        after: stop,
+    };
     let r = xml_sax_parse_memory(xml, opts, &mut h);
     (h.rec.events, format!("{:?}", r.map(|d| tree_uris(&d))))
 }
 
 fn reused(p: &mut XmlSaxParser, xml: &[u8], opts: i32, stop: usize) -> (Vec<SaxEvent>, String) {
-    let mut h = StopAfter { rec: SaxRecorder::new(), starts: 0, after: stop };
+    let mut h = StopAfter {
+        rec: SaxRecorder::new(),
+        starts: 0,
+        after: stop,
+    };
     let r = p.parse_memory(xml, opts, &mut h);
     (h.rec.events, format!("{:?}", r.map(|d| tree_uris(&d))))
 }
@@ -281,6 +308,9 @@ fn a_reused_parser_reads_package_shaped_input() {
     let mut p = XmlSaxParser::new();
     for i in 0..200 {
         let xml = part(i);
-        assert_eq!(reused(&mut p, xml.as_bytes(), opts, usize::MAX), fresh(xml.as_bytes(), opts, usize::MAX));
+        assert_eq!(
+            reused(&mut p, xml.as_bytes(), opts, usize::MAX),
+            fresh(xml.as_bytes(), opts, usize::MAX)
+        );
     }
 }

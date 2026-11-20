@@ -1143,6 +1143,12 @@ struct NsScope {
     /// instead of calling `memcmp` on each prefix: OOXML parts bind 3 to 10
     /// prefixes, most of them one byte long (#80).
     keys: Vec<(PrefixKey, NsLoc)>,
+    /// Emptied frames, and the emptied prefix and URI buffers of declarations
+    /// that went out of scope, for the next element that declares something.
+    /// A PPTX part binds 3 to 14 prefixes, a frame and two Strings each, and
+    /// those were half the allocations a reused parse made (#80).
+    spare_frames: Vec<Vec<(Option<String>, String)>>,
+    spare_strs: Vec<String>,
     /// Prefix (`""` for the default namespace) to the positions of its
     /// declarations in scope, innermost last. Present only while `count` is
     /// large.
@@ -1244,13 +1250,43 @@ impl NsScope {
     /// Heap bytes held with nothing in scope (#80).
     fn held_bytes(&self) -> usize {
         use std::mem::size_of;
+        let frames: usize = self.spare_frames.iter().map(Vec::capacity).sum();
         self.decls.capacity() * size_of::<(u32, Vec<(Option<String>, String)>)>()
             + self.keys.capacity() * size_of::<(PrefixKey, NsLoc)>()
+            + self.spare_frames.capacity() * size_of::<Vec<(Option<String>, String)>>()
+            + frames * size_of::<(Option<String>, String)>()
+            + self.spare_strs.capacity() * size_of::<String>()
+            + self.spare_strs.iter().map(String::capacity).sum::<usize>()
+    }
+
+    /// An empty frame for an element's declarations (#80).
+    fn spare_frame(&mut self) -> Vec<(Option<String>, String)> {
+        self.spare_frames.pop().unwrap_or_default()
+    }
+
+    /// An empty buffer for a declaration's prefix or URI (#80).
+    fn spare_str(&mut self) -> String {
+        self.spare_strs.pop().unwrap_or_default()
+    }
+
+    /// Keep a frame that went out of scope, and its buffers, emptied.
+    fn recycle(&mut self, mut frame: Vec<(Option<String>, String)>) {
+        for (prefix, mut uri) in frame.drain(..) {
+            if let Some(mut p) = prefix {
+                p.clear();
+                self.spare_strs.push(p);
+            }
+            uri.clear();
+            self.spare_strs.push(uri);
+        }
+        self.spare_frames.push(frame);
     }
 
     /// Nothing in scope, capacity kept (#80).
     fn reset(&mut self) {
-        self.decls.clear();
+        while let Some((_, frame)) = self.decls.pop() {
+            self.recycle(frame);
+        }
         self.keys.clear();
         self.level = 0;
         self.count = 0;
@@ -1320,6 +1356,7 @@ impl NsScope {
                     self.index = None;
                 }
             }
+            self.recycle(frame);
         }
     }
 
@@ -2892,16 +2929,22 @@ impl<'a> Parser<'a> {
         // prefixes could bind to URIs that are equal only after normalization
         // without ever being noticed as equal.
         let elem_qname = qn.s;
-        let normalize_ns = |p: &Parser, name: &str, value: &str| -> String {
+        // Into `out`, an empty buffer from the scope's pool (#80).
+        let normalize_ns = |p: &Parser, name: &str, value: &str, out: &mut String| {
             let tokenized = p.doc.dtd.as_ref().is_some_and(|d| {
                 d.attributes
                     .get(&(elem_qname.to_string(), name.to_string()))
                     .is_some_and(|a| a.att_type != "CDATA")
             });
             if tokenized {
-                value.split(' ').filter(|t| !t.is_empty()).collect::<Vec<_>>().join(" ")
+                for t in value.split(' ').filter(|t| !t.is_empty()) {
+                    if !out.is_empty() {
+                        out.push(' ');
+                    }
+                    out.push_str(t);
+                }
             } else {
-                value.to_string()
+                out.push_str(value);
             }
         };
         for a in &raw_attrs[..n_raw] {
@@ -2918,8 +2961,11 @@ impl<'a> Parser<'a> {
                 } else if a.value == XMLNS_NS {
                     self.ns_error("xmlns namespace URI cannot be the default namespace");
                 }
-                let v = normalize_ns(self, a.qname.s, &a.value);
-                ns_frame.get_or_insert_with(Vec::new).push((None, v));
+                let mut v = self.ns_stack.spare_str();
+                normalize_ns(self, a.qname.s, &a.value, &mut v);
+                ns_frame
+                    .get_or_insert_with(|| self.ns_stack.spare_frame())
+                    .push((None, v));
             } else if ap == Some("xmlns") {
                 if !a.value.is_empty()
                     && !Self::uri_has_scheme(&a.value)
@@ -2953,8 +2999,13 @@ impl<'a> Parser<'a> {
                 if a.value.is_empty() {
                     self.ns_error("Empty XML namespace is not allowed");
                 }
-                let v = normalize_ns(self, a.qname.s, &a.value);
-                ns_frame.get_or_insert_with(Vec::new).push((Some(al.to_string()), v));
+                let mut v = self.ns_stack.spare_str();
+                normalize_ns(self, a.qname.s, &a.value, &mut v);
+                let mut p = self.ns_stack.spare_str();
+                p.push_str(al);
+                ns_frame
+                    .get_or_insert_with(|| self.ns_stack.spare_frame())
+                    .push((Some(p), v));
             }
         }
         // The frame is pushed, not copied; the stack owns it and both later

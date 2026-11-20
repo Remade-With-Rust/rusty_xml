@@ -3863,9 +3863,9 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
-/// The most a thread keeps between one-shot parses (#80). An OOXML part
-/// leaves 2 to 6 KiB; a document with a long text run or attribute value
-/// leaves more, and its buffers are freed as before.
+/// The most a thread keeps between one-shot parses (#80). The 202 XML parts
+/// of four PPTX files leave 12 KiB; a document with a long text run or
+/// attribute value leaves more, and its buffers are freed as before.
 const THREAD_POOL_MAX_BYTES: usize = 64 * 1024;
 
 /// Run a one-shot parse on this thread's pools. Starting each parse from

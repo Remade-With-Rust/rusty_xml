@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.3](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-v0.10.2...rusty_xml-v0.10.3) - 2026-11-20
+
+### Other
+
+- XmlSaxParser for many small documents ([#80](https://github.com/Remade-With-Rust/rusty_xml/pull/80)); rustfmt sax_reuse.rs
+
 ## [0.10.2](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-v0.10.1...rusty_xml-v0.10.2) - 2026-11-18
 
 ### Other

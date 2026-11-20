@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.3](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-parser-v0.10.2...rusty_xml-parser-v0.10.3) - 2026-11-20
+
+### Added
+
+- *(parser)* XmlSaxParser, a SAX parser reused across documents ([#80](https://github.com/Remade-With-Rust/rusty_xml/pull/80))
+
+### Other
+
+- *(parser)* count a name's colons in the walk, without a branch ([#80](https://github.com/Remade-With-Rust/rusty_xml/pull/80))
+- *(parser)* pack a namespace prefix key without memcpy ([#80](https://github.com/Remade-With-Rust/rusty_xml/pull/80))
+- *(parser)* test for "/>" with two byte compares ([#80](https://github.com/Remade-With-Rust/rusty_xml/pull/80))
+- *(parser)* no out-of-line drop of an empty Vec per element ([#80](https://github.com/Remade-With-Rust/rusty_xml/pull/80))
+- *(parser)* name scan walks the ASCII run as a slice, colons found after ([#80](https://github.com/Remade-With-Rust/rusty_xml/pull/80))
+- *(parser)* keyed namespace lookup; an element that declares nothing only enters a level ([#80](https://github.com/Remade-With-Rust/rusty_xml/pull/80))
+- *(parser)* resolve each element's namespace once; no scope frame for elements that declare nothing ([#80](https://github.com/Remade-With-Rust/rusty_xml/pull/80))
+
 ## [0.10.2](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-parser-v0.10.1...rusty_xml-parser-v0.10.2) - 2026-11-18
 
 ### Other

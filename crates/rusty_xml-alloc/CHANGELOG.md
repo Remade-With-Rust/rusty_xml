@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.6](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-alloc-v0.10.5...rusty_xml-alloc-v0.10.6) - 2026-11-23
+
+### Other
+
+- bump rusty_alloc-api to 2.6.0 ([#90](https://github.com/Remade-With-Rust/rusty_xml/pull/90))
+
 ## [0.10.5](https://github.com/Remade-With-Rust/rusty_xml/compare/rusty_xml-alloc-v0.10.4...rusty_xml-alloc-v0.10.5) - 2026-11-20
 
 ### Fixed
